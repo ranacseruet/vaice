@@ -14,7 +14,7 @@ def _build_cascade() -> Responder:
     from vaice.responders.cascade import CascadeResponder
 
     llm.check_server()
-    tts.load_model()  # load once at startup so the first reply isn't slow
+    tts.warm_up()  # at startup, so the first reply doesn't pay for loading the model and its text pipeline
     return CascadeResponder()
 
 
