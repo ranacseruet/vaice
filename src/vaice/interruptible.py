@@ -1,0 +1,56 @@
+"""fastrtc's ReplyOnPause, minus the stale chunk that plays after a barge-in."""
+import logging
+
+from fastrtc import ReplyOnPause
+from fastrtc.utils import split_output
+
+log = logging.getLogger(__name__)
+
+
+class InterruptSafeReplyOnPause(ReplyOnPause):
+    """Drops the audio chunk that was being generated when the user interrupted the reply.
+
+    fastrtc 0.0.34 (https://github.com/ranacseruet/vaice/issues/2): `receive()` closes the reply
+    generator and clears the playback queue, but `emit()` is usually inside `next(generator)` on
+    another thread, so `close()` fails ("generator already executing", logged at debug) and that
+    `next()` then returns a normal chunk, which is queued after the clear and plays. The reply
+    itself does stop, once CPython finalizes the dropped generator.
+
+    `receive()` sets `self.generator = None` after an interrupt, so an `emit()` that started with
+    another generator (or created its own) and finds none, or a different one, was interrupted
+    while it ran. It returns None instead of the stale audio, which fastrtc skips. Tiny window
+    left: an interrupt landing after that check but before fastrtc queues the chunk still plays it.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        if not hasattr(self, "generator"):  # the attribute the fix relies on; a fastrtc upgrade may drop it
+            raise RuntimeError("fastrtc's ReplyOnPause has no `generator` attribute: InterruptSafeReplyOnPause needs updating")
+
+    def copy(self):
+        """fastrtc copies the handler for each connection, and ReplyOnPause.copy() builds a plain ReplyOnPause."""
+        return type(self)(
+            self.fn,
+            self.startup_fn,
+            self.algo_options,
+            self.model_options,
+            self.can_interrupt,
+            self.expected_layout,
+            self.output_sample_rate,
+            self.output_frame_size,
+            self.input_sample_rate,
+            self.model,
+            self.needs_args,
+        )
+
+    def emit(self):
+        started_with = self.generator
+        output = super().emit()
+        interrupted = self.generator is None or (started_with is not None and self.generator is not started_with)
+        if output is None or not interrupted:
+            return output
+        audio, extra = split_output(output)
+        if audio is None:
+            return output
+        log.debug("dropped a chunk of the interrupted reply")
+        return extra

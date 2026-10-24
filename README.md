@@ -92,7 +92,9 @@ it as a transcript. The **New conversation** button clears it.
   the words of the audio handed out, cut to the share that the time since the first audio could
   have played (fastrtc queues audio ahead of playback). The native model writes its text well
   ahead of its audio, so its text is also split by the share of audio generated. Expect it to be
-  off by a few words ([#2](https://github.com/ranacseruet/vaice/issues/2)).
+  off by a few words. The chunk that was being generated when you interrupted (≈ 0.8 s native, a
+  sentence in cascade) is dropped instead of played; fastrtc would queue it after clearing its
+  playback queue ([#2](https://github.com/ranacseruet/vaice/issues/2)).
 - **Trimming:** each prompt includes at most the last `VAICE_HISTORY_TURNS` exchanges. The oldest
   are dropped in blocks of half that, not one at a time, so the start of the prompt stays the same
   for several turns and llama-server can keep reusing its cached prefix.
@@ -131,6 +133,7 @@ All optional, via environment variables:
 Unit tests use fakes for the models: sentence splitting, SSE parsing (including llama.cpp's
 `"content": null` first chunk), llama-server errors (HTTP and mid-stream), transcripts, history
 trimming and persistence, barge-in recording (driven with fastrtc's thread-per-resume pattern),
+the stale-chunk drop (the real `ReplyOnPause`, interrupted mid-`next()` from another thread),
 cascade streaming order, native chunking/threading/cancellation, backend selection/fallback, and
 env-var parsing. The native tests are skipped where MLX isn't installed. There is
 no automated test against the real models; verify the real audio path by hand with the steps
@@ -141,6 +144,7 @@ above.
 ```
 src/vaice/
   app.py            CLI + Gradio/WebRTC UI; wraps a Responder, logs time to first audio, transcript + reset
+  interruptible.py  ReplyOnPause that drops the chunk generated while the user interrupts (fastrtc 0.0.34 race)
   config.py         env-driven settings
   conversation.py   Turn / Conversation: history, trimming, JSON persistence
   audio.py          mic frame → base64 WAV / float mono

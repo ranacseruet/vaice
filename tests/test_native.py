@@ -180,6 +180,44 @@ def test_abandoning_a_reply_stops_generation_and_frees_the_worker():
     assert model.steps < 2000
 
 
+def test_closing_a_reply_from_another_thread_while_it_is_generating_fails_but_dropping_it_later_stops_the_work():
+    # What fastrtc does on barge-in (#2): receive() calls close() on its thread while emit() is inside
+    # next() on an executor thread. close() raises; the in-flight next() still returns its chunk; the
+    # reply stops only when the generator is finalized afterwards.
+    model = FakeModel(2000, delay=0.02)  # a 10-frame chunk takes ~0.2 s; the full reply would take ~40 s
+    responder = NativeResponder(model, FakeProcessor())
+    gen = responder.respond(AUDIO, [], Turn())
+    next(gen)
+
+    in_flight = {}
+    consumer = threading.Thread(target=lambda: in_flight.setdefault("chunk", next(gen)), name="fastrtc-emit")
+    consumer.start()
+    deadline = time.monotonic() + 10
+    while model.steps < FRAMES_PER_CHUNK + 5 and time.monotonic() < deadline:  # halfway through the second chunk
+        time.sleep(0.001)
+    assert consumer.is_alive()
+
+    closer = {}
+
+    def close_from_receive_thread():
+        try:
+            gen.close()
+        except ValueError as exc:
+            closer["error"] = exc
+
+    receive = threading.Thread(target=close_from_receive_thread, name="fastrtc-receive")
+    receive.start()
+    receive.join(timeout=10)
+    assert "generator already executing" in str(closer["error"])
+
+    consumer.join(timeout=10)
+    assert len(in_flight["chunk"][1]) == FRAMES_PER_CHUNK * SAMPLES_PER_FRAME  # it came back normally
+
+    gen.close()  # CPython finalizing the dropped generator
+    responder._executor.submit(lambda: None).result(timeout=10)  # worker is free for the next request
+    assert model.steps < 2000
+
+
 def test_a_cancelled_reply_does_no_model_work():
     model = FakeModel(100)
     cancelled = threading.Event()

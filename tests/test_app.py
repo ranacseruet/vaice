@@ -10,6 +10,7 @@ from vaice import app
 from vaice import conversation as conv
 from vaice.app import build_stream, make_handler, parse_args
 from vaice.conversation import Conversation
+from vaice.interruptible import InterruptSafeReplyOnPause
 from vaice.responders.cascade import CascadeResponder
 
 AUDIO = (48000, np.zeros((1, 480), dtype=np.int16))
@@ -191,6 +192,13 @@ def test_ui_has_the_transcript_a_reset_button_and_loads_the_stored_conversation(
     conversation.start_turn().set_user_text("hello again")
     stream.ui.fns[clear["id"]].fn()
     assert conversation.messages_for_ui() == []
+
+
+def test_the_stream_drops_the_chunk_a_barge_in_leaves_in_flight():
+    stream = build_stream(FakeResponder(), Conversation())
+
+    assert isinstance(stream.event_handler, InterruptSafeReplyOnPause)
+    assert isinstance(stream.event_handler.copy(), InterruptSafeReplyOnPause)  # fastrtc copies it per connection
 
 
 def test_a_failed_reply_is_finished_not_marked_interrupted():
