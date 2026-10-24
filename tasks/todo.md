@@ -126,3 +126,23 @@ after connecting unless noted.
   a library-global hack that also drops live connections sooner on a real network hiccup; (d) leave as is and document (done in
   README / CLAUDE.md). Recommendation: (d), revisit (b) if
   the 30 s wait annoys in practice. #9: close with the documentation.
+
+## Review (issue #2: stale chunk after barge-in)
+- **Confirmed**, at two levels (fastrtc 0.0.34):
+  - Real `ReplyOnPause` driven with fastrtc's threading (emit on a fresh thread per chunk, receive on another): `close()` raised
+    "generator already executing" (debug log) and the in-flight `emit()` returned the next chunk after `clear_queue()`.
+  - Real app, headless Chromium over real WebRTC, `--backend native`, a long-answer prompt, a fake-mic file with an interrupting
+    question (instrumented `emit`/`_close_generator`, run on :7861): `CLOSE ... mid-next=True`, then exactly one 0.80 s chunk
+    emitted from the closed generator, ~0.14-0.28 s later. The reply's remaining chunks never came (the generator was finalized).
+- **Fix:** `interruptible.py:InterruptSafeReplyOnPause`, a `ReplyOnPause` subclass whose `emit()` returns None (fastrtc skips it)
+  instead of audio when `receive()` replaced `self.generator` while it ran. Same browser run with the fix: `CLOSE ... mid-next=True`,
+  "dropped a chunk of the interrupted reply", `EMIT None`, then the new reply's chunks. Also overrides `copy()` (fastrtc copies the handler
+  per connection and the base builds a plain `ReplyOnPause`).
+- **Tests** (`tests/test_interruptible.py`, plus one each in `test_native.py`, `test_app.py`): 3 of 9 interruptible tests fail with the
+  drop disabled (mid-chunk, interrupt during the very first `next()`, audio+transcript chunk); the rest guard against over-dropping
+  (no interrupt, interrupt between chunks, new reply untouched, transcript-only output kept, `copy()`).
+- **Not verified:** that the stale chunk is audible in a browser (measured on the server, at what `emit()` hands to fastrtc), a real
+  microphone, the cascade backend (same code path; llama-server wasn't used). **Residual:** an interrupt landing between the check in
+  `emit()` and fastrtc queueing the chunk still plays it (microseconds vs the whole `next()`).
+- **Other fastrtc races seen in the source (not reproduced, not touched):** if the in-flight `next()` hits `StopIteration`, `emit()` calls `reset()`, which clears the
+  event and state that the interrupting utterance just set. `clear_queue()` pokes an `asyncio.Queue` from a non-loop thread. Tracked in #13.

@@ -5,10 +5,11 @@ import time
 
 import gradio as gr
 import numpy as np
-from fastrtc import AdditionalOutputs, ReplyOnPause, Stream
+from fastrtc import AdditionalOutputs, Stream
 
 from vaice import config
 from vaice.conversation import Conversation
+from vaice.interruptible import InterruptSafeReplyOnPause
 from vaice.responders import BACKENDS, Responder, create_responder
 
 log = logging.getLogger(__name__)
@@ -45,7 +46,7 @@ def make_handler(responder: Responder, conversation: Conversation):
 def build_stream(responder: Responder, conversation: Conversation) -> Stream:
     chatbot = gr.Chatbot(type="messages", label="Conversation")
     stream = Stream(
-        handler=ReplyOnPause(make_handler(responder, conversation)),
+        handler=InterruptSafeReplyOnPause(make_handler(responder, conversation)),
         modality="audio",
         mode="send-receive",
         additional_outputs=[chatbot],
