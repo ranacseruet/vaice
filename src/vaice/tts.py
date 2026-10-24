@@ -15,6 +15,12 @@ def load_model():
     return _load(config.TTS_MODEL)
 
 
+def warm_up() -> None:
+    """Load the model and synthesize once: Kokoro builds its text pipeline (~3 s) on the first generate."""
+    for _ in speak("Ready."):
+        pass
+
+
 def speak(text: str) -> Iterator[tuple[int, np.ndarray]]:
     """Synthesize text, yielding (sample_rate, float32 samples) chunks."""
     text = clean_for_speech(text)
