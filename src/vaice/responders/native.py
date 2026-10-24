@@ -84,6 +84,8 @@ class NativeResponder:
             cancelled.set()  # consumer stopped early (e.g. user interrupted): free the worker
 
     def _generate(self, audio: AudioFrame, cancelled: threading.Event) -> Iterator[AudioFrame]:
+        if cancelled.is_set():  # abandoned while queued: skip the audio encode + prefill too
+            return
         sample_rate, samples = audio
         # The processor resamples to the model's rate itself
         chat = ChatState(self._processor)

@@ -58,16 +58,17 @@ feed back into the mic.
 The log prints `using native|cascade backend` at startup, and for every reply
 `[native] time to first audio: N.NNs` / `[native] reply finished in N.NNs`, so you can always
 tell which path answered and compare the two backends. A `WARNING ... falling back to cascade`
-means `auto` couldn't load native. Run it once with each
-`--backend` and ask the same question.
+means `auto` couldn't load native; the traceback after it says why. A
+`WARNING ... llama-server not reachable` at startup means cascade replies will fail until
+llama-server is up. Run it once with each `--backend` and ask the same question.
 
 Notes on the native backend: LFM2.5-Audio is a 1.5B model, English only, so expect simpler
 answers than Gemma 12B. Replies are capped at 512 tokens (text and audio frames together);
 if one is cut off, the log says so. Neither backend keeps conversation history; every question
 is answered on its own.
 
-This is a single-user demo. The native model runs on one worker thread shared by all browser
-sessions, so a second tab waits for the first tab's reply to finish.
+This is a single-user demo: fastrtc accepts one WebRTC connection at a time, so a second tab is
+refused (`concurrency_limit_reached`) while the first is connected.
 
 ## Configuration
 
@@ -94,8 +95,8 @@ All optional, via environment variables:
 ```
 
 Unit tests use fakes for the models: sentence splitting, SSE parsing (including llama.cpp's
-`"content": null` first chunk), cascade streaming order, native chunking/threading/cancellation,
-and backend selection/fallback. The native tests are skipped where MLX isn't installed. There is
+`"content": null` first chunk), llama-server errors (HTTP and mid-stream), cascade streaming order,
+native chunking/threading/cancellation, backend selection/fallback, and env-var parsing. The native tests are skipped where MLX isn't installed. There is
 no automated test against the real models; verify the real audio path by hand with the steps
 above.
 
@@ -128,8 +129,10 @@ and register it in `responders/__init__.py`.
   measurably diverged from decoding the whole reply.
 - MLX streams are bound to the thread that created them, but fastrtc resumes the reply
   generator from a different worker thread for each chunk. `NativeResponder` therefore loads
-  and runs the model on one dedicated thread and hands chunks back through a queue. Keep any
-  new MLX-based backend off fastrtc's threads the same way.
+  and runs the model on one dedicated thread and hands chunks back through a queue. The
+  cascade's Kokoro TTS is also MLX and does run on fastrtc's threads; that works only because
+  Kokoro uses MLX's default stream. Put any model that creates its own MLX streams on a single
+  worker thread the same way.
 - Gemma needs the text prompt **before** the audio in the message content.
 - Raw 48 kHz browser audio works as-is on both backends: llama.cpp and the mlx-audio
   processor each resample internally.

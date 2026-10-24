@@ -10,9 +10,10 @@ BACKENDS = ("auto", "cascade", "native")
 
 
 def _build_cascade() -> Responder:
-    from vaice import tts
+    from vaice import llm, tts
     from vaice.responders.cascade import CascadeResponder
 
+    llm.check_server()
     tts.load_model()  # load once at startup so the first reply isn't slow
     return CascadeResponder()
 
@@ -35,7 +36,13 @@ def create_responder(backend: str = config.BACKEND) -> Responder:
         except Exception as exc:
             if backend == "native":
                 raise
-            log.warning("native speech backend unavailable (%s: %s); falling back to cascade", type(exc).__name__, exc)
+            # Traceback included: this also catches bugs and mlx-audio API changes, not just "can't load here"
+            log.warning(
+                "native speech backend unavailable (%s: %s); falling back to cascade",
+                type(exc).__name__,
+                exc,
+                exc_info=True,
+            )
     return _build_cascade()
 
 

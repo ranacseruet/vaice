@@ -49,8 +49,10 @@ class FakeModel:
         self.n_frames, self.with_eos, self.delay, self.fail_after = n_frames, with_eos, delay, fail_after
         self.step_threads = []
         self.steps = 0
+        self.prefilled = False
 
     def generate_from_chat_state(self, chat, **kwargs):
+        self.prefilled = True  # the real model encodes the audio and prefills before its first token
         yield mx.array([5]), LFMModality.TEXT
         for i in range(self.n_frames):
             self.step_threads.append(threading.current_thread().name)
@@ -134,7 +136,7 @@ def test_a_cancelled_reply_does_no_model_work():
     cancelled = threading.Event()
     cancelled.set()
     assert list(NativeResponder(model, FakeProcessor())._generate(AUDIO, cancelled)) == []
-    assert model.steps == 0
+    assert not model.prefilled
 
 
 def test_model_errors_reach_the_caller():
