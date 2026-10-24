@@ -1,5 +1,6 @@
 """Settings, overridable through environment variables."""
 import os
+from pathlib import Path
 
 
 def _number(name: str, default: str, kind: type[int] | type[float]) -> int | float:
@@ -32,3 +33,8 @@ TTS_SPEED = _number("VAICE_SPEED", "1.1", float)
 TTS_SAMPLE_RATE = 24000  # fixed by Kokoro
 
 PORT = _number("VAICE_PORT", "7860", int)
+
+# The conversation is kept here between runs; the last HISTORY_TURNS exchanges go into each prompt
+DATA_DIR = Path(os.getenv("VAICE_DATA_DIR", "~/.vaice")).expanduser()
+CONVERSATION_FILE = DATA_DIR / "conversation.json"
+HISTORY_TURNS = _number("VAICE_HISTORY_TURNS", "10", int)

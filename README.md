@@ -1,14 +1,14 @@
 # vaice
 
-Talk to a local model and hear it answer. Your mic audio goes **directly** to the model
-(no separate speech-to-text step), and the spoken reply streams back as it is generated.
+Talk to a local model and hear it answer; the spoken reply streams back as it is generated.
+The conversation carries over between questions and is kept as text history.
 
 Two interchangeable backends produce the reply:
 
 | Backend | How it works | Strengths |
 |---|---|---|
-| **native** | One speech-to-speech model ([LFM2.5-Audio-1.5B](https://huggingface.co/mlx-community/LFM2.5-Audio-1.5B-8bit) via mlx-audio) turns audio into audio | Fastest: first audio ≈ 0.3 s after you stop talking |
-| **cascade** | Gemma (llama.cpp) hears the audio and streams text; Kokoro speaks each sentence as it completes | Much bigger model (12B) → smarter answers; ≈ 4 s to first audio |
+| **native** | One speech-to-speech model ([LFM2.5-Audio-1.5B](https://huggingface.co/mlx-community/LFM2.5-Audio-1.5B-8bit) via mlx-audio) hears your audio directly and answers in audio | Fastest: first audio ≈ 0.3–0.45 s after you stop talking |
+| **cascade** | Gemma (llama.cpp) transcribes your audio, then replies in text; Kokoro speaks each sentence as it completes | Much bigger model (12B) → smarter answers, better at using the conversation; ≈ 1.5–2.5 s to first audio (≈ 5 s on the first question) |
 
 `auto` (the default) uses native if it loads and falls back to cascade, with a warning, if not.
 
@@ -16,9 +16,12 @@ Two interchangeable backends produce the reply:
 browser mic ─WebRTC─▶ fastrtc (VAD: detects you stopped talking)
                          │  audio
                          ▼
-                  Responder.respond(audio) ──▶ audio chunks ─WebRTC─▶ browser speakers
+                  Responder.respond(audio, history, turn) ──▶ audio chunks ─WebRTC─▶ browser speakers
                    ├─ NativeResponder   mlx-audio speech-to-speech model
-                   └─ CascadeResponder  llama-server :8001 → sentences → Kokoro TTS
+                   └─ CascadeResponder  llama-server :8001 (transcribe, then reply) → sentences → Kokoro TTS
+                         │ both also record your transcript and what they said on `turn`
+                         ▼
+                  Conversation (~/.vaice/conversation.json) ──▶ transcript in the UI
 ```
 
 ## Requirements
@@ -64,8 +67,37 @@ llama-server is up. Run it once with each `--backend` and ask the same question.
 
 Notes on the native backend: LFM2.5-Audio is a 1.5B model, English only, so expect simpler
 answers than Gemma 12B. Replies are capped at 512 tokens (text and audio frames together);
-if one is cut off, the log says so. Neither backend keeps conversation history; every question
-is answered on its own.
+if one is cut off, the log says so.
+
+## Conversation history
+
+Both backends remember the conversation. It is saved to `~/.vaice/conversation.json` (see
+`VAICE_DATA_DIR`) after every change, so it survives page reloads and restarts, and the page shows
+it as a transcript. The **New conversation** button clears it.
+
+- **What the model sees:** earlier turns as plain text. If a transcript is missing or empty,
+  history shows `(inaudible)`.
+  - **native:** the current question as audio. Your side of history is transcribed by LFM's ASR
+    mode on the model's worker thread after the reply is generated, so it doesn't delay the first audio.
+  - **cascade:** a transcript of the current question, so the whole conversation is text. Gemma first
+    transcribes your audio (greedy, ≈ 0.4–0.8 s), then replies to the transcript. Sending the audio
+    straight to Gemma works for a single question, but with earlier turns in the prompt Gemma often
+    misheard the new clip or answered an earlier question; in a measured 10-turn conversation the
+    text route got the follow-ups right ("And what about Germany?", "Multiply that by 10.") where the
+    audio route mostly didn't. If the transcript is empty (a cough, noise), there is no reply.
+  - The 1.5B native model uses the last few turns well but often forgets things said much earlier
+    (e.g. your name from the first turn), even though they are in its prompt.
+- **Barge-in:** if you talk over a reply, it stops when you stop talking, and history keeps the
+  part of the reply that had played, marked `(interrupted)`. That part is estimated, not measured:
+  the words of the audio handed out, cut to the share that the time since the first audio could
+  have played (fastrtc queues audio ahead of playback). The native model writes its text well
+  ahead of its audio, so its text is also split by the share of audio generated. Expect it to be
+  off by a few words ([#2](https://github.com/ranacseruet/vaice/issues/2)).
+- **Trimming:** each prompt includes at most the last `VAICE_HISTORY_TURNS` exchanges. The oldest
+  are dropped in blocks of half that, not one at a time, so the start of the prompt stays the same
+  for several turns and llama-server can keep reusing its cached prefix.
+- A corrupt `conversation.json` is renamed to `conversation.json.corrupt` (with a warning in the log)
+  and a fresh conversation starts.
 
 This is a single-user demo: fastrtc accepts one WebRTC connection at a time, so a second tab is
 refused (`concurrency_limit_reached`) while the first is connected.
@@ -78,11 +110,13 @@ All optional, via environment variables:
 |---|---|---|
 | `VAICE_BACKEND` | `auto` | `auto`, `cascade` or `native` (overridden by `--backend`) |
 | `VAICE_PORT` | `7860` | UI port |
+| `VAICE_DATA_DIR` | `~/.vaice` | where `conversation.json` is kept |
+| `VAICE_HISTORY_TURNS` | `10` | past exchanges included in each prompt (`0` = none); older ones are dropped in blocks |
 | `VAICE_NATIVE_MODEL` | `mlx-community/LFM2.5-Audio-1.5B-8bit` | mlx-audio speech-to-speech model; empty disables native |
 | `VAICE_NATIVE_PROMPT` | `Respond with interleaved text and audio. Reply naturally and concisely in 1 to 2 spoken sentences.` | system prompt for native |
 | `VAICE_LLM_URL` | `http://localhost:8001/v1/chat/completions` | llama-server chat endpoint (cascade) |
 | `VAICE_LLM_MODEL` | `gemma-4-12b` | model name sent in the request (informational for llama-server) |
-| `VAICE_PROMPT` | `Reply naturally and concisely in 1 to 2 spoken sentences.` | instruction sent before the audio (cascade) |
+| `VAICE_PROMPT` | `Reply naturally and concisely in 1 to 2 spoken sentences.` | system prompt for the reply (cascade) |
 | `VAICE_LLM_TIMEOUT` | `120` | seconds (cascade) |
 | `VAICE_TTS_MODEL` | `mlx-community/Kokoro-82M-bf16` | MLX Kokoro repo (cascade) |
 | `VAICE_VOICE` | `af_heart` | Kokoro voice (cascade) |
@@ -95,8 +129,10 @@ All optional, via environment variables:
 ```
 
 Unit tests use fakes for the models: sentence splitting, SSE parsing (including llama.cpp's
-`"content": null` first chunk), llama-server errors (HTTP and mid-stream), cascade streaming order,
-native chunking/threading/cancellation, backend selection/fallback, and env-var parsing. The native tests are skipped where MLX isn't installed. There is
+`"content": null` first chunk), llama-server errors (HTTP and mid-stream), transcripts, history
+trimming and persistence, barge-in recording (driven with fastrtc's thread-per-resume pattern),
+cascade streaming order, native chunking/threading/cancellation, backend selection/fallback, and
+env-var parsing. The native tests are skipped where MLX isn't installed. There is
 no automated test against the real models; verify the real audio path by hand with the steps
 above.
 
@@ -104,22 +140,24 @@ above.
 
 ```
 src/vaice/
-  app.py            CLI + Gradio/WebRTC UI; wraps a Responder, logs time to first audio
+  app.py            CLI + Gradio/WebRTC UI; wraps a Responder, logs time to first audio, transcript + reset
   config.py         env-driven settings
+  conversation.py   Turn / Conversation: history, trimming, JSON persistence
   audio.py          mic frame → base64 WAV / float mono
   responders/
-    base.py         Responder protocol (audio in → audio chunks out)
+    base.py         Responder protocol (audio + history in → audio chunks out; reports transcript and spoken text)
     __init__.py     create_responder(): auto / cascade / native selection + fallback
     cascade.py      llama.cpp text stream → sentences → Kokoro
     native.py       mlx-audio speech-to-speech model
-  llm.py            streaming llama.cpp client (cascade)
+  llm.py            llama.cpp client: streaming reply + transcription (cascade)
   sentences.py      text fragments → sentences; markdown cleanup for TTS (cascade)
   tts.py            Kokoro synthesis (cascade)
 tests/
 tasks/todo.md       plan and review notes for the current change
 ```
 
-To add a backend, implement `respond(audio) -> Iterator[(sample_rate, float32 samples)]`
+To add a backend, implement `respond(audio, history, turn) -> Iterator[(sample_rate, float32 samples)]`
+(see the contract in `responders/base.py`: report what was spoken and the user's transcript on `turn`)
 and register it in `responders/__init__.py`.
 
 ## Notes
@@ -132,8 +170,10 @@ and register it in `responders/__init__.py`.
   and runs the model on one dedicated thread and hands chunks back through a queue. The
   cascade's Kokoro TTS is also MLX and does run on fastrtc's threads; that works only because
   Kokoro uses MLX's default stream. Put any model that creates its own MLX streams on a single
-  worker thread the same way.
-- Gemma needs the text prompt **before** the audio in the message content.
+  worker thread the same way. The native transcription (ASR) runs on that same worker, right after
+  the reply is generated.
+- Gemma needs the text prompt **before** the audio in the message content (the cascade's
+  transcription request).
 - Raw 48 kHz browser audio works as-is on both backends: llama.cpp and the mlx-audio
   processor each resample internally.
 - llama.cpp's `llama-server` only outputs text; it ignores `modalities`/`audio` request
