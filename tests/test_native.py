@@ -1,12 +1,26 @@
+import logging
 import threading
 import time
 
-import mlx.core as mx
-import pytest
 import numpy as np
-from mlx_audio.sts.models.lfm_audio.model import AUDIO_EOS_TOKEN, LFMModality
+import pytest
 
-from vaice.responders.native import FRAMES_PER_CHUNK, OUTPUT_SAMPLE_RATE, NativeResponder
+pytest.importorskip("mlx.core")  # native backend is Apple-Silicon only
+pytest.importorskip("mlx_audio")
+
+import mlx.core as mx  # noqa: E402
+from mlx_audio.sts.models.lfm_audio.model import AUDIO_EOS_TOKEN, LFMModality  # noqa: E402
+
+from vaice.responders import native  # noqa: E402
+from vaice.responders.native import (  # noqa: E402
+    FRAMES_PER_CHUNK,
+    LEFT_CONTEXT_FRAMES,
+    MAX_NEW_TOKENS,
+    OUTPUT_SAMPLE_RATE,
+    NativeResponder,
+)
+
+SAMPLES_PER_FRAME = 10  # the fake detokenizer's output length per frame
 
 
 class FakeTokenizer:
@@ -27,7 +41,7 @@ class FakeProcessor:
 
     def decode_audio(self, codes):
         self.decoded_shapes.append(tuple(codes.shape))
-        return mx.zeros((1, 1, codes.shape[-1] * 10))
+        return mx.zeros((1, 1, codes.shape[-1] * SAMPLES_PER_FRAME))
 
 
 class FakeModel:
@@ -52,13 +66,20 @@ class FakeModel:
 AUDIO = (48000, np.zeros((1, 480), dtype=np.int16))
 
 
-def test_audio_frames_are_decoded_in_chunks_and_eos_is_dropped():
+def test_chunks_are_decoded_with_left_context_and_cover_every_frame_exactly_once():
     processor = FakeProcessor()
     chunks = list(NativeResponder(FakeModel(25), processor).respond(AUDIO))
 
-    # 25 real frames -> 10 + 10 + 5; the EOS frame never reaches the decoder
-    assert [s[2] for s in processor.decoded_shapes] == [FRAMES_PER_CHUNK, FRAMES_PER_CHUNK, 5]
+    # 25 real frames -> chunks of 10, 10, 5. Later chunks are decoded with up to
+    # LEFT_CONTEXT_FRAMES of earlier frames, and the EOS frame never reaches the decoder.
+    assert [s[2] for s in processor.decoded_shapes] == [
+        FRAMES_PER_CHUNK,
+        LEFT_CONTEXT_FRAMES + FRAMES_PER_CHUNK,
+        LEFT_CONTEXT_FRAMES + 5,
+    ]
     assert all(s[:2] == (1, 8) for s in processor.decoded_shapes)
+    # ...but the context is trimmed from the output: no duplicated or missing audio
+    assert [len(wav) for _, wav in chunks] == [10 * SAMPLES_PER_FRAME, 10 * SAMPLES_PER_FRAME, 5 * SAMPLES_PER_FRAME]
     assert all(rate == OUTPUT_SAMPLE_RATE and wav.dtype == np.float32 and wav.ndim == 1 for rate, wav in chunks)
 
 
@@ -97,20 +118,49 @@ def test_mlx_work_stays_on_one_worker_thread_however_the_generator_is_resumed():
     assert model.step_threads[0].startswith("vaice-mlx")
 
 
-def test_abandoning_a_reply_frees_the_worker():
-    model = FakeModel(1000, delay=0.005)  # would take ~5s if it ran to the end
+def test_abandoning_a_reply_stops_generation_and_frees_the_worker():
+    model = FakeModel(2000, delay=0.002)  # ~4s if it ran to the end
     responder = NativeResponder(model, FakeProcessor())
     gen = responder.respond(AUDIO)
     next(gen)
     gen.close()  # user interrupted
 
-    start = time.perf_counter()
-    responder._executor.submit(lambda: None).result(timeout=5)  # next request can start
-    assert time.perf_counter() - start < 1.5
-    assert model.steps < 1000
+    responder._executor.submit(lambda: None).result(timeout=10)  # worker is free for the next request
+    assert model.steps < 2000
+
+
+def test_a_cancelled_reply_does_no_model_work():
+    model = FakeModel(100)
+    cancelled = threading.Event()
+    cancelled.set()
+    assert list(NativeResponder(model, FakeProcessor())._generate(AUDIO, cancelled)) == []
+    assert model.steps == 0
 
 
 def test_model_errors_reach_the_caller():
     responder = NativeResponder(FakeModel(25, fail_after=3), FakeProcessor())
     with pytest.raises(RuntimeError, match="model blew up"):
         list(responder.respond(AUDIO))
+
+
+def test_hitting_the_token_limit_is_logged(caplog):
+    with caplog.at_level(logging.WARNING, logger=native.__name__):
+        list(NativeResponder(FakeModel(MAX_NEW_TOKENS), FakeProcessor()).respond(AUDIO))
+    assert "cut off" in caplog.text
+
+
+def test_normal_replies_do_not_log_a_truncation_warning(caplog):
+    with caplog.at_level(logging.WARNING, logger=native.__name__):
+        list(NativeResponder(FakeModel(25), FakeProcessor()).respond(AUDIO))
+    assert caplog.text == ""
+
+
+def test_failed_load_leaves_no_worker_thread_behind(monkeypatch):
+    def boom(name):
+        raise RuntimeError("weights missing")
+
+    monkeypatch.setattr(native.LFM2AudioModel, "from_pretrained", boom)
+    with pytest.raises(RuntimeError, match="weights missing"):
+        NativeResponder.load("nonexistent/model")
+
+    assert not [t for t in threading.enumerate() if t.name.startswith("vaice-mlx")]

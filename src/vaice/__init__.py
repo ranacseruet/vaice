@@ -1,1 +1,1 @@
-"""Voice demo: mic audio -> local Gemma (llama.cpp) -> streamed Kokoro speech."""
+"""Voice demo: mic audio in, streamed spoken reply out (speech-to-speech model or Gemma + Kokoro cascade)."""

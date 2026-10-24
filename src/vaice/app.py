@@ -27,10 +27,17 @@ def make_handler(responder: Responder):
     return reply
 
 
-def main() -> None:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="vaice", description="Talk to a local model, hear it answer.")
     parser.add_argument("--backend", choices=BACKENDS, default=config.BACKEND, help="default: $VAICE_BACKEND or auto")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
+    if args.backend not in BACKENDS:  # argparse doesn't validate defaults, e.g. from VAICE_BACKEND
+        parser.error(f"invalid backend {args.backend!r} (from VAICE_BACKEND): choose from {', '.join(BACKENDS)}")
+    return args
+
+
+def main() -> None:
+    args = parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     responder = create_responder(args.backend)
