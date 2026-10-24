@@ -14,7 +14,9 @@ connection lingers #3, no lockfile #4, shared MLX-thread wrapper #5, CI + remain
 - [x] CLAUDE.md (from /init, corrected by the audit)
 
 ## Review
-- 41 tests pass; the 11 new ones fail against main's `src/` (one extra guard, "I am 30." still splits, passes on both).
+- 41 tests pass. Against main's `src/`: 8 behavior tests fail (mid-stream error, HTTP reason, fallback traceback,
+  cancelled prefill, 3 splitter/cleanup, plus `_number` rejecting bad input); `check_server` and `_number` defaults
+  fail only because those functions are new; the stream happy path and "I am 30." guard pass on both.
 - Real checks: llama-server 400 now shows `"Failed to load image or audio file"`; a spoken question (Kokoro) → Gemma
   numbered list → 4 clean sentences → 26 s of Kokoro audio; auto with a bogus native model logs the traceback and falls
   back; unreachable llama-server warns at startup; `VAICE_PORT=78x0 vaice` exits 1 with one line; native still loads,

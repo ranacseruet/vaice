@@ -49,6 +49,10 @@ class FakeResponse:
     def iter_lines(self):
         return iter(self._lines)
 
+    def raise_for_status(self):
+        if not self.ok:
+            raise requests.HTTPError(f"{self.status_code} Client Error")
+
 
 def test_http_error_keeps_llama_servers_reason(monkeypatch):
     body = '{"error":{"code":400,"message":"Failed to load image or audio file"}}'
@@ -73,6 +77,7 @@ def test_unreachable_server_is_a_startup_warning(monkeypatch, caplog):
         raise requests.ConnectionError("connection refused")
 
     monkeypatch.setattr(llm.requests, "get", refused)
+    monkeypatch.setattr(llm.config, "LLM_URL", "http://localhost:8001/v1/chat/completions")
     with caplog.at_level(logging.WARNING, logger=llm.__name__):
         llm.check_server()
     assert "not reachable at http://localhost:8001/health" in caplog.text
