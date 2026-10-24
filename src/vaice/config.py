@@ -1,6 +1,17 @@
 """Settings, overridable through environment variables."""
 import os
 
+# auto: native speech-to-speech model if it loads, else the cascade (llama.cpp + Kokoro)
+BACKEND = os.getenv("VAICE_BACKEND", "auto")
+
+# Native backend (mlx-audio speech-to-speech). Empty VAICE_NATIVE_MODEL disables it.
+NATIVE_MODEL = os.getenv("VAICE_NATIVE_MODEL", "mlx-community/LFM2.5-Audio-1.5B-8bit")
+NATIVE_PROMPT = os.getenv(
+    "VAICE_NATIVE_PROMPT",
+    "Respond with interleaved text and audio. Reply naturally and concisely in 1 to 2 spoken sentences.",
+)
+
+# Cascade backend
 LLM_URL = os.getenv("VAICE_LLM_URL", "http://localhost:8001/v1/chat/completions")
 LLM_MODEL = os.getenv("VAICE_LLM_MODEL", "gemma-4-12b")  # llama-server serves one model; name is informational
 LLM_PROMPT = os.getenv("VAICE_PROMPT", "Reply naturally and concisely in 1 to 2 spoken sentences.")
