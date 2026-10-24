@@ -87,9 +87,12 @@ it as a transcript. The **New conversation** button clears it.
     audio route mostly didn't. If the transcript is empty (a cough, noise), there is no reply.
   - The 1.5B native model uses the last few turns well but often forgets things said much earlier
     (e.g. your name from the first turn), even though they are in its prompt.
-- **Barge-in:** if you talk over a reply, it stops and history keeps the text whose audio had been
-  handed out up to that point, marked `(interrupted)`. This is approximate: audio handed to
-  WebRTC has not necessarily been played ([#2](https://github.com/ranacseruet/vaice/issues/2)).
+- **Barge-in:** if you talk over a reply, it stops when you stop talking, and history keeps the
+  part of the reply that had played, marked `(interrupted)`. That part is estimated, not measured:
+  the words of the audio handed out, cut to the share that the time since the first audio could
+  have played (fastrtc queues audio ahead of playback). The native model writes its text well
+  ahead of its audio, so its text is also split by the share of audio generated. Expect it to be
+  off by a few words ([#2](https://github.com/ranacseruet/vaice/issues/2)).
 - **Trimming:** each prompt includes at most the last `VAICE_HISTORY_TURNS` exchanges. The oldest
   are dropped in blocks of half that, not one at a time, so the start of the prompt stays the same
   for several turns and llama-server can keep reusing its cached prefix.

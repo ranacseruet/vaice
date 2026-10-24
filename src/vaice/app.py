@@ -23,11 +23,16 @@ def make_handler(responder: Responder, conversation: Conversation):
         turn = conversation.start_turn()
         history = conversation.history(before=turn)
         first = True
-        for chunk in responder.respond(audio, history, turn):
-            if first:
-                log.info("[%s] time to first audio: %.2fs", responder.name, time.perf_counter() - start)
-                first = False
-            yield chunk
+        try:
+            for chunk in responder.respond(audio, history, turn):
+                if first:
+                    log.info("[%s] time to first audio: %.2fs", responder.name, time.perf_counter() - start)
+                    first = False
+                turn.audio_handed_out(len(chunk[1]) / chunk[0])
+                yield chunk
+        except Exception:
+            turn.finish()  # it failed, the user didn't interrupt it: keep what was said, unmarked
+            raise
         log.info("[%s] reply finished in %.2fs", responder.name, time.perf_counter() - start)
         # Not reached when the reply is interrupted: the next turn marks this one interrupted instead
         turn.finish()

@@ -4,6 +4,7 @@ import logging
 import os
 import tempfile
 import threading
+import time
 from collections.abc import Callable
 from contextlib import AbstractContextManager
 from pathlib import Path
@@ -16,15 +17,22 @@ Message = tuple[str, str]
 TRANSCRIPT_WAIT = 5.0  # seconds history() waits for the previous turn's transcript
 INAUDIBLE = "(inaudible)"
 INTERRUPTED = " (interrupted)"
+_clock = time.monotonic  # when playback started/stopped; tests substitute a fake
 _VERSION = 1
 
 
 class Turn:
-    """One exchange: what the user said, and the part of the reply that was handed out.
+    """One exchange: what the user said, and the part of the reply that was played.
 
     Thread-safe: responders, fastrtc's workers and the UI all touch it. Once closed (the next
     turn started, or the reply finished) the assistant text is frozen, so a generator that
     fastrtc finalizes late can't change history.
+
+    Responders report the text of the audio they handed out, but handed out is not played: fastrtc
+    queues chunks for playback (an unbounded queue, so it can run ahead) and cuts playback only
+    when the user's interrupting utterance ends. So when the next turn starts, close() also
+    compares the time since the first audio with the audio handed out, and keeps only the share
+    of the words that had time to play.
     """
 
     def __init__(self, lock: AbstractContextManager | None = None, on_change: Callable[[], None] | None = None):
@@ -37,6 +45,8 @@ class Turn:
         self.complete = False
         self.closed = threading.Event()  # responders poll this to stop generating
         self.transcribed = threading.Event()
+        self._audio_started: float | None = None  # _clock() when the first audio went out
+        self._audio_seconds = 0.0  # audio handed out so far
 
     def set_user_text(self, text: str) -> None:
         """Always accepted, even after the turn closed: the transcript is not part of the reply."""
@@ -47,10 +57,17 @@ class Turn:
 
     def set_assistant_text(self, text: str) -> None:
         with self._lock:
-            if self.closed.is_set():
+            if self.closed.is_set() or text == self.assistant_text:  # unchanged: skip the save
                 return
             self.assistant_text = text
             self._changed()
+
+    def audio_handed_out(self, seconds: float, now: float | None = None) -> None:
+        """Playback starts with the first chunk and runs in real time from there."""
+        with self._lock:
+            if self._audio_started is None:
+                self._audio_started = _clock() if now is None else now
+            self._audio_seconds += seconds
 
     def finish(self) -> None:
         """The reply ran to the end. A turn already closed (interrupted) stays as it was."""
@@ -61,12 +78,19 @@ class Turn:
             self.closed.set()
             self._changed()
 
-    def close(self) -> None:
-        """Freeze the turn; one that never finished was interrupted."""
+    def close(self, now: float | None = None) -> None:
+        """Freeze the turn. It was interrupted if it never finished, or if its audio was still playing."""
         with self._lock:
+            if self._audio_started is not None:
+                played = (_clock() if now is None else now) - self._audio_started
+                if played < self._audio_seconds:
+                    self.interrupted = True
+                    words = self.assistant_text.split()
+                    self.assistant_text = " ".join(words[: int(len(words) * played / self._audio_seconds)])
             if not self.complete:
                 self.interrupted = True
             self.closed.set()
+            self._changed()
 
     def _changed(self) -> None:
         if self._on_change:
@@ -196,7 +220,8 @@ class Conversation:
             return [Turn.from_dict(t, self._lock, self._save) for t in data["turns"]]
         except FileNotFoundError:
             return []
-        except (OSError, ValueError, KeyError, TypeError) as exc:  # unreadable, not JSON, or not our shape
+        # Not JSON or not our shape. Other read errors (permissions, I/O) propagate: the file may be fine.
+        except (ValueError, KeyError, TypeError) as exc:
             aside = self._path.with_name(self._path.name + ".corrupt")
             os.replace(self._path, aside)
             log.warning("could not read conversation %s (%s: %s); moved it to %s and starting empty",

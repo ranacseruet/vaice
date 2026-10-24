@@ -260,3 +260,43 @@ def test_reset_clears_and_persists_and_detaches_an_in_flight_turn(tmp_path):
     fresh = c.start_turn()
     assert c.history(before=fresh) == []
     assert in_flight.closed.is_set()
+
+
+def test_a_file_that_cant_be_read_is_an_error_not_corruption(tmp_path):
+    path = tmp_path / "conversation.json"
+    path.mkdir()  # reading it raises IsADirectoryError, an OSError like a permission or I/O error
+
+    with pytest.raises(IsADirectoryError):
+        Conversation(path)
+    assert path.is_dir() and not (tmp_path / "conversation.json.corrupt").exists()
+
+
+def test_setting_the_same_assistant_text_again_does_not_save():
+    saves = []
+    turn = Turn(on_change=lambda: saves.append(1))
+    turn.set_assistant_text("Paris.")
+    turn.set_assistant_text("Paris.")
+    assert len(saves) == 1
+
+
+def test_close_keeps_the_share_of_the_reply_that_had_played():
+    turn = Turn()
+    turn.audio_handed_out(4.0, now=10.0)
+    turn.audio_handed_out(4.0, now=10.5)  # 8 s in all, playing from t=10
+    turn.set_assistant_text("a b c d e f g h")
+    turn.finish()  # generation ends long before playback does
+
+    turn.close(now=13.0)  # 3 of 8 s played
+
+    assert turn.interrupted and turn.assistant_text == "a b c"
+
+
+def test_close_after_the_audio_finished_playing_keeps_everything():
+    turn = Turn()
+    turn.audio_handed_out(8.0, now=10.0)
+    turn.set_assistant_text("a b c d e f g h")
+    turn.finish()
+
+    turn.close(now=19.0)
+
+    assert not turn.interrupted and turn.assistant_text == "a b c d e f g h"

@@ -40,6 +40,22 @@ _CONTROL_TOKENS = {AUDIO_START_TOKEN, IM_END_TOKEN, TEXT_END_TOKEN}
 _DONE = object()
 
 
+def _spoken_part(text: str, frames: int, handed_out: int) -> str:
+    """The words of `text` that the first `handed_out` of `frames` audio frames cover (approximate).
+
+    Interleaved generation emits 6 text tokens per 12 audio frames (~1 s), about twice speaking
+    speed, so the text is often complete after the first second of audio. Taking the text
+    generated so far would record a whole reply that was cut off early; split it by the share of
+    audio handed out instead.
+    """
+    if not frames:  # text-only reply: nothing was said
+        return ""
+    if handed_out >= frames:
+        return text
+    words = text.split()
+    return " ".join(words[: round(len(words) * handed_out / frames)])
+
+
 class NativeResponder:
     """Runs every MLX call on one dedicated thread.
 
@@ -79,10 +95,11 @@ class NativeResponder:
     def respond(self, audio: AudioFrame, history: Sequence[Message], turn: Turn) -> Iterator[AudioFrame]:
         chunks: queue.Queue = queue.Queue()
         cancelled = threading.Event()
+        progress = [("", 0)]  # (reply text, audio frames) generated so far; replaced whole by the worker
 
         def work() -> None:
             try:
-                for item in self._generate(audio, history, turn, cancelled):
+                for item in self._generate(audio, history, turn, cancelled, progress):
                     chunks.put(item)
             except BaseException as exc:  # re-raised in the consumer below
                 chunks.put(exc)
@@ -91,13 +108,16 @@ class NativeResponder:
             self._transcribe_into(audio, turn)
 
         self._executor.submit(work)
+        handed_out = 0
         try:
             while (item := chunks.get()) is not _DONE:
                 if isinstance(item, BaseException):
                     raise item
-                frame, text = item
-                turn.set_assistant_text(text)  # text for audio that is being handed out now
+                frame, n_frames = item
+                handed_out += n_frames
+                turn.set_assistant_text(_spoken_part(*progress[0], handed_out))
                 yield frame
+            turn.set_assistant_text(_spoken_part(*progress[0], handed_out))  # all of it, now that it's all out
         finally:
             cancelled.set()  # consumer stopped early (e.g. user interrupted): free the worker
 
@@ -124,9 +144,14 @@ class NativeResponder:
         return self._processor.decode_text(token_ids).strip()
 
     def _generate(
-        self, audio: AudioFrame, history: Sequence[Message], turn: Turn, cancelled: threading.Event
-    ) -> Iterator[tuple[AudioFrame, str]]:
-        """Yield (audio chunk, reply text generated up to the end of that chunk)."""
+        self,
+        audio: AudioFrame,
+        history: Sequence[Message],
+        turn: Turn,
+        cancelled: threading.Event,
+        progress: list[tuple[str, int]],
+    ) -> Iterator[tuple[AudioFrame, int]]:
+        """Yield (audio chunk, frames in it), keeping progress[0] = (reply text, frames) so far."""
 
         def stopped() -> bool:  # abandoned by the consumer, or the next turn has started
             return cancelled.is_set() or turn.closed.is_set()
@@ -154,10 +179,12 @@ class NativeResponder:
                 continue
             frames.append(token)
             if len(frames) - chunk_start == FRAMES_PER_CHUNK:
-                yield self._decode(frames, chunk_start), self._text(text_ids)
+                progress[0] = (self._text(text_ids), len(frames))
+                yield self._decode(frames, chunk_start), len(frames) - chunk_start
                 chunk_start = len(frames)
+        progress[0] = (self._text(text_ids), len(frames))
         if chunk_start < len(frames):
-            yield self._decode(frames, chunk_start), self._text(text_ids)
+            yield self._decode(frames, chunk_start), len(frames) - chunk_start
         if n_tokens >= MAX_NEW_TOKENS:
             log.warning("native reply hit the %d-token limit and was cut off", MAX_NEW_TOKENS)
 

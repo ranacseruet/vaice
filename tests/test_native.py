@@ -184,7 +184,7 @@ def test_a_cancelled_reply_does_no_model_work():
     model = FakeModel(100)
     cancelled = threading.Event()
     cancelled.set()
-    assert list(NativeResponder(model, FakeProcessor())._generate(AUDIO, [], Turn(), cancelled)) == []
+    assert list(NativeResponder(model, FakeProcessor())._generate(AUDIO, [], Turn(), cancelled, [("", 0)])) == []
     assert not model.prefilled
 
 
@@ -253,21 +253,29 @@ def test_a_turn_closed_while_queued_does_no_model_work():
     model = FakeModel(100)
     turn = Turn()
     turn.close()
-    assert list(NativeResponder(model, FakeProcessor())._generate(AUDIO, [], turn, threading.Event())) == []
+    assert list(NativeResponder(model, FakeProcessor())._generate(AUDIO, [], turn, threading.Event(), [("", 0)])) == []
     assert not model.prefilled
 
 
-def test_assistant_text_follows_the_chunks_handed_out_and_leaves_out_control_tokens():
-    text = "Hello there friend, how are you doing today?"
+def test_assistant_text_is_the_share_of_the_reply_covered_by_the_audio_handed_out():
+    text = "Hello there friend, how are you doing today?"  # 8 words
     turn = Turn()
     gen = reply(NativeResponder(FakeModel(25, reply_text=text), FakeProcessor()), turn=turn)
 
-    seen = []
-    for _ in gen:  # 25 frames -> chunks of 10, 10 and 5 frames
-        seen.append(turn.assistant_text)
+    next(gen)  # chunk 1 of 10, 10 and 5 frames
+    assert turn.transcribed.wait(2)  # the worker transcribes after generating: the whole reply is known now
+    next(gen)
+    # 20 of 25 frames handed out -> 6 of 8 words, although all the text was already generated
+    assert turn.assistant_text == "Hello there friend, how are you"
+    list(gen)
+    assert turn.assistant_text == text  # <|text_end|> never shows up
 
-    # one text token is generated per frame, so a chunk's text is what was generated up to its last frame
-    assert seen == [text[:10].strip(), text[:20].strip(), text]  # <|text_end|> never shows up
+
+def test_spoken_part_splits_the_text_by_the_share_of_audio():
+    assert native._spoken_part("one two three four", 40, 10) == "one"
+    assert native._spoken_part("one two three four", 40, 20) == "one two"
+    assert native._spoken_part("one two three four", 40, 40) == "one two three four"
+    assert native._spoken_part("one two", 0, 0) == ""  # no audio, nothing said
 
 
 def test_no_audio_means_no_assistant_text():

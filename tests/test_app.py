@@ -1,3 +1,4 @@
+import itertools
 import logging
 import threading
 
@@ -18,6 +19,9 @@ AUDIO = (48000, np.zeros((1, 480), dtype=np.int16))
 def short_waits(monkeypatch):
     monkeypatch.setattr(conv, "TRANSCRIPT_WAIT", 0.05)
     monkeypatch.setattr(app, "UI_TRANSCRIPT_WAIT", 0.05)
+    # Each clock reading is a minute later, so a reply's audio has always finished playing by the
+    # next turn unless a test says otherwise
+    monkeypatch.setattr(conv, "_clock", itertools.count(0, 60).__next__)
 
 
 class FakeResponder:
@@ -187,3 +191,37 @@ def test_ui_has_the_transcript_a_reset_button_and_loads_the_stored_conversation(
     conversation.start_turn().set_user_text("hello again")
     stream.ui.fns[clear["id"]].fn()
     assert conversation.messages_for_ui() == []
+
+
+def test_a_failed_reply_is_finished_not_marked_interrupted():
+    class Failing(FakeResponder):
+        def respond(self, audio, history, turn):
+            turn.set_user_text("what was asked")
+            turn.set_assistant_text("Half an")
+            yield (24000, np.zeros(1, dtype=np.float32))
+            raise RuntimeError("llama-server fell over")
+
+    conversation = Conversation()
+    with pytest.raises(RuntimeError):
+        list(make_handler(Failing(), conversation)(AUDIO))
+    conversation.start_turn()
+
+    assert conversation.history(before=conversation._turns[-1]) == [("user", "what was asked"), ("assistant", "Half an")]
+
+
+def test_a_reply_whose_audio_is_still_playing_when_the_next_turn_starts_is_cut_to_what_played(monkeypatch):
+    clock = iter([100.0, 102.5])  # first audio at t=100, the next question at t=102.5
+
+    class TenSecondReply(FakeResponder):
+        def respond(self, audio, history, turn):
+            turn.set_user_text("tell me a story")
+            turn.set_assistant_text("one two three four five six seven eight")
+            yield (24000, np.zeros(24000 * 10, dtype=np.float32))  # 10 s, handed out at once like fastrtc pulls it
+
+    monkeypatch.setattr(conv, "_clock", lambda: next(clock))
+    conversation = Conversation()
+    list(make_handler(TenSecondReply(), conversation)(AUDIO))  # the generator finished: all audio handed out
+    second = conversation.start_turn()
+
+    # 2.5 of 10 s played -> 2 of 8 words
+    assert conversation.history(before=second) == [("user", "tell me a story"), ("assistant", "one two (interrupted)")]
