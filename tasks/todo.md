@@ -94,6 +94,39 @@ Conclusion: build it in-house (~300-500 lines), no new framework. mlx-audio alre
   scipy. The cause is unclear; no change made.
 - Not verified: a real human voice through a real microphone.
 
+## Review (#3 reload refused, #9 reload console errors)
+Measured in headless Chromium (fake mic file, real WebRTC), native backend, fastrtc with DEBUG logging; waits are 3-15 s
+after connecting unless noted.
+- **#3 refuted for reload.** Reload while connected: the old peer connection logged `connectionState closed` 10 ms after the
+  navigation (Chrome closes it), and the reloaded page's offer was accepted 2.1-2.6 s after the reload started (that is the
+  reload itself plus the script's 1.5 s mic click; no `concurrency_limit_reached`), 19 of 19 reloads with the chatbot app and 12 of 12 without (idle, mid-reply, 15 s in).
+- **The real residual case is an abrupt disconnect, not a reload.** When the page's peer connection is not closed (the tab
+  closed through Playwright, or the browser closed), the server holds the slot until aioice gives up on the consent checks (6
+  failures x ~5 s). A fresh page retrying every ~4.3 s was first accepted at: +28.7 s (`page.close()`), +32.9 s (`page.close()`,
+  repeat), +28.6 s (`page.close({runBeforeUnload: true})`), +33.1 s (whole browser closed). Server-log timestamps of
+  three earlier accidental orphans (browser closed at the end of a script) show the connection going to `closed` 28.7, 30.5 and
+  ~30 s later. These are headless Chromium via Playwright; a real headed Chrome tab close was not measured.
+- **Raw refusals in the early scratch logs are not reload failures.** The first detector (`/webrtc/offer`) was wrong (Gradio posts offers to
+  `/gradio_api/component_server/`), so the early `REFUSED` lines were 15 s timeouts; and a `wait8` run was refused for 23.7 s after its
+  reload only because the previous script's `browser.close()` had left an orphan connection (its page never got its own connection).
+  All numbers above come from runs that started with a free slot and ended with `about:blank` first so the connection closed cleanly.
+- **#9 confirmed as a harmless client-side log.** `AbortError: BodyStreamBuffer was aborted` + `Unexpected error Connection
+  errored out.` appear in the old document ~1 ms after the reload starts, from Gradio's JS client: the only request in flight
+  was `GET /gradio_api/queue/data` (the SSE event stream) and the client logs `console.error("Unexpected error", ...)` for a
+  `broken_connection` message. With the chatbot/`additional_outputs`: 10 of 17 reloads logged it (5/5 and 1/2 reloading 3 s after
+  connecting, 3/3 at 15 s, 1/1 at 10 s; 0/6 when reloading just as a reply started, not explained). Same app without the chatbot (scratch
+  launcher, handler's `AdditionalOutputs` dropped): 0 of 12 reloads. Server side: no error beyond fastrtc DEBUG
+  "Exception sending msg" on the closed data channel. After the reload the stored conversation is shown and a new connection works and the transcript keeps updating
+  (fresh data dir: 1 user + 1 bot bubble before the reload, 3 + 3 eighteen seconds after reconnecting and one more exchange).
+- **Decision: no code change.** Neither problem is fixable in vaice without a product choice or hacking Gradio's client. Options
+  for the residual #3 case, if wanted: (a) `concurrency_limit=2` (or `None`): reopens one `Conversation` and one MLX worker shared
+  by simultaneous sessions, and does not free the dead connection, only lets a new one in beside it; (b) evict the previous
+  connection when a new offer arrives ("newest tab wins"): small, but reaches into fastrtc internals (`pcs`, `clean_up`) and
+  silently kicks a live second tab; (c) shorten the wait by patching aioice's module globals `CONSENT_FAILURES` / `CONSENT_INTERVAL`:
+  a library-global hack that also drops live connections sooner on a real network hiccup; (d) leave as is and document (done in
+  README / CLAUDE.md). Recommendation: (d), revisit (b) if
+  the 30 s wait annoys in practice. #9: close with the documentation.
+
 ## Review (issue #2: stale chunk after barge-in)
 - **Confirmed**, at two levels (fastrtc 0.0.34):
   - Real `ReplyOnPause` driven with fastrtc's threading (emit on a fresh thread per chunk, receive on another): `close()` raised
@@ -112,4 +145,4 @@ Conclusion: build it in-house (~300-500 lines), no new framework. mlx-audio alre
   microphone, the cascade backend (same code path; llama-server wasn't used). **Residual:** an interrupt landing between the check in
   `emit()` and fastrtc queueing the chunk still plays it (microseconds vs the whole `next()`).
 - **Other fastrtc races seen in the source (not reproduced, not touched):** if the in-flight `next()` hits `StopIteration`, `emit()` calls `reset()`, which clears the
-  event and state that the interrupting utterance just set. `clear_queue()` pokes an `asyncio.Queue` from a non-loop thread. Both unreported upstream.
+  event and state that the interrupting utterance just set. `clear_queue()` pokes an `asyncio.Queue` from a non-loop thread. Tracked in #13.

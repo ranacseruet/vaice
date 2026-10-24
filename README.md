@@ -104,6 +104,18 @@ it as a transcript. The **New conversation** button clears it.
 This is a single-user demo: fastrtc accepts one WebRTC connection at a time, so a second tab is
 refused (`concurrency_limit_reached`) while the first is connected.
 
+- **Reloading the page** is fine: the browser closes the old connection as it navigates, and the
+  reloaded page connects again straight away (measured, also mid-reply).
+- **A browser that disappears without closing its connection** (measured in headless Chromium: tab closed
+  via Playwright, with and without `beforeunload`, or the whole browser closed) sends no goodbye, so the
+  server keeps the connection until its keep-alive checks give up, about 30 s. A connect attempt in that
+  window is refused with `concurrency_limit_reached`; try again after it. Presumably the same after a crash
+  or a network drop; not measured with a real, headed browser.
+- Reloading while connected can log `AbortError: BodyStreamBuffer was aborted` and
+  `Unexpected error Connection errored out.` in the browser console. That is Gradio's JS client reporting
+  the event stream that carries transcript updates being cut by the navigation. It has no server-side effect
+  and nothing breaks; the page reloads the stored conversation and reconnects.
+
 ## Configuration
 
 All optional, via environment variables:
