@@ -116,6 +116,10 @@ and register it in `responders/__init__.py`.
 
 ## Notes
 
+- MLX streams are bound to the thread that created them, but fastrtc resumes the reply
+  generator from a different worker thread for each chunk. `NativeResponder` therefore loads
+  and runs the model on one dedicated thread and hands chunks back through a queue. Keep any
+  new MLX-based backend off fastrtc's threads the same way.
 - Gemma needs the text prompt **before** the audio in the message content.
 - Raw 48 kHz browser audio works as-is on both backends: llama.cpp and the mlx-audio
   processor each resample internally.

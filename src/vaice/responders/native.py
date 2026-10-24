@@ -1,5 +1,8 @@
 """Native backend: one speech-to-speech model (mlx-audio) turns audio into audio directly."""
+import queue
+import threading
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 
 import mlx.core as mx
 import numpy as np
@@ -16,21 +19,61 @@ FRAMES_PER_CHUNK = 10
 MAX_NEW_TOKENS = 512
 
 
+_DONE = object()
+
+
 class NativeResponder:
-    def __init__(self, model, processor, prompt: str = config.NATIVE_PROMPT):
+    """Runs every MLX call on one dedicated thread.
+
+    MLX streams are bound to the thread that created them, but fastrtc resumes our
+    generator from whichever worker thread is free on each chunk. So the model is
+    loaded and run on a single worker, and respond() only passes chunks back through
+    a queue.
+    """
+
+    def __init__(self, model, processor, prompt: str = config.NATIVE_PROMPT, executor: ThreadPoolExecutor | None = None):
         self._model = model
         self._processor = processor
         self._prompt = prompt
+        self._executor = executor or ThreadPoolExecutor(max_workers=1, thread_name_prefix="vaice-mlx")
 
     @classmethod
     def load(cls, model_name: str = config.NATIVE_MODEL) -> "NativeResponder":
-        responder = cls(LFM2AudioModel.from_pretrained(model_name), LFM2AudioProcessor.from_pretrained(model_name))
+        executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="vaice-mlx")
+        model, processor = executor.submit(
+            lambda: (LFM2AudioModel.from_pretrained(model_name), LFM2AudioProcessor.from_pretrained(model_name))
+        ).result()
+        responder = cls(model, processor, executor=executor)
         # The first generation costs ~2s extra (kernel compilation); pay it at startup, not on the first question
         for _ in responder.respond((16000, np.zeros((1, 8000), dtype=np.int16))):
             pass
         return responder
 
     def respond(self, audio: AudioFrame) -> Iterator[AudioFrame]:
+        chunks: queue.Queue = queue.Queue()
+        cancelled = threading.Event()
+
+        def work() -> None:
+            try:
+                for chunk in self._generate(audio):
+                    if cancelled.is_set():
+                        return
+                    chunks.put(chunk)
+            except BaseException as exc:  # re-raised in the consumer below
+                chunks.put(exc)
+            finally:
+                chunks.put(_DONE)
+
+        self._executor.submit(work)
+        try:
+            while (item := chunks.get()) is not _DONE:
+                if isinstance(item, BaseException):
+                    raise item
+                yield item
+        finally:
+            cancelled.set()  # consumer stopped early (e.g. user interrupted): free the worker
+
+    def _generate(self, audio: AudioFrame) -> Iterator[AudioFrame]:
         sample_rate, samples = audio
         # The processor resamples to the model's rate itself
         chat = ChatState(self._processor)
