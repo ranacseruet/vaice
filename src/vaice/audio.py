@@ -16,3 +16,10 @@ def to_wav_b64(audio: tuple[int, np.ndarray]) -> str:
     buf = io.BytesIO()
     sf.write(buf, samples.T if samples.ndim > 1 else samples, sample_rate, format="WAV")
     return base64.b64encode(buf.getvalue()).decode("utf-8")
+
+
+def to_mono_float(samples: np.ndarray) -> np.ndarray:
+    """fastrtc int16 (channels, n) or (n,) → float32 mono in [-1, 1]."""
+    scale = 32768.0 if np.issubdtype(samples.dtype, np.integer) else 1.0
+    mono = samples.mean(axis=0) if samples.ndim > 1 else samples  # mean() promotes ints to float64
+    return (mono / scale).astype(np.float32)

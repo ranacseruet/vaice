@@ -1,20 +1,47 @@
-"""Gradio/WebRTC voice UI: pause detection -> Gemma (audio in) -> Kokoro (audio out)."""
+"""Gradio/WebRTC voice UI: pause detection → responder (audio in, audio out)."""
+import argparse
+import logging
+import time
+
 import numpy as np
 from fastrtc import ReplyOnPause, Stream
 
-from vaice import config, tts
-from vaice.audio import to_wav_b64
-from vaice.llm import stream_reply
-from vaice.sentences import split_sentences
+from vaice import config
+from vaice.responders import BACKENDS, Responder, create_responder
+
+log = logging.getLogger(__name__)
 
 
-def reply(audio: tuple[int, np.ndarray]):
-    """Called by ReplyOnPause when the speaker stops; yields audio as each sentence completes."""
-    for sentence in split_sentences(stream_reply(to_wav_b64(audio))):
-        yield from tts.speak(sentence)
+def make_handler(responder: Responder):
+    def reply(audio: tuple[int, np.ndarray]):
+        """Called by ReplyOnPause when the speaker stops; streams audio back as it is produced."""
+        start = time.perf_counter()
+        first = True
+        for chunk in responder.respond(audio):
+            if first:
+                log.info("[%s] time to first audio: %.2fs", responder.name, time.perf_counter() - start)
+                first = False
+            yield chunk
+        log.info("[%s] reply finished in %.2fs", responder.name, time.perf_counter() - start)
+
+    return reply
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(prog="vaice", description="Talk to a local model, hear it answer.")
+    parser.add_argument("--backend", choices=BACKENDS, default=config.BACKEND, help="default: $VAICE_BACKEND or auto")
+    args = parser.parse_args(argv)
+    if args.backend not in BACKENDS:  # argparse doesn't validate defaults, e.g. from VAICE_BACKEND
+        parser.error(f"invalid backend {args.backend!r} (from VAICE_BACKEND): choose from {', '.join(BACKENDS)}")
+    return args
 
 
 def main() -> None:
-    tts.load_model()  # load once at startup so the first reply isn't slow
-    stream = Stream(handler=ReplyOnPause(reply), modality="audio", mode="send-receive")
+    args = parse_args()
+
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+    responder = create_responder(args.backend)
+    log.info("using %s backend", responder.name)
+
+    stream = Stream(handler=ReplyOnPause(make_handler(responder)), modality="audio", mode="send-receive")
     stream.ui.launch(server_port=config.PORT)
