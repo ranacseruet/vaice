@@ -81,3 +81,12 @@ def test_unreachable_server_is_a_startup_warning(monkeypatch, caplog):
     with caplog.at_level(logging.WARNING, logger=llm.__name__):
         llm.check_server()
     assert "not reachable at http://localhost:8001/health" in caplog.text
+
+
+def test_server_still_loading_is_not_a_warning(monkeypatch, caplog):
+    loading = FakeResponse(503, '{"error":{"message":"Loading model"}}')
+    monkeypatch.setattr(llm.requests, "get", lambda *a, **kw: loading)
+    with caplog.at_level(logging.INFO, logger=llm.__name__):
+        llm.check_server()
+    assert "still loading" in caplog.text
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]

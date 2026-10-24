@@ -34,3 +34,24 @@ def test_numbers_ending_a_sentence_still_split():
 
 def test_clean_for_speech_strips_bullets_links_and_strikethrough():
     assert clean_for_speech("- See [the docs](http://x.y) ~~now~~, well-known") == "See the docs now, well-known"
+
+
+def test_etc_ends_a_sentence_only_before_a_capital():
+    assert list(split_sentences(["I like dogs, etc. What about you?"])) == ["I like dogs, etc.", "What about you?"]
+    assert list(split_sentences(["Bring snacks, etc. and drinks."])) == ["Bring snacks, etc. and drinks."]
+
+
+def test_etc_waits_for_the_next_fragment_to_decide():
+    assert list(split_sentences(["I like dogs, etc. ", "What about you?"])) == ["I like dogs, etc.", "What about you?"]
+
+
+def test_initials_do_not_end_a_sentence():
+    assert list(split_sentences(["The U.S. Army came. Yes."])) == ["The U.S. Army came.", "Yes."]
+
+
+def test_a_number_is_never_spoken_on_its_own():
+    assert list(split_sentences(["See fig. 3. Then go home."])) == ["See fig.", "3. Then go home."]
+
+
+def test_clean_for_speech_folds_line_breaks():
+    assert clean_for_speech("1.\nApples") == "1. Apples"

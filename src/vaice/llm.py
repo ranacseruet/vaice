@@ -55,6 +55,11 @@ def check_server() -> None:
     """Warn at startup if llama-server isn't reachable, instead of failing on the first question."""
     health = urljoin(config.LLM_URL, "/health")
     try:
-        requests.get(health, timeout=2).raise_for_status()
+        r = requests.get(health, timeout=2)
     except requests.RequestException as exc:
         log.warning("llama-server not reachable at %s (%s); cascade replies will fail until it is up", health, exc)
+        return
+    if r.status_code == 503:  # llama-server answers 503 "Loading model" until its weights are in
+        log.info("llama-server at %s is still loading its model", health)
+    elif not r.ok:
+        log.warning("llama-server health check at %s returned %d: %s", health, r.status_code, r.text[:200])
