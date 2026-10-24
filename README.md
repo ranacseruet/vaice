@@ -123,7 +123,9 @@ refused (`concurrency_limit_reached`) while the first is connected.
 
 ## Configuration
 
-All optional, via environment variables:
+All optional, via environment variables. To keep them in a file, copy `.env.example` to `.env` (gitignored),
+uncomment what you want to change, and start with `set -a; source .env; set +a; .venv/bin/vaice`;
+vaice does not read `.env` itself.
 
 | Variable | Default | Meaning |
 |---|---|---|
@@ -162,7 +164,7 @@ above.
 src/vaice/
   app.py            CLI + Gradio/WebRTC UI; wraps a Responder, logs time to first audio, transcript + reset
   interruptible.py  ReplyOnPause that drops the chunk generated while the user interrupts (fastrtc 0.0.34 race)
-  config.py         env-driven settings
+  config.py         env-driven settings (.env.example lists them with their defaults)
   conversation.py   Turn / Conversation: history, trimming, JSON persistence
   audio.py          mic frame → base64 WAV / float mono
   responders/

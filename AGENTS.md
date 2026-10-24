@@ -40,4 +40,4 @@ Config is entirely env-driven in `config.py` (`VAICE_*`); `--backend` overrides 
 
 - `tasks/` is local-only and gitignored: `tasks/todo.md` holds the plan/review notes for the current change; `tasks/lessons.md` records lessons after user corrections. Read `lessons.md` at session start if it exists.
 - The cascade is tested against llama.cpp `llama-server` only; keep `llm.py` and the docs honest about that (see README "Cascade backend").
-- Behavior/config changes must update `README.md` (env-var table, layout) in the same change.
+- Behavior/config changes must update `README.md` (env-var table, layout) in the same change. Adding, removing or re-defaulting a `VAICE_*` variable also updates `.env.example`.
