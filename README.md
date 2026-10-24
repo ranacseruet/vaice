@@ -38,6 +38,11 @@ browser mic ─WebRTC─▶ fastrtc (VAD: detects you stopped talking)
     --chat-template-kwargs '{"enable_thinking":false}'
   ```
 
+  **Only llama.cpp `llama-server` is supported and tested.** The cascade sends audio as an OpenAI-style
+  `input_audio` content part and relies on llama-server's `/health` endpoint, so other
+  OpenAI-compatible servers (Ollama, LM Studio, oMLX, …) are untested and may not accept audio at all.
+  Point `VAICE_LLM_URL` at a different host or port if llama-server isn't on `:8001`.
+
 ## Setup
 
 ```bash
@@ -128,7 +133,7 @@ All optional, via environment variables:
 | `VAICE_HISTORY_TURNS` | `10` | past exchanges included in each prompt (`0` = none); older ones are dropped in blocks |
 | `VAICE_NATIVE_MODEL` | `mlx-community/LFM2.5-Audio-1.5B-8bit` | mlx-audio speech-to-speech model; empty disables native |
 | `VAICE_NATIVE_PROMPT` | `Respond with interleaved text and audio. Reply naturally and concisely in 1 to 2 spoken sentences.` | system prompt for native |
-| `VAICE_LLM_URL` | `http://localhost:8001/v1/chat/completions` | llama-server chat endpoint (cascade) |
+| `VAICE_LLM_URL` | `http://localhost:8001/v1/chat/completions` | llama-server chat endpoint (cascade); the `/health` check uses the same host and port. Only llama.cpp is tested |
 | `VAICE_LLM_MODEL` | `gemma-4-12b` | model name sent in the request (informational for llama-server) |
 | `VAICE_PROMPT` | `Reply naturally and concisely in 1 to 2 spoken sentences.` | system prompt for the reply (cascade) |
 | `VAICE_LLM_TIMEOUT` | `120` | seconds (cascade) |
@@ -169,7 +174,6 @@ src/vaice/
   sentences.py      text fragments → sentences; markdown cleanup for TTS (cascade)
   tts.py            Kokoro synthesis (cascade)
 tests/
-tasks/todo.md       plan and review notes for the current change
 ```
 
 To add a backend, implement `respond(audio, history, turn) -> Iterator[(sample_rate, float32 samples)]`
