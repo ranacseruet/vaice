@@ -12,4 +12,6 @@ AudioFrame = tuple[int, np.ndarray]
 class Responder(Protocol):
     """Turns what the user said into audio to play back, streaming as it goes."""
 
+    name: str  # short label shown in logs, e.g. "native"
+
     def respond(self, audio: AudioFrame) -> Iterator[AudioFrame]: ...

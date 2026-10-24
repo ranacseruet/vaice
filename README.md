@@ -55,8 +55,10 @@ The first run downloads models (about a minute, longer for native). When you see
 click record, ask a question, then stop talking. Use headphones, otherwise the speakers
 feed back into the mic.
 
-The log prints `using <Backend> backend` at startup and `time to first audio: N.NNs` for
-every reply, which is the easiest way to compare the two backends. Run it once with each
+The log prints `using native|cascade backend` at startup, and for every reply
+`[native] time to first audio: N.NNs` / `[native] reply finished in N.NNs`, so you can always
+tell which path answered and compare the two backends. A `WARNING ... falling back to cascade`
+means `auto` couldn't load native. Run it once with each
 `--backend` and ask the same question.
 
 Notes on the native backend: LFM2.5-Audio is a 1.5B model, English only, so expect simpler

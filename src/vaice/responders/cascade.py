@@ -8,6 +8,8 @@ from vaice.sentences import split_sentences
 
 
 class CascadeResponder:
+    name = "cascade"
+
     def __init__(
         self,
         stream_reply: Callable[[str], Iterable[str]] = llm.stream_reply,

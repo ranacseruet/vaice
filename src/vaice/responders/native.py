@@ -31,6 +31,8 @@ class NativeResponder:
     a queue.
     """
 
+    name = "native"
+
     def __init__(self, model, processor, prompt: str = config.NATIVE_PROMPT, executor: ThreadPoolExecutor | None = None):
         self._model = model
         self._processor = processor

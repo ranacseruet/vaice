@@ -19,10 +19,10 @@ def make_handler(responder: Responder):
         first = True
         for chunk in responder.respond(audio):
             if first:
-                log.info("time to first audio: %.2fs", time.perf_counter() - start)
+                log.info("[%s] time to first audio: %.2fs", responder.name, time.perf_counter() - start)
                 first = False
             yield chunk
-        log.info("reply finished in %.2fs", time.perf_counter() - start)
+        log.info("[%s] reply finished in %.2fs", responder.name, time.perf_counter() - start)
 
     return reply
 
@@ -34,7 +34,7 @@ def main() -> None:
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     responder = create_responder(args.backend)
-    log.info("using %s backend", type(responder).__name__)
+    log.info("using %s backend", responder.name)
 
     stream = Stream(handler=ReplyOnPause(make_handler(responder)), modality="audio", mode="send-receive")
     stream.ui.launch(server_port=config.PORT)
