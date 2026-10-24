@@ -18,8 +18,9 @@ class Responder(Protocol):
     - as audio is handed out, `turn.set_assistant_text(...)` with the text spoken so far
       (cumulative; text for audio that was never yielded must not be included);
     - `turn.set_user_text(...)` exactly once with the transcript of `audio`, also when the reply
-      fails or is interrupted (on failure: log the exception and set ""). Transcription must not
-      delay the first audio.
+      fails or is interrupted (on failure set "", then log or re-raise), so the next turn's history
+      never waits for it in vain. Transcribing after the reply (native) keeps it off the path to
+      the first audio; transcribing first (cascade) is fine when the reply needs the text.
     `history` holds the earlier turns as text. `turn.closed` is set when the next turn starts;
     a responder may poll it to stop generating.
     """
