@@ -40,6 +40,8 @@ def test_auto_falls_back_to_cascade_with_warning(builders, monkeypatch, caplog):
     with caplog.at_level(logging.WARNING):
         assert responders.create_responder("auto").name == "cascade"
     assert "no metal device" in caplog.text
+    # the traceback is kept: the same path hides real bugs in the native backend
+    assert caplog.records[-1].exc_info is not None
 
 
 def test_explicit_native_does_not_fall_back(builders, monkeypatch):

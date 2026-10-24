@@ -1,6 +1,15 @@
 """Settings, overridable through environment variables."""
 import os
 
+
+def _number(name: str, default: str, kind: type[int] | type[float]) -> int | float:
+    raw = os.getenv(name, default)
+    try:
+        return kind(raw)
+    except ValueError:
+        raise SystemExit(f"vaice: {name} must be a number ({kind.__name__}), got {raw!r}") from None
+
+
 # auto: native speech-to-speech model if it loads, else the cascade (llama.cpp + Kokoro)
 BACKEND = os.getenv("VAICE_BACKEND", "auto")
 
@@ -15,11 +24,11 @@ NATIVE_PROMPT = os.getenv(
 LLM_URL = os.getenv("VAICE_LLM_URL", "http://localhost:8001/v1/chat/completions")
 LLM_MODEL = os.getenv("VAICE_LLM_MODEL", "gemma-4-12b")  # llama-server serves one model; name is informational
 LLM_PROMPT = os.getenv("VAICE_PROMPT", "Reply naturally and concisely in 1 to 2 spoken sentences.")
-LLM_TIMEOUT = float(os.getenv("VAICE_LLM_TIMEOUT", "120"))
+LLM_TIMEOUT = _number("VAICE_LLM_TIMEOUT", "120", float)
 
 TTS_MODEL = os.getenv("VAICE_TTS_MODEL", "mlx-community/Kokoro-82M-bf16")
 TTS_VOICE = os.getenv("VAICE_VOICE", "af_heart")
-TTS_SPEED = float(os.getenv("VAICE_SPEED", "1.1"))
+TTS_SPEED = _number("VAICE_SPEED", "1.1", float)
 TTS_SAMPLE_RATE = 24000  # fixed by Kokoro
 
-PORT = int(os.getenv("VAICE_PORT", "7860"))
+PORT = _number("VAICE_PORT", "7860", int)
