@@ -1,8 +1,8 @@
 # Audit fixes (small, in-repo)
 
 From the full codebase audit. Fixed here: the findings that are small edits to existing files.
-Filed as issues instead: barge-in stale chunk (fastrtc race), page reload refused while the old
-connection lingers, no lockfile, shared MLX-thread wrapper, CI + remaining test gaps.
+Filed as issues instead: barge-in stale chunk (fastrtc race) #2, page reload refused while the old
+connection lingers #3, no lockfile #4, shared MLX-thread wrapper #5, CI + remaining test gaps #6.
 
 - [x] README: a second connection is refused (fastrtc `concurrency_limit=1`), not queued; MLX-thread note matches reality
 - [x] llm: surface llama-server's error body on HTTP errors; raise on an `error` payload mid-stream
