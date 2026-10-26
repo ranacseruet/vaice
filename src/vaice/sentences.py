@@ -10,6 +10,10 @@ _SENTENCE_END = re.compile(r"(?<=[.!?])\s+|\n+")
 _NEVER_AN_END = re.compile(r"(?:\b(?:mr|mrs|ms|dr|prof|st|vs)\.|\b(?:[a-z]\.)+|^\s*\d+\.)\Z", re.IGNORECASE)
 # "etc." ends a sentence only when the next word is capitalized: "dogs, etc. What about you?"
 _END_IF_CAPITAL = re.compile(r"\betc\.\Z", re.IGNORECASE)
+# "a.m."/"p.m." end a sentence only when the next word is capitalized: "at 7 a.m. and then" is one
+# sentence, "at 3 p.m. Tomorrow" is two. (Without this they never end one, so the whole reply was
+# spoken as a single TTS utterance and the first audio only came at the end of it.)
+_AM_PM = re.compile(r"\b(?:a|p)\.m\.\Z", re.IGNORECASE)
 # Markdown a TTS engine would read aloud literally
 _LINK = re.compile(r"\[([^\]]*)\]\([^)]*\)")
 _BULLET = re.compile(r"^\s*[-•]\s+", re.MULTILINE)
@@ -24,9 +28,16 @@ def split_sentences(fragments: Iterable[str]) -> Iterator[str]:
         start = 0
         for end in _SENTENCE_END.finditer(buffer):
             sentence = buffer[start : end.start()]
-            if _NEVER_AN_END.search(sentence):
+            if _AM_PM.search(sentence):
+                # Ends the sentence only before a capitalized word, like "etc.": "at 3 p.m. Tomorrow"
+                # is two sentences, "at 7 a.m. and then" is one.
+                if end.end() == len(buffer):  # next word not streamed yet: decide on the next fragment
+                    break
+                if not buffer[end.end()].isupper():
+                    continue
+            elif _NEVER_AN_END.search(sentence):
                 continue
-            if _END_IF_CAPITAL.search(sentence):
+            elif _END_IF_CAPITAL.search(sentence):
                 if end.end() == len(buffer):  # next word not streamed yet: decide on the next fragment
                     break
                 if not buffer[end.end()].isupper():

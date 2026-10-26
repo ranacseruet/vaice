@@ -53,5 +53,26 @@ def test_a_number_is_never_spoken_on_its_own():
     assert list(split_sentences(["See fig. 3. Then go home."])) == ["See fig.", "3. Then go home."]
 
 
+def test_am_pm_ends_a_sentence_before_a_capital():
+    assert list(split_sentences(["Let's meet at 3 p.m. Tomorrow is Tuesday."])) == [
+        "Let's meet at 3 p.m.",
+        "Tomorrow is Tuesday.",
+    ]
+    assert list(split_sentences(["It is 5 a.m. What time is it?"])) == ["It is 5 a.m.", "What time is it?"]
+
+
+def test_am_pm_does_not_end_a_sentence_before_a_lower_case_word():
+    assert list(split_sentences(["The flight leaves at 7 a.m. and arrives at 9 p.m."])) == [
+        "The flight leaves at 7 a.m. and arrives at 9 p.m."
+    ]
+
+
+def test_am_pm_waits_for_the_next_fragment_to_decide():
+    assert list(split_sentences(["Let's meet at 3 p.m. ", "Tomorrow is Tuesday."])) == [
+        "Let's meet at 3 p.m.",
+        "Tomorrow is Tuesday.",
+    ]
+
+
 def test_clean_for_speech_folds_line_breaks():
     assert clean_for_speech("1.\nApples") == "1. Apples"
