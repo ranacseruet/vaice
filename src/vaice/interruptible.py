@@ -54,3 +54,21 @@ class InterruptSafeReplyOnPause(ReplyOnPause):
             return output
         log.debug("dropped a chunk of the interrupted reply")
         return extra
+
+
+def stop_playing_reply(handler: ReplyOnPause) -> None:
+    """Silence `handler`'s reply in flight, audio and all; safe (and a no-op) if none is playing.
+
+    What receive() does on a barge-in, without waiting for the user to stop talking — for the
+    "New conversation" button, which runs on a Gradio thread like fastrtc's own clean_up does:
+    reset() drops the reply generator (a chunk it is still generating is dropped by emit() above,
+    as on a barge-in) and clears the pause event, so the next reply only starts after the next
+    utterance; the queue clear drops the audio fastrtc had already queued for playback.
+    """
+    if not hasattr(handler, "reset"):  # the internals this relies on; a fastrtc upgrade may restructure them
+        log.warning("cannot stop the reply: fastrtc's ReplyOnPause has no reset()")
+        return
+    handler.reset()
+    clear_queue = getattr(handler, "_clear_queue", None)  # wired up when the audio track starts
+    if clear_queue is not None:
+        clear_queue()

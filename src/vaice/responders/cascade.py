@@ -44,6 +44,8 @@ class CascadeResponder:
         spoken: list[str] = []
         # Each sentence is spoken as soon as it completes, while the LLM keeps generating
         for sentence in split_sentences(self._stream_reply(question, history)):
+            if turn.closed.is_set():  # barge-in, or the conversation was reset mid-reply
+                return
             yield from self._speak(sentence)
             # Only after all its audio was handed out: a reply closed mid-sentence records the sentences before it
             if text := clean_for_speech(sentence):

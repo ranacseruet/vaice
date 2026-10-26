@@ -1,3 +1,5 @@
+"""tests for the native backend"""
+import gc
 import logging
 import threading
 import time
@@ -249,6 +251,15 @@ def test_failed_load_leaves_no_worker_thread_behind(monkeypatch):
         raise RuntimeError("weights missing")
 
     monkeypatch.setattr(native.LFM2AudioModel, "from_pretrained", boom)
+
+    # Earlier tests drop their executors; their idle workers exit on their own, but not
+    # synchronously. Wait (and break any reference cycle holding an executor), so the
+    # assertion below only judges this test's own load failure.
+    gc.collect()
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and [t for t in threading.enumerate() if t.name.startswith("vaice-mlx")]:
+        time.sleep(0.01)
+
     with pytest.raises(RuntimeError, match="weights missing"):
         NativeResponder.load("nonexistent/model")
 

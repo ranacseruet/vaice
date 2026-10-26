@@ -9,12 +9,17 @@ from fastrtc import AdditionalOutputs, Stream
 
 from vaice import config
 from vaice.conversation import Conversation
-from vaice.interruptible import InterruptSafeReplyOnPause
+from vaice.interruptible import InterruptSafeReplyOnPause, stop_playing_reply
 from vaice.responders import BACKENDS, Responder, create_responder
 
 log = logging.getLogger(__name__)
 
 UI_TRANSCRIPT_WAIT = 2.0  # seconds to hold the transcript update for the user's transcript
+ERROR_TEXT_LIMIT = 200  # characters of a failure shown in the UI; the traceback goes to the log
+
+
+def _error_text(exc: Exception) -> str:
+    return " ".join(f"{type(exc).__name__}: {exc}".split())[:ERROR_TEXT_LIMIT]
 
 
 def make_handler(responder: Responder, conversation: Conversation):
@@ -31,9 +36,13 @@ def make_handler(responder: Responder, conversation: Conversation):
                     first = False
                 turn.audio_handed_out(len(chunk[1]) / chunk[0])
                 yield chunk
-        except Exception:
-            turn.finish()  # it failed, the user didn't interrupt it: keep what was said, unmarked
-            raise
+        except Exception as exc:
+            # Swallowed on purpose: fastrtc turns an emit() error into a WebRTCError that kills the
+            # connection's audio task, so re-raising here would leave the page mute until a reload.
+            turn.fail(_error_text(exc))  # what was heard of the reply, plus why it stopped
+            log.exception("[%s] reply failed", responder.name)
+            yield AdditionalOutputs(conversation.messages_for_ui())  # show the error, keep the connection
+            return
         log.info("[%s] reply finished in %.2fs", responder.name, time.perf_counter() - start)
         # Not reached when the reply is interrupted: the next turn marks this one interrupted instead
         turn.finish()
@@ -57,11 +66,13 @@ def build_stream(responder: Responder, conversation: Conversation) -> Stream:
         new_conversation = gr.Button("New conversation")
 
         def reset() -> list:
+            for handler in list(getattr(stream, "handlers", {}).values()):  # per-connection handler copies
+                stop_playing_reply(handler)  # silence a reply in flight; its turn is detached below
             conversation.reset()
             return []
 
         new_conversation.click(reset, outputs=chatbot)
-        chatbot.clear(conversation.reset)  # the chatbot's own trash icon would otherwise only clear the view
+        chatbot.clear(reset)  # the chatbot's own trash icon would otherwise only clear the view
     return stream
 
 

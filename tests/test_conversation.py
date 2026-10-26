@@ -88,7 +88,7 @@ def test_history_is_windowed_and_the_start_is_stable_between_drops():
     c = Conversation(window=4)  # blocks of 2
     starts = []
     for i in range(8):
-        turn = exchange(c, f"q{i}", f"a{i}")
+        exchange(c, f"q{i}", f"a{i}")
         probe = c.start_turn()
         history = c.history(before=probe)
         starts.append(history[0][1])
@@ -101,6 +101,23 @@ def test_window_zero_keeps_no_history():
     c = Conversation(window=0)
     exchange(c, "q", "a")
     assert c.history(before=c.start_turn()) == []
+
+
+def test_window_zero_does_not_wait_for_a_transcript_it_would_discard():
+    c = Conversation(window=0)
+    previous = c.start_turn()  # never transcribed
+
+    class RecordingEvent:
+        waited = False
+
+        def wait(self, timeout=None):
+            self.waited = True
+            return False
+
+    previous.transcribed = RecordingEvent()
+
+    assert c.history(before=c.start_turn()) == []
+    assert not previous.transcribed.waited
 
 
 def test_history_marks_interrupted_replies_and_skips_empty_ones():
@@ -191,6 +208,21 @@ def test_loaded_turn_without_transcript_gets_empty_text_and_is_complete(tmp_path
     assert turn.user_text == "" and turn.complete and turn.closed.is_set() and turn.interrupted
 
 
+def test_a_saved_error_round_trips_and_older_files_without_it_still_load(tmp_path):
+    path = tmp_path / "c.json"
+    c = Conversation(path)
+    failed = c.start_turn()
+    failed.set_user_text("q")
+    failed.fail("boom")
+    loaded = Conversation(path)
+
+    assert loaded._turns[0].error == "boom"
+
+    path.write_text(json.dumps({"version": 1, "turns": [{"user": "q", "assistant": "a", "interrupted": False, "complete": True}]}))
+    (turn,) = Conversation(path)._turns
+    assert turn.error == ""
+
+
 def test_every_change_is_saved_with_no_temp_files_left(tmp_path):
     path = tmp_path / "c.json"
     c = Conversation(path)
@@ -200,7 +232,9 @@ def test_every_change_is_saved_with_no_temp_files_left(tmp_path):
     turn.set_assistant_text("a")
     turn.finish()
 
-    assert json.loads(path.read_text())["turns"] == [{"user": "q", "assistant": "a", "interrupted": False, "complete": True}]
+    assert json.loads(path.read_text())["turns"] == [
+        {"user": "q", "assistant": "a", "error": "", "interrupted": False, "complete": True}
+    ]
     assert os.listdir(tmp_path) == ["c.json"]
 
 
@@ -277,6 +311,31 @@ def test_setting_the_same_assistant_text_again_does_not_save():
     turn.set_assistant_text("Paris.")
     turn.set_assistant_text("Paris.")
     assert len(saves) == 1
+
+
+def test_fail_records_the_error_and_the_missing_transcript_and_finishes():
+    saves = []
+    turn = Turn(on_change=lambda: saves.append(1))
+
+    turn.set_assistant_text("Half an")
+    turn.fail("RuntimeError: llama-server fell over")
+
+    assert (turn.error, turn.user_text, turn.complete) == ("RuntimeError: llama-server fell over", "", True)
+    assert turn.transcribed.is_set() and turn.closed.is_set()
+    assert turn.assistant_text == "Half an" and not turn.interrupted
+    assert len(saves) == 3  # text, error, finish
+
+    turn.fail("again")  # a late failure (e.g. a dropped generator) still records the error
+    assert turn.error == "again"
+    assert len(saves) == 4
+
+
+def test_fail_keeps_a_transcript_the_responder_did_report():
+    turn = Turn()
+    turn.set_user_text("what was asked")
+    turn.fail("boom")
+
+    assert turn.user_text == "what was asked" and turn.error == "boom"
 
 
 def test_close_keeps_the_share_of_the_reply_that_had_played():

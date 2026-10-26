@@ -86,7 +86,8 @@ class NativeResponder:
             turn = Turn()
             for _ in responder.respond((16000, np.zeros((1, 8000), dtype=np.int16)), [], turn):
                 pass
-            turn.transcribed.wait()
+            if not turn.transcribed.wait(60):  # the ASR warm-up; generation itself was consumed above
+                raise RuntimeError("native warm-up transcription did not finish")
         except BaseException:
             executor.shutdown(wait=True)  # don't leave a live worker behind (auto mode falls back to cascade)
             raise

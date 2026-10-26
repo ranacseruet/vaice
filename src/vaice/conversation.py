@@ -41,6 +41,7 @@ class Turn:
         self._on_change = on_change
         self.user_text: str | None = None  # None until transcribed
         self.assistant_text = ""  # cumulative "spoken so far"
+        self.error = ""  # why the reply failed, for the UI only; never sent to the model
         self.interrupted = False
         self.complete = False
         self.closed = threading.Event()  # responders poll this to stop generating
@@ -68,6 +69,17 @@ class Turn:
             if self._audio_started is None:
                 self._audio_started = _clock() if now is None else now
             self._audio_seconds += seconds
+
+    def fail(self, message: str) -> None:
+        """The reply failed. `message` is shown in the UI, never sent to the model; a transcript
+        the responder never reported counts as inaudible so the next turn's history doesn't wait."""
+        with self._lock:
+            self.error = message
+            if self.user_text is None:
+                self.user_text = ""
+                self.transcribed.set()
+            self._changed()
+        self.finish()  # also a no-op if the turn was already closed
 
     def finish(self) -> None:
         """The reply ran to the end. A turn already closed (interrupted) stays as it was."""
@@ -101,6 +113,7 @@ class Turn:
             return {
                 "user": self.user_text,
                 "assistant": self.assistant_text,
+                "error": self.error,
                 "interrupted": self.interrupted,
                 "complete": self.complete,
             }
@@ -111,6 +124,7 @@ class Turn:
         turn = cls(lock, on_change)
         turn.user_text = data["user"] or ""  # never transcribed (e.g. the app stopped first)
         turn.assistant_text = data["assistant"]
+        turn.error = data.get("error", "")  # written by older versions without it
         turn.interrupted = bool(data["interrupted"]) or not data["complete"]
         turn.complete = True
         turn.closed.set()
@@ -173,10 +187,11 @@ class Conversation:
         """The (windowed) messages from the turns before `before`, ready for a model prompt."""
         with self._lock:
             turns = self._turns[: next((i for i, t in enumerate(self._turns) if t is before), 0)]
+            turns = turns[window_start(len(turns), self._window) :]
         if turns:  # its transcript is produced off the critical path; don't leave a hole if it's close
             turns[-1].transcribed.wait(TRANSCRIPT_WAIT)
         with self._lock:
-            return to_messages(turns[window_start(len(turns), self._window) :])
+            return to_messages(turns)
 
     def messages_for_ui(self) -> list[dict]:
         """Every turn in Gradio's chatbot "messages" format, including ones still in progress."""
@@ -185,8 +200,11 @@ class Conversation:
             for turn in self._turns:
                 user = "…" if turn.user_text is None else turn.user_text or INAUDIBLE  # … = still transcribing
                 messages.append({"role": "user", "content": user})
-                if turn.assistant_text:
-                    messages.append({"role": "assistant", "content": _spoken(turn)})
+                spoken = _spoken(turn)
+                if turn.error:  # a failed reply: what was heard of it, plus why it stopped
+                    spoken = f"{spoken} (error: {turn.error})" if spoken else f"(error: {turn.error})"
+                if spoken:
+                    messages.append({"role": "assistant", "content": spoken})
             return messages
 
     def reset(self) -> None:
