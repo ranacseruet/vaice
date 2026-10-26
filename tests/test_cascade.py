@@ -125,7 +125,11 @@ def test_a_closed_turn_is_not_answered():
     turn = Turn()
     turn.close()  # the next turn started (barge-in or reset) while this reply was queued
 
-    list(make(lambda *_: iter(["First one. Second one."]), spoken.append).respond(AUDIO, [], turn))
+    def speak(sentence):
+        spoken.append(sentence)
+        yield chunk()
+
+    list(make(lambda *_: iter(["First one. Second one."]), speak).respond(AUDIO, [], turn))
 
     assert spoken == []  # the LLM stream was abandoned before its first sentence
 

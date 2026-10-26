@@ -39,7 +39,13 @@ def make_handler(responder: Responder, conversation: Conversation):
         except Exception as exc:
             # Swallowed on purpose: fastrtc turns an emit() error into a WebRTCError that kills the
             # connection's audio task, so re-raising here would leave the page mute until a reload.
-            turn.fail(_error_text(exc))  # what was heard of the reply, plus why it stopped
+            try:
+                turn.fail(_error_text(exc))  # what was heard of the reply, plus why it stopped
+            except OSError:
+                # e.g. the conversation file can't be written: the error is still in the turn's
+                # memory and shown below; only the persistence failed. Re-raising would brick the
+                # connection just like the original bug.
+                log.exception("[%s] could not save the failure on the turn", responder.name)
             log.exception("[%s] reply failed", responder.name)
             yield AdditionalOutputs(conversation.messages_for_ui())  # show the error, keep the connection
             return

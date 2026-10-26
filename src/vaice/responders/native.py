@@ -32,6 +32,7 @@ FRAMES_PER_CHUNK = 10
 # chunk edges are audibly rougher.
 LEFT_CONTEXT_FRAMES = FRAMES_PER_CHUNK
 MAX_NEW_TOKENS = 512  # counts text tokens and audio frames together
+WARMUP_ASR_WAIT = 60  # seconds to wait for the warm-up transcription before giving up on the model
 ASR_PROMPT = "Perform ASR."
 ASR_MAX_NEW_TOKENS = 256
 # Control tokens the model emits as text; decode_text would spell them out
@@ -86,11 +87,14 @@ class NativeResponder:
             turn = Turn()
             for _ in responder.respond((16000, np.zeros((1, 8000), dtype=np.int16)), [], turn):
                 pass
-            if not turn.transcribed.wait(60):  # the ASR warm-up; generation itself was consumed above
-                raise RuntimeError("native warm-up transcription did not finish")
         except BaseException:
             executor.shutdown(wait=True)  # don't leave a live worker behind (auto mode falls back to cascade)
             raise
+        if not turn.transcribed.wait(WARMUP_ASR_WAIT):  # the ASR warm-up; generation itself was consumed above
+            # The worker may be stuck inside the ASR call: abandon it rather than hang startup here
+            # (auto mode falls back to cascade; the thread exits on its own if the ASR ever returns).
+            executor.shutdown(wait=False, cancel_futures=True)
+            raise RuntimeError(f"native warm-up transcription did not finish in {WARMUP_ASR_WAIT}s")
         return responder
 
     def respond(self, audio: AudioFrame, history: Sequence[Message], turn: Turn) -> Iterator[AudioFrame]:

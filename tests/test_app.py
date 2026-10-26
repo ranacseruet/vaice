@@ -276,6 +276,36 @@ def test_a_failed_reply_is_logged_with_its_traceback(monkeypatch, caplog):
     assert any(r.exc_info for r in caplog.records)
 
 
+def test_a_failure_that_cannot_be_saved_still_shows_the_error_and_keeps_the_connection(monkeypatch, caplog):
+    class Failing(FakeResponder):
+        def respond(self, audio, history, turn):
+            raise RuntimeError("llama-server fell over")
+
+    conversation = Conversation()
+    calls = []
+    real_save = conversation._save
+
+    def save_that_fails_on_the_second_call():  # start_turn's initial save still works; fail()'s does not
+        if calls:
+            raise OSError("disk full")
+        calls.append(1)
+        real_save()
+
+    monkeypatch.setattr(conversation, "_save", save_that_fails_on_the_second_call)
+
+    with caplog.at_level(logging.ERROR, logger="vaice.app"):
+        *_, update = make_handler(Failing(), conversation)(AUDIO)  # no raise: fastrtc would kill the connection
+
+    assert isinstance(update, AdditionalOutputs)
+    assert update.args == (
+        [
+            {"role": "user", "content": "(inaudible)"},
+            {"role": "assistant", "content": "(error: RuntimeError: llama-server fell over)"},
+        ],
+    )
+    assert "could not save the failure" in caplog.text
+
+
 def test_a_reply_whose_audio_is_still_playing_when_the_next_turn_starts_is_cut_to_what_played(monkeypatch):
     clock = iter([100.0, 102.5])  # first audio at t=100, the next question at t=102.5
 

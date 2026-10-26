@@ -79,7 +79,8 @@ if one is cut off, the log says so.
 Both backends remember the conversation. It is saved to `~/.vaice/conversation.json` (see
 `VAICE_DATA_DIR`) after every change, so it survives page reloads and restarts, and the page shows
 it as a transcript. The **New conversation** button (and the chatbot's trash icon) clears it and
-silences a reply that is still playing or queued.
+silences a reply that is still playing or queued; a question you were half-way through saying when
+you click it is discarded, so say it again.
 
 - **What the model sees:** earlier turns as plain text. If a transcript is missing or empty,
   history shows `(inaudible)`.

@@ -398,3 +398,19 @@ def test_loading_warms_up_both_generation_and_transcription(monkeypatch):
         assert [call[0] for call in model.calls] == ["interleaved", "sequential"]
     finally:
         responder._executor.shutdown(wait=True)
+
+
+def test_a_warm_up_transcription_that_never_finishes_fails_fast(monkeypatch):
+    model = FakeModel(5, asr_delay=0.5)
+    monkeypatch.setattr(native, "WARMUP_ASR_WAIT", 0.01)
+    monkeypatch.setattr(native.LFM2AudioModel, "from_pretrained", lambda name: model)
+    monkeypatch.setattr(native.LFM2AudioProcessor, "from_pretrained", lambda name: FakeProcessor())
+
+    with pytest.raises(RuntimeError, match="warm-up"):
+        NativeResponder.load("fake/model")  # the stuck ASR worker was abandoned, not waited for
+
+    # it finishes (or exits) on its own; the test doesn't leave a worker behind
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and [t for t in threading.enumerate() if t.name.startswith("vaice-mlx")]:
+        time.sleep(0.01)
+    assert not [t for t in threading.enumerate() if t.name.startswith("vaice-mlx")]
