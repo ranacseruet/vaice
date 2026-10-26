@@ -164,7 +164,8 @@ Unit tests use fakes for the models: sentence splitting, SSE parsing (including 
 trimming and persistence, barge-in recording (driven with fastrtc's thread-per-resume pattern),
 the stale-chunk drop and the reset-button stop (the real `ReplyOnPause`, interrupted mid-`next()`
 from another thread), cascade streaming order, native chunking/threading/cancellation and the exit
-path (a model call that never returns must not keep the process alive), backend
+path (a model call that never returns must not keep the process alive), the idle polling throttle
+(the handler must not spin while nobody is talking), backend
 selection/fallback, and env-var parsing. The native tests are skipped where MLX isn't installed.
 There is no automated test against the real models; verify the real audio path by hand with the
 steps above.
@@ -175,7 +176,7 @@ steps above.
 src/vaice/
   app.py            CLI + Gradio/WebRTC UI; wraps a Responder, logs time to first audio, transcript + reset
   interruptible.py  ReplyOnPause that drops the chunk generated while the user interrupts (fastrtc 0.0.34 race);
-                    silences the playing reply for "New conversation"
+                    silences the playing reply for "New conversation"; throttles fastrtc's idle polling
   lifecycle.py      the stop signal: Ctrl+C asks the app and its responders to give up
   config.py         env-driven settings (.env.example lists them with their defaults)
   conversation.py   Turn / Conversation: history, trimming, JSON persistence, failure notes
@@ -207,6 +208,11 @@ and register it in `responders/__init__.py`.
   Kokoro uses MLX's default stream. Put any model that creates its own MLX streams on a single
   worker thread the same way. The native transcription (ASR) runs on that same worker, right after
   the reply is generated.
+- fastrtc polls the reply handler in a tight loop while nobody is talking (`utils.py`:
+  `player_worker_decode`), which burned most of a core (~32k calls/s, measured). An idle
+  `emit()` therefore waits for the pause event instead of returning at once: ~37 calls/s and
+  ~1% of a core. The wait ends as soon as the pause is detected, so the reply still starts
+  right away.
 - The native MLX worker is a **daemon** thread, not a `ThreadPoolExecutor`: at exit the
   interpreter joins a thread pool's workers (`concurrent.futures.thread._python_exit`) and those
   threads are not daemons, so a model call that never returns would keep the app alive. A daemon
