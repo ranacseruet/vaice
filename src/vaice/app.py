@@ -10,6 +10,7 @@ from fastrtc import AdditionalOutputs, Stream
 from vaice import config
 from vaice.conversation import Conversation
 from vaice.interruptible import InterruptSafeReplyOnPause, stop_playing_reply
+from vaice.lifecycle import install_stop_handler, request_stop
 from vaice.responders import BACKENDS, Responder, create_responder
 
 log = logging.getLogger(__name__)
@@ -95,11 +96,18 @@ def main() -> None:
     args = parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
-    responder = create_responder(args.backend)
-    log.info("using %s backend", responder.name)
+    install_stop_handler()  # Ctrl+C: the responders give up, gradio closes the server
+    try:
+        responder = create_responder(args.backend)
+        log.info("using %s backend", responder.name)
 
-    conversation = Conversation(config.CONVERSATION_FILE, window=config.HISTORY_TURNS)
-    log.info("conversation history in %s (%d turns loaded)", config.CONVERSATION_FILE, len(conversation))
+        conversation = Conversation(config.CONVERSATION_FILE, window=config.HISTORY_TURNS)
+        log.info("conversation history in %s (%d turns loaded)", config.CONVERSATION_FILE, len(conversation))
 
-    stream = build_stream(responder, conversation)
-    stream.ui.launch(server_port=config.PORT)
+        stream = build_stream(responder, conversation)
+        stream.ui.launch(server_port=config.PORT)
+    except KeyboardInterrupt:
+        # Ctrl+C while the model was loading: nothing to close, just leave
+        log.info("stopped")
+    finally:
+        request_stop()  # the app is over: don't wait for a model call that may never return

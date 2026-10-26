@@ -1,5 +1,7 @@
+import argparse
 import itertools
 import logging
+import signal
 import threading
 
 import numpy as np
@@ -8,6 +10,7 @@ from fastrtc import AdditionalOutputs
 
 from vaice import app
 from vaice import conversation as conv
+from vaice import lifecycle
 from vaice.app import build_stream, make_handler, parse_args
 from vaice.conversation import Conversation
 from vaice.interruptible import InterruptSafeReplyOnPause
@@ -322,3 +325,31 @@ def test_a_reply_whose_audio_is_still_playing_when_the_next_turn_starts_is_cut_t
 
     # 2.5 of 10 s played -> 2 of 8 words
     assert conversation.history(before=second) == [("user", "tell me a story"), ("assistant", "one two (interrupted)")]
+
+
+def test_main_installs_the_stop_handler_and_asks_the_app_to_stop_when_the_server_is_gone(monkeypatch, tmp_path):
+    """Ctrl+C must reach the responders, and the app must not wait for a stuck model call at exit."""
+    previous = signal.getsignal(signal.SIGINT)
+    launched = []
+
+    class FakeStream:
+        class ui:  # a stand-in for the gradio app
+
+            @staticmethod
+            def launch(server_port):
+                launched.append(server_port)
+
+    monkeypatch.setattr(app, "parse_args", lambda: argparse.Namespace(backend="fake"))
+    monkeypatch.setattr(app, "create_responder", lambda backend: FakeResponder())
+    monkeypatch.setattr(app, "build_stream", lambda responder, conversation: FakeStream())
+    monkeypatch.setattr(app.config, "CONVERSATION_FILE", tmp_path / "conversation.json")
+
+    try:
+        app.main()
+
+        assert signal.getsignal(signal.SIGINT) is not previous  # Ctrl+C is handled
+        assert launched == [app.config.PORT]
+        assert lifecycle.stopping.is_set()  # the server is gone: the responders may give up
+    finally:
+        signal.signal(signal.SIGINT, previous)
+        lifecycle.stopping.clear()
