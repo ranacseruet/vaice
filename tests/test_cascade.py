@@ -66,7 +66,7 @@ def test_spoken_text_grows_with_each_fully_yielded_sentence():
     assert turn.assistant_text == "One fish. Two fish!"  # cleaned for speech, like the audio
 
 
-def test_a_reply_closed_mid_sentence_records_only_the_sentences_fully_yielded():
+def test_a_reply_closed_mid_reply_records_only_the_sentences_fully_yielded():
     turn = Turn()
 
     def speak(sentence):
@@ -80,6 +80,27 @@ def test_a_reply_closed_mid_sentence_records_only_the_sentences_fully_yielded():
     gen.close()
 
     assert turn.assistant_text == "First one."
+
+
+def test_a_reply_stops_at_the_next_sentence_once_the_turn_is_closed():
+    spoken = []
+    turn = Turn()
+
+    def speak(sentence):
+        spoken.append(sentence)
+        yield chunk()
+        yield chunk()
+
+    gen = make(lambda *_: iter(["First one. ", "Second one. ", "Third one."]), speak).respond(AUDIO, [], turn)
+    next(gen), next(gen)  # both chunks of "First one."
+    next(gen)  # records "First one." and hands out the first chunk of "Second one."
+    assert turn.assistant_text == "First one."
+
+    turn.close()  # the user barged in or reset the conversation
+    list(gen)
+
+    assert spoken == ["First one.", "Second one."]  # "Third one." was never spoken or recorded
+    assert turn.assistant_text == "First one."  # "Second one." was mid-sentence at the close
 
 
 def test_the_transcript_is_recorded_before_any_audio():
@@ -97,6 +118,20 @@ def test_an_empty_transcript_gets_no_reply():
     turn = Turn()
     assert list(make(stream_reply, transcribe=lambda _: "").respond(AUDIO, [], turn)) == []
     assert turn.user_text == ""
+
+
+def test_a_closed_turn_is_not_answered():
+    spoken = []
+    turn = Turn()
+    turn.close()  # the next turn started (barge-in or reset) while this reply was queued
+
+    def speak(sentence):
+        spoken.append(sentence)
+        yield chunk()
+
+    list(make(lambda *_: iter(["First one. Second one."]), speak).respond(AUDIO, [], turn))
+
+    assert spoken == []  # the LLM stream was abandoned before its first sentence
 
 
 def test_a_failed_transcription_raises_and_leaves_an_empty_transcript():

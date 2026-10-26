@@ -3,10 +3,9 @@
 import threading
 
 import numpy as np
-import pytest
 from fastrtc import AdditionalOutputs, ReplyOnPause
 
-from vaice.interruptible import InterruptSafeReplyOnPause
+from vaice.interruptible import InterruptSafeReplyOnPause, stop_playing_reply
 
 ONE_SECOND = (48000, np.zeros((1, 48000), dtype=np.int16))  # at least AlgoOptions.audio_chunk_duration
 
@@ -211,3 +210,46 @@ def test_copies_made_per_connection_keep_the_fix():
     assert copy.can_interrupt is False
     assert copy.model is original.model
     assert copy is not original
+
+
+def test_stop_playing_reply_silences_a_reply_in_flight():
+    cleared = []
+    entered, release = threading.Event(), threading.Event()
+
+    def reply(_audio):
+        entered.set()
+        assert release.wait(10)
+        yield chunk(1.0)
+        yield chunk(2.0)
+
+    rig = Rig(InterruptSafeReplyOnPause, reply)
+    rig.handler._clear_queue = lambda: cleared.append(1)
+    rig.user_speaks_then_pauses()
+    emit = rig.start_emit()
+    assert entered.wait(10)
+    release.set()
+    assert emit.join()[1][0] == 1.0  # the reply is playing
+
+    stop_playing_reply(rig.handler)
+
+    assert cleared and rig.handler.generator is None and not rig.handler.event.is_set()
+    assert rig.start_emit().join() is None  # no reply restarts until the next utterance pauses
+
+
+def test_stop_playing_reply_is_a_no_op_when_idle():
+    cleared = []
+    rig = Rig(InterruptSafeReplyOnPause, lambda _audio: iter([]))
+    rig.handler._clear_queue = lambda: cleared.append(1)
+
+    stop_playing_reply(rig.handler)  # nothing was playing: an empty queue clear is harmless
+
+    assert rig.handler.generator is None and not rig.handler.event.is_set()
+    assert rig.start_emit().join() is None
+
+
+def test_stop_playing_reply_without_a_queue_or_reset_does_not_raise():
+    class Bare:
+        pass  # neither reset() nor a wired-up queue: an unconnected handler
+
+    stop_playing_reply(Bare())
+    stop_playing_reply(ReplyOnPause(lambda _audio: iter([]), model=FakeVad()))  # no audio track yet

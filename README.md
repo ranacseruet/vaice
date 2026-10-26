@@ -78,7 +78,9 @@ if one is cut off, the log says so.
 
 Both backends remember the conversation. It is saved to `~/.vaice/conversation.json` (see
 `VAICE_DATA_DIR`) after every change, so it survives page reloads and restarts, and the page shows
-it as a transcript. The **New conversation** button clears it.
+it as a transcript. The **New conversation** button (and the chatbot's trash icon) clears it and
+silences a reply that is still playing or queued; a question you were half-way through saying when
+you click it is discarded, so say it again.
 
 - **What the model sees:** earlier turns as plain text. If a transcript is missing or empty,
   history shows `(inaudible)`.
@@ -105,6 +107,10 @@ it as a transcript. The **New conversation** button clears it.
   for several turns and llama-server can keep reusing its cached prefix.
 - A corrupt `conversation.json` is renamed to `conversation.json.corrupt` (with a warning in the log)
   and a fresh conversation starts.
+- **A failed reply** (llama-server down or a model error) does not end the session: the log gets the
+  traceback, the transcript shows what was heard of the reply plus `(error: …)`, and the next
+  question works. The error note is kept on disk with the turn but is never sent to the model;
+  a question the failed reply never transcribed counts as `(inaudible)`.
 
 This is a single-user demo: fastrtc accepts one WebRTC connection at a time, so a second tab is
 refused (`concurrency_limit_reached`) while the first is connected.
@@ -152,20 +158,21 @@ vaice does not read `.env` itself.
 Unit tests use fakes for the models: sentence splitting, SSE parsing (including llama.cpp's
 `"content": null` first chunk), llama-server errors (HTTP and mid-stream), transcripts, history
 trimming and persistence, barge-in recording (driven with fastrtc's thread-per-resume pattern),
-the stale-chunk drop (the real `ReplyOnPause`, interrupted mid-`next()` from another thread),
-cascade streaming order, native chunking/threading/cancellation, backend selection/fallback, and
-env-var parsing. The native tests are skipped where MLX isn't installed. There is
-no automated test against the real models; verify the real audio path by hand with the steps
-above.
+the stale-chunk drop and the reset-button stop (the real `ReplyOnPause`, interrupted mid-`next()`
+from another thread), cascade streaming order, native chunking/threading/cancellation, backend
+selection/fallback, and env-var parsing. The native tests are skipped where MLX isn't installed.
+There is no automated test against the real models; verify the real audio path by hand with the
+steps above.
 
 ## Layout
 
 ```
 src/vaice/
   app.py            CLI + Gradio/WebRTC UI; wraps a Responder, logs time to first audio, transcript + reset
-  interruptible.py  ReplyOnPause that drops the chunk generated while the user interrupts (fastrtc 0.0.34 race)
+  interruptible.py  ReplyOnPause that drops the chunk generated while the user interrupts (fastrtc 0.0.34 race);
+                    silences the playing reply for "New conversation"
   config.py         env-driven settings (.env.example lists them with their defaults)
-  conversation.py   Turn / Conversation: history, trimming, JSON persistence
+  conversation.py   Turn / Conversation: history, trimming, JSON persistence, failure notes
   audio.py          mic frame → base64 WAV / float mono
   responders/
     base.py         Responder protocol (audio + history in → audio chunks out; reports transcript and spoken text)

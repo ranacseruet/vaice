@@ -201,6 +201,24 @@ def test_the_stream_drops_the_chunk_a_barge_in_leaves_in_flight():
     assert isinstance(stream.event_handler.copy(), InterruptSafeReplyOnPause)  # fastrtc copies it per connection
 
 
+def test_the_reset_button_silences_a_playing_reply(tmp_path):
+    stream = build_stream(FakeResponder(), Conversation())
+    stopped = []
+
+    class PlayingReply:  # a per-connection handler copy, as fastrtc registers it
+        def reset(self):
+            stopped.append("reset")
+
+        _clear_queue = staticmethod(lambda: stopped.append("queue"))
+
+    stream.handlers["connection-1"] = PlayingReply()  # type: ignore[assignment]
+    (button,) = [d for d in stream.ui.get_config_file()["dependencies"] if d["targets"][0][1] == "click"]
+
+    stream.ui.fns[button["id"]].fn()
+
+    assert stopped == ["reset", "queue"]
+
+
 def test_a_failed_reply_is_finished_not_marked_interrupted():
     class Failing(FakeResponder):
         def respond(self, audio, history, turn):
@@ -210,11 +228,82 @@ def test_a_failed_reply_is_finished_not_marked_interrupted():
             raise RuntimeError("llama-server fell over")
 
     conversation = Conversation()
-    with pytest.raises(RuntimeError):
-        list(make_handler(Failing(), conversation)(AUDIO))
-    conversation.start_turn()
+    *chunks, update = make_handler(Failing(), conversation)(AUDIO)  # no raise: fastrtc would kill the connection
 
-    assert conversation.history(before=conversation._turns[-1]) == [("user", "what was asked"), ("assistant", "Half an")]
+    assert len(chunks) == 1
+    assert isinstance(update, AdditionalOutputs)
+    assert update.args == (
+        [
+            {"role": "user", "content": "what was asked"},
+            {"role": "assistant", "content": "Half an (error: RuntimeError: llama-server fell over)"},
+        ],
+    )
+    assert conversation._turns[0].complete and not conversation._turns[0].interrupted
+    assert conversation.history(before=conversation.start_turn()) == [
+        ("user", "what was asked"),
+        ("assistant", "Half an"),  # the error is for the UI, not the model
+    ]
+
+
+def test_a_failed_reply_reports_a_transcript_the_responder_never_gave():
+    class Failing(FakeResponder):
+        def respond(self, audio, history, turn):
+            raise ValueError("transcription exploded")
+
+    conversation = Conversation()
+    list(make_handler(Failing(), conversation)(AUDIO))
+
+    (turn,) = conversation._turns
+    assert turn.user_text == ""  # inaudible in history, not a hole the next reply waits on
+    assert turn.transcribed.is_set()
+    assert turn.error == "ValueError: transcription exploded"
+    assert conversation.messages_for_ui() == [
+        {"role": "user", "content": "(inaudible)"},
+        {"role": "assistant", "content": "(error: ValueError: transcription exploded)"},
+    ]
+
+
+def test_a_failed_reply_is_logged_with_its_traceback(monkeypatch, caplog):
+    class Failing(FakeResponder):
+        def respond(self, audio, history, turn):
+            raise RuntimeError("model blew up")
+
+    conversation = Conversation()
+    with caplog.at_level(logging.ERROR, logger="vaice.app"):
+        list(make_handler(Failing(), conversation)(AUDIO))
+
+    assert "[fake] reply failed" in caplog.text
+    assert any(r.exc_info for r in caplog.records)
+
+
+def test_a_failure_that_cannot_be_saved_still_shows_the_error_and_keeps_the_connection(monkeypatch, caplog):
+    class Failing(FakeResponder):
+        def respond(self, audio, history, turn):
+            raise RuntimeError("llama-server fell over")
+
+    conversation = Conversation()
+    calls = []
+    real_save = conversation._save
+
+    def save_that_fails_on_the_second_call():  # start_turn's initial save still works; fail()'s does not
+        if calls:
+            raise OSError("disk full")
+        calls.append(1)
+        real_save()
+
+    monkeypatch.setattr(conversation, "_save", save_that_fails_on_the_second_call)
+
+    with caplog.at_level(logging.ERROR, logger="vaice.app"):
+        *_, update = make_handler(Failing(), conversation)(AUDIO)  # no raise: fastrtc would kill the connection
+
+    assert isinstance(update, AdditionalOutputs)
+    assert update.args == (
+        [
+            {"role": "user", "content": "(inaudible)"},
+            {"role": "assistant", "content": "(error: RuntimeError: llama-server fell over)"},
+        ],
+    )
+    assert "could not save the failure" in caplog.text
 
 
 def test_a_reply_whose_audio_is_still_playing_when_the_next_turn_starts_is_cut_to_what_played(monkeypatch):
