@@ -161,7 +161,8 @@ vaice does not read `.env` itself.
 Unit tests use fakes for the models: sentence splitting, SSE parsing (including llama.cpp's
 `"content": null` first chunk), llama-server errors (HTTP and mid-stream), transcripts, history
 trimming and persistence (including a disk that can't be written), failed replies (before, during
-and after the reply, and a failure that can't be recorded), barge-in recording (driven with
+and after the reply, a failure that can't be recorded, and one no one could show in the UI),
+barge-in recording (driven with
 fastrtc's thread-per-resume pattern), the stale-chunk drop and the reset-button stop (the real
 `ReplyOnPause`, interrupted mid-`next()` from another thread), cascade streaming order, native
 chunking/threading/cancellation, backend selection/fallback, and env-var parsing. The native tests

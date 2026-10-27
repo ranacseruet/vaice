@@ -276,6 +276,26 @@ def test_a_failed_reply_is_logged_with_its_traceback(monkeypatch, caplog):
     assert any(r.exc_info for r in caplog.records)
 
 
+def test_the_connection_survives_when_the_ui_update_itself_fails(monkeypatch, caplog):
+    class Failing(FakeResponder):
+        def respond(self, audio, history, turn):
+            raise RuntimeError("llama-server fell over")
+
+    conversation = Conversation()
+
+    def boom(self):
+        raise RuntimeError("the view exploded")
+
+    monkeypatch.setattr(Conversation, "messages_for_ui", boom)
+
+    with caplog.at_level(logging.ERROR, logger="vaice.app"):
+        yields = list(make_handler(Failing(), conversation)(AUDIO))  # no raise: this would kill the connection
+
+    assert yields == []  # no audio and no view to hand over, but the generator ended normally
+    assert "[fake] reply failed" in caplog.text
+    assert "could not show the failure in the chatbot" in caplog.text
+
+
 def test_a_failure_that_cannot_be_recorded_still_shows_the_error_and_keeps_the_connection(monkeypatch, caplog):
     class Failing(FakeResponder):
         def respond(self, audio, history, turn):

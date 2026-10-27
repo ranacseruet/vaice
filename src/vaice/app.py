@@ -48,19 +48,23 @@ def make_handler(responder: Responder, conversation: Conversation):
             # until a reload. Catching the error here keeps the connection and shows the reason
             # in the chatbot instead of only in the log.
             log.exception("[%s] reply failed", responder.name)
-            if turn is None:
-                # The turn could not even be started: there is no turn to record the error on.
-                messages = conversation.messages_for_ui() + [
-                    {"role": "assistant", "content": f"(error: {_error_text(exc)})"}
-                ]
-            else:
+            if turn is not None:
                 try:
                     turn.fail(_error_text(exc))  # what was heard of the reply, plus why it stopped
                 except Exception:
                     # The turn could not be recorded at all: the error is still in the turn's memory
                     # and shown in the chatbot; only the recording failed.
                     log.exception("[%s] could not record the failure on the turn", responder.name)
+            try:
+                # Guarded too: even reading the conversation back for the UI could fail (a bad turn
+                # record). The log now holds both errors, the chatbot keeps what it is showing, and
+                # the connection survives.
                 messages = conversation.messages_for_ui()
+                if turn is None:  # the turn could not even be started: the reason is shown on its own
+                    messages = messages + [{"role": "assistant", "content": f"(error: {_error_text(exc)})"}]
+            except Exception:
+                log.exception("[%s] could not show the failure in the chatbot", responder.name)
+                return
             yield AdditionalOutputs(messages)  # show the error, keep the connection
             return
         turn.transcribed.wait(UI_TRANSCRIPT_WAIT)
