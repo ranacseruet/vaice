@@ -170,7 +170,11 @@ vaice does not read `.env` itself.
 
 ```bash
 .venv/bin/pytest
+.venv/bin/ruff check src tests
 ```
+
+CI (`.github/workflows/ci.yml`) runs both on an Apple Silicon macOS runner — the native tests need
+MLX, which has no Linux wheels — for every push to `main` and every pull request.
 
 Unit tests use fakes for the models: sentence splitting, SSE parsing (including llama.cpp's
 `"content": null` first chunk), llama-server errors (HTTP and mid-stream), transcripts, history

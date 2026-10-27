@@ -36,9 +36,13 @@ class InterruptSafeReplyOnPause(ReplyOnPause):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         if not hasattr(self, "generator"):  # the attribute the fix relies on; a fastrtc upgrade may drop it
-            raise RuntimeError("fastrtc's ReplyOnPause has no `generator` attribute: InterruptSafeReplyOnPause needs updating")
+            raise RuntimeError(
+                "fastrtc's ReplyOnPause has no `generator` attribute: InterruptSafeReplyOnPause needs updating"
+            )
         if not hasattr(self, "event"):  # the pause event the idle wait relies on
-            raise RuntimeError("fastrtc's ReplyOnPause has no `event` attribute: InterruptSafeReplyOnPause needs updating")
+            raise RuntimeError(
+                "fastrtc's ReplyOnPause has no `event` attribute: InterruptSafeReplyOnPause needs updating"
+            )
 
     def copy(self):
         """fastrtc copies the handler for each connection, and ReplyOnPause.copy() builds a plain ReplyOnPause.

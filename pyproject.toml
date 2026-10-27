@@ -14,7 +14,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest"]
+dev = ["pytest", "ruff"]
 
 [project.scripts]
 vaice = "vaice.app:main"
@@ -28,3 +28,13 @@ packages = ["src/vaice"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120  # the house style: code and comments on one line up to ~120 columns
+
+[tool.ruff.lint]
+select = ["E4", "E5", "E7", "E9", "F", "B", "I", "UP", "SIM", "BLE", "PERF", "RET", "RUF", "C4"]
+
+[tool.ruff.lint.per-file-ignores]
+# tests deliberately catch everything around model/thread fakes to assert what the app shows instead
+"tests/*" = ["BLE001"]
