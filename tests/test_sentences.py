@@ -1,3 +1,4 @@
+from vaice import sentences
 from vaice.sentences import clean_for_speech, split_sentences
 
 
@@ -61,6 +62,33 @@ def test_a_long_stream_keeps_finding_every_boundary():
     out = [s for s in split_sentences(fragments) if s]
     assert len(out) == 400
     assert out[0] == "Sentence 0 looks fine." and out[-1] == "Sentence 399 looks fine."
+
+
+class CountingEnd:
+    """The sentence-end pattern, counting the characters each finditer call scans."""
+
+    def __init__(self, pattern):
+        self.pattern = pattern
+        self.scanned = 0
+
+    def finditer(self, text, pos=0):
+        self.scanned += len(text) - pos
+        return self.pattern.finditer(text, pos)
+
+    def search(self, text):
+        return self.pattern.search(text)
+
+
+def test_the_resume_scans_only_the_new_fragment(monkeypatch):
+    # guard for the resume: reverting scan_from to 0 re-scans the whole buffer per fragment, which
+    # this counts; wall-clock timing would be flaky, a counted span is deterministic
+    reply = "".join(f"Sentence {i} looks fine. " for i in range(400))
+    fragments = [word + " " for word in reply.split()]
+    counting = CountingEnd(sentences._SENTENCE_END)
+    monkeypatch.setattr(sentences, "_SENTENCE_END", counting)
+    out = [s for s in sentences.split_sentences(fragments) if s]
+    assert len(out) == 400
+    assert counting.scanned <= 2 * len(reply)  # resume scans each new fragment, plus a deferred boundary
 
 
 def test_initials_do_not_end_a_sentence():
