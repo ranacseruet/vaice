@@ -45,6 +45,24 @@ def test_etc_waits_for_the_next_fragment_to_decide():
     assert list(split_sentences(["I like dogs, etc. ", "What about you?"])) == ["I like dogs, etc.", "What about you?"]
 
 
+def test_every_fragment_cut_gives_the_same_split():
+    # the scanner resumes where it left off; only a deferred decision (a.m./etc. at the buffer end)
+    # is re-checked, so the split must not depend on where the fragments are cut
+    whole = "Call me at 7 a.m. Maybe. Dogs, etc. Fine. The U.S. is big. I said 3. It counts. Done"
+    as_one = list(split_sentences([whole]))
+    for cut in range(1, len(whole)):
+        assert list(split_sentences([whole[:cut], whole[cut:]])) == as_one, f"cut at {cut}"
+
+
+def test_a_long_stream_keeps_finding_every_boundary():
+    # the resume must skip decided text, not boundaries: 400 sentences word by word, none lost
+    reply = "".join(f"Sentence {i} looks fine. " for i in range(400))
+    fragments = [word + " " for word in reply.split()]  # the space rides with the word, as in a real stream
+    out = [s for s in split_sentences(fragments) if s]
+    assert len(out) == 400
+    assert out[0] == "Sentence 0 looks fine." and out[-1] == "Sentence 399 looks fine."
+
+
 def test_initials_do_not_end_a_sentence():
     assert list(split_sentences(["The U.S. Army came. Yes."])) == ["The U.S. Army came.", "Yes."]
 

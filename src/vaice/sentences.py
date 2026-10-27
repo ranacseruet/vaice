@@ -23,15 +23,23 @@ _MARKDOWN = re.compile(r"[*_#`~]")
 def split_sentences(fragments: Iterable[str]) -> Iterator[str]:
     """Yield each sentence as soon as the next one starts, then the remainder."""
     buffer = ""
+    # Boundaries before this index were decided already and can't change (a sentence's text and
+    # its decision character are fixed once seen; yielded spans are sliced away), so each fragment
+    # resumes scanning instead of re-scanning the whole buffer — which made this quadratic in the
+    # reply length. A decision deferred at the buffer end (a.m./etc. without the next word yet)
+    # is the one position rescanned, to settle it.
+    scan_from = 0
     for fragment in fragments:
         buffer += fragment
         start = 0
-        for end in _SENTENCE_END.finditer(buffer):
+        pending: int | None = None  # boundary whose decision waits for the next fragment
+        for end in _SENTENCE_END.finditer(buffer, scan_from):
             sentence = buffer[start : end.start()]
             if _AM_PM.search(sentence):
                 # Ends the sentence only before a capitalized word, like "etc.": "at 3 p.m. Tomorrow"
                 # is two sentences, "at 7 a.m. and then" is one.
                 if end.end() == len(buffer):  # next word not streamed yet: decide on the next fragment
+                    pending = end.start()
                     break
                 if not buffer[end.end()].isupper():
                     continue
@@ -39,6 +47,7 @@ def split_sentences(fragments: Iterable[str]) -> Iterator[str]:
                 continue
             elif _END_IF_CAPITAL.search(sentence):
                 if end.end() == len(buffer):  # next word not streamed yet: decide on the next fragment
+                    pending = end.start()
                     break
                 if not buffer[end.end()].isupper():
                     continue
@@ -46,6 +55,7 @@ def split_sentences(fragments: Iterable[str]) -> Iterator[str]:
                 yield sentence
             start = end.end()
         buffer = buffer[start:]
+        scan_from = pending - start if pending is not None else len(buffer)
     yield buffer
 
 
