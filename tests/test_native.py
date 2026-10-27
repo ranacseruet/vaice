@@ -464,15 +464,10 @@ def test_the_mlx_worker_runs_on_a_daemon_thread():
 
 def test_the_worker_thread_goes_away_with_the_responder():
     responder = NativeResponder(FakeModel(1), FakeProcessor())
-    assert [t for t in threading.enumerate() if t.name.startswith("vaice-mlx")]
+    assert worker_threads()
 
     del responder
-    gc.collect()
-
-    deadline = time.monotonic() + 5
-    while time.monotonic() < deadline and [t for t in threading.enumerate() if t.name.startswith("vaice-mlx")]:
-        time.sleep(0.01)
-    assert not [t for t in threading.enumerate() if t.name.startswith("vaice-mlx")]
+    assert wait_for_no_worker_threads()  # gc.collect() inside: the responder can be cycle-collected
 
 
 def test_a_reply_that_is_queued_when_the_worker_stops_is_abandoned():
