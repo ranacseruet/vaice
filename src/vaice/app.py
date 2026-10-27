@@ -17,7 +17,7 @@ from vaice.responders import BACKENDS, Responder, create_responder
 
 log = logging.getLogger(__name__)
 
-UI_TRANSCRIPT_WAIT = 2.0  # seconds to hold the transcript update for the user's transcript; VIEW_REFRESH_SECONDS backstops a later one
+UI_TRANSCRIPT_WAIT = 2.0  # seconds to hold the transcript update; the timer backstops one that lands late
 VIEW_REFRESH_SECONDS = 1.0  # how often the chatbot re-checks the conversation (see refresh_view)
 ERROR_TEXT_LIMIT = 200  # characters of a failure shown in the UI; the traceback goes to the log
 CHATBOT_HEIGHT = 500  # pixels; the default (400) leaves the transcript cramped next to the mic
