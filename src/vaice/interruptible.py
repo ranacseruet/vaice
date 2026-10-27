@@ -6,6 +6,13 @@ from fastrtc.utils import split_output
 
 log = logging.getLogger(__name__)
 
+# How long an idle emit() waits for the pause event. fastrtc calls emit() in a tight loop while
+# nobody is talking (utils.py: player_worker_decode), which burns most of a core (~32k calls/s,
+# measured); waiting on the event instead of returning at once brings that down to <=50/s
+# (37 measured).
+# The wait ends as soon as the pause is detected, so it costs no latency.
+IDLE_WAIT_SECONDS = 0.02
+
 
 class InterruptSafeReplyOnPause(ReplyOnPause):
     """Drops the audio chunk that was being generated when the user interrupted the reply.
@@ -20,12 +27,18 @@ class InterruptSafeReplyOnPause(ReplyOnPause):
     another generator (or created its own) and finds none, or a different one, was interrupted
     while it ran. It returns None instead of the stale audio, which fastrtc skips. Tiny window
     left: an interrupt landing after that check but before fastrtc queues the chunk still plays it.
+
+    It also throttles the idle polling: fastrtc calls `emit()` in a tight loop while nobody is
+    talking, which burns most of a core. The idle `emit()` waits for the pause event instead of
+    returning at once (the wait ends as soon as the pause is detected, so no latency is added).
     """
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         if not hasattr(self, "generator"):  # the attribute the fix relies on; a fastrtc upgrade may drop it
             raise RuntimeError("fastrtc's ReplyOnPause has no `generator` attribute: InterruptSafeReplyOnPause needs updating")
+        if not hasattr(self, "event"):  # the pause event the idle wait relies on
+            raise RuntimeError("fastrtc's ReplyOnPause has no `event` attribute: InterruptSafeReplyOnPause needs updating")
 
     def copy(self):
         """fastrtc copies the handler for each connection, and ReplyOnPause.copy() builds a plain ReplyOnPause."""
@@ -44,6 +57,15 @@ class InterruptSafeReplyOnPause(ReplyOnPause):
         )
 
     def emit(self):
+        if not self.event.is_set():
+            # Nobody is talking: fastrtc calls emit() in a tight loop (utils.py:
+            # player_worker_decode), which burns most of a core (~32k calls/s, measured). Waiting
+            # for the pause event instead of returning at once throttles that to <=50/s (37
+            # measured); the
+            # wait ends as soon as the pause is detected, so the reply still starts right away.
+            self.event.wait(timeout=IDLE_WAIT_SECONDS)
+            if not self.event.is_set():
+                return None  # still nobody talking: fastrtc skips a None
         started_with = self.generator
         output = super().emit()
         interrupted = self.generator is None or (started_with is not None and self.generator is not started_with)
