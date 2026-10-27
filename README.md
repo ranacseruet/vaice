@@ -93,6 +93,9 @@ you click it is discarded, so say it again. What you say *after* the click is th
 new conversation: it is answered as usual, but the model gets no earlier turns, because they are
 gone.
 
+- **The page keeps up:** the chatbot view is re-checked once a second and re-rendered only when it
+  actually changed, so a transcript that arrives *after* the reply ended (native transcribes after
+  answering) replaces the "…" without waiting for the next exchange or a page reload.
 - **What the model sees:** earlier turns as plain text. A turn whose transcript has not arrived
   yet (it is still being transcribed) is left out of the prompt entirely, so the model never sees
   a reply to a question it cannot read and never reads it as `(inaudible)`. A transcript that

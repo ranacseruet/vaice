@@ -11,7 +11,7 @@ from fastrtc import AdditionalOutputs
 from vaice import app
 from vaice import conversation as conv
 from vaice import lifecycle
-from vaice.app import CHATBOT_HEIGHT, UI_TITLE, build_stream, make_handler, parse_args
+from vaice.app import CHATBOT_HEIGHT, UI_TITLE, VIEW_REFRESH_SECONDS, build_stream, make_handler, parse_args
 from vaice.conversation import Conversation
 from vaice.interruptible import InterruptSafeReplyOnPause
 from vaice.responders.cascade import CascadeResponder
@@ -220,6 +220,28 @@ def test_the_chatbot_is_taller_and_does_not_render_html_tags():
     assert chatbot["props"]["height"] == CHATBOT_HEIGHT
     # Gradio 6.0 flips the default to True; the model can put anything in the transcript
     assert chatbot["props"]["allow_tags"] is False
+
+
+def test_a_late_transcript_reaches_the_chatbot_after_the_reply_ran_out():
+    conversation = Conversation()
+    stream = build_stream(FakeResponder(), conversation)
+    config = stream.ui.get_config_file()
+
+    # fastrtc has a timer of its own; ours is the one running at our period
+    ours = [c for c in config["components"] if c["type"] == "timer" and c["props"]["value"] == VIEW_REFRESH_SECONDS]
+    assert len(ours) == 1
+    (tick,) = [d for d in config["dependencies"] if d["targets"][0] == (ours[0]["id"], "tick")]
+    tick_fn = stream.ui.fns[tick["id"]].fn
+
+    view, seen = tick_fn("")  # the State starts blank, so the first tick shows the empty view once
+    assert view == []
+    turn = conversation.start_turn()
+    view, seen = tick_fn(seen)  # the question was heard; its transcript has not arrived yet
+    assert view == [{"role": "user", "content": "…"}]
+    turn.set_user_text("and after the reply?")  # the transcript lands late, past the final update
+    view, seen = tick_fn(seen)
+    assert view[-1] == {"role": "user", "content": "and after the reply?"}  # the stuck "…" is replaced
+    assert tick_fn(seen)[0] == {"__type__": "update"}  # unchanged again: silent
 
 
 def test_what_you_say_after_new_conversation_is_the_next_turn():
