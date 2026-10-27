@@ -8,7 +8,8 @@ log = logging.getLogger(__name__)
 
 # How long an idle emit() waits for the pause event. fastrtc calls emit() in a tight loop while
 # nobody is talking (utils.py: player_worker_decode), which burns most of a core (~32k calls/s,
-# measured); waiting on the event instead of returning at once brings that down to ~50 calls/s.
+# measured); waiting on the event instead of returning at once brings that down to <=50/s
+# (37 measured).
 # The wait ends as soon as the pause is detected, so it costs no latency.
 IDLE_WAIT_SECONDS = 0.02
 
@@ -59,7 +60,8 @@ class InterruptSafeReplyOnPause(ReplyOnPause):
         if not self.event.is_set():
             # Nobody is talking: fastrtc calls emit() in a tight loop (utils.py:
             # player_worker_decode), which burns most of a core (~32k calls/s, measured). Waiting
-            # for the pause event instead of returning at once throttles that to ~50 calls/s; the
+            # for the pause event instead of returning at once throttles that to <=50/s (37
+            # measured); the
             # wait ends as soon as the pause is detected, so the reply still starts right away.
             self.event.wait(timeout=IDLE_WAIT_SECONDS)
             if not self.event.is_set():
