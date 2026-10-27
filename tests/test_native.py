@@ -13,8 +13,8 @@ import pytest
 pytest.importorskip("mlx.core")  # native backend is Apple-Silicon only
 pytest.importorskip("mlx_audio")
 
-import mlx.core as mx  # noqa: E402
-from mlx_audio.sts.models.lfm_audio.model import (  # noqa: E402
+import mlx.core as mx
+from mlx_audio.sts.models.lfm_audio.model import (
     AUDIO_EOS_TOKEN,
     AUDIO_START_TOKEN,
     IM_END_TOKEN,
@@ -22,10 +22,10 @@ from mlx_audio.sts.models.lfm_audio.model import (  # noqa: E402
     LFMModality,
 )
 
-from vaice import lifecycle  # noqa: E402
-from vaice.conversation import Turn  # noqa: E402
-from vaice.responders import native  # noqa: E402
-from vaice.responders.native import (  # noqa: E402
+from vaice import lifecycle
+from vaice.conversation import Turn
+from vaice.responders import native
+from vaice.responders.native import (
     FRAMES_PER_CHUNK,
     LEFT_CONTEXT_FRAMES,
     MAX_NEW_TOKENS,
@@ -293,7 +293,7 @@ def test_history_is_added_as_text_turns_before_the_current_audio_question():
     history = [("user", "capital of France?"), ("assistant", "Paris."), ("user", "(inaudible)")]
     list(NativeResponder(model, FakeProcessor(), prompt="BE BRIEF").respond(AUDIO, history, Turn()))
 
-    mode, chat, kwargs, _ = model.calls[0]
+    mode, chat, _kwargs, _ = model.calls[0]
     assert mode == "interleaved"
     assert chat_text(chat) == (
         "<|im_start|>system\nBE BRIEF<|im_end|>\n"
@@ -364,9 +364,14 @@ def test_the_question_is_transcribed_on_the_worker_after_generation():
     assert turn.transcribed.wait(5)
     assert turn.user_text == "what is two plus two"  # no <|audio_start|> / <|im_end|>
     assert [call[0] for call in model.calls] == ["interleaved", "sequential"]  # ASR runs after the reply
-    mode, chat, kwargs, thread = model.calls[1]
+    _mode, chat, kwargs, thread = model.calls[1]
     assert thread == model.calls[0][3] and thread.startswith("vaice-mlx")
-    assert chat_text(chat) == "<|im_start|>system\nPerform ASR.<|im_end|>\n<|im_start|>user\n<|im_end|>\n<|im_start|>assistant\n"
+    assert chat_text(chat) == (
+        "<|im_start|>system\nPerform ASR.<|im_end|>\n"
+        "<|im_start|>user\n<|im_end|>\n"
+        "<|im_start|>assistant\n"
+    )
+
     assert kwargs == {"max_new_tokens": native.ASR_MAX_NEW_TOKENS, "temperature": None, "top_k": None}
 
 

@@ -1,4 +1,5 @@
 """Conversation history: what was said and what was spoken, persisted across restarts."""
+import contextlib
 import json
 import logging
 import os
@@ -253,10 +254,9 @@ class Conversation:
                             self._path, type(exc).__name__, exc)
             finally:
                 if tmp is not None:
-                    try:
+                    # the temp file is already gone, or cannot be removed either
+                    with contextlib.suppress(OSError):
                         os.unlink(tmp)
-                    except OSError:
-                        pass  # the temp file is already gone, or cannot be removed either
 
     def _load(self) -> list[Turn]:
         try:

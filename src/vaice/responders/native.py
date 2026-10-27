@@ -65,7 +65,7 @@ def _run_one(task) -> None:
         return  # cancelled before it started
     try:
         future.set_result(fn())
-    except BaseException as exc:
+    except BaseException as exc:  # noqa: BLE001 - every failure goes to the future
         future.set_exception(exc)
 
 
@@ -195,7 +195,7 @@ class NativeResponder:
                     return
                 for item in responder._generate(audio, history, turn, cancelled, progress):
                     chunks.put(item)
-            except BaseException as exc:  # re-raised in the consumer below
+            except BaseException as exc:  # noqa: BLE001 - re-raised in the consumer below, which must see any failure
                 chunks.put(exc)
             finally:
                 chunks.put(_DONE)  # first, so the consumer isn't held up by the transcription
