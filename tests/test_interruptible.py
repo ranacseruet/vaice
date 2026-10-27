@@ -4,6 +4,7 @@ import threading
 
 import numpy as np
 from fastrtc import AdditionalOutputs, ReplyOnPause
+from fastrtc.utils import WebRTCError, webrtc_error_handler
 
 from vaice.interruptible import InterruptSafeReplyOnPause, stop_playing_reply
 
@@ -253,3 +254,47 @@ def test_stop_playing_reply_without_a_queue_or_reset_does_not_raise():
 
     stop_playing_reply(Bare())
     stop_playing_reply(ReplyOnPause(lambda _audio: iter([]), model=FakeVad()))  # no audio track yet
+
+
+def test_a_reply_error_that_escapes_reaches_fastrtc_as_a_webrtc_error():
+    """What makes app.py's catch necessary: fastrtc wraps the per-connection emit() in
+    webrtc_error_handler (webrtc_connection_mixin.py), so an error that escapes the reply
+    generator comes back as a WebRTCError, which the player loop re-raises (utils.py:
+    player_worker_decode) — the connection's audio task dies and the page stays mute until a
+    reload."""
+    def reply(_audio):
+        yield chunk(1.0)
+        raise RuntimeError("llama-server fell over")
+
+    rig = Rig(InterruptSafeReplyOnPause, reply)
+    rig.user_speaks_then_pauses()
+    rig.handler.emit = webrtc_error_handler(rig.handler.emit)  # as fastrtc does per connection
+
+    assert rig.start_emit().join()[1][0] == 1.0  # the first chunk
+    error = rig.start_emit().join()  # the generator raises on the next chunk
+
+    assert isinstance(error, WebRTCError)
+    assert isinstance(error.__cause__, RuntimeError)
+
+
+def test_the_app_keeps_a_reply_error_from_reaching_fastrtc():
+    """The other half: the app catches the error inside the generator, so fastrtc gets a
+    transcript update instead of a WebRTCError and the connection keeps working."""
+    from vaice.app import make_handler
+    from vaice.conversation import Conversation
+
+    class Failing:
+        name = "fake"
+
+        def respond(self, audio, history, turn):
+            yield chunk(1.0)
+            raise RuntimeError("llama-server fell over")
+
+    rig = Rig(InterruptSafeReplyOnPause, make_handler(Failing(), Conversation()))
+    rig.user_speaks_then_pauses()
+    rig.handler.emit = webrtc_error_handler(rig.handler.emit)  # as fastrtc does per connection
+
+    assert rig.start_emit().join()[1][0] == 1.0
+    second = rig.start_emit().join()
+
+    assert isinstance(second, AdditionalOutputs)  # the error, shown in the chatbot
