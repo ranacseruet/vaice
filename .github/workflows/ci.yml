@@ -9,9 +9,12 @@ jobs:
   check:
     # Apple Silicon: mlx has no Linux wheels, so the native tests only run on macOS arm64
     runs-on: macos-14
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.12"]  # README supports 3.10–3.12; 3.12 is the pinned local version
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
-      - run: uv venv --python 3.12 .venv && uv pip install -e ".[dev]"
+      - run: uv venv --python ${{ matrix.python-version }} .venv && uv pip install -e ".[dev]"
       - run: .venv/bin/ruff check src tests
       - run: .venv/bin/pytest -q

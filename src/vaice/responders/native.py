@@ -65,7 +65,7 @@ def _run_one(task) -> None:
         return  # cancelled before it started
     try:
         future.set_result(fn())
-    except BaseException as exc:  # noqa: BLE001 - everything the job raises belongs on the future, for the consumer thread
+    except BaseException as exc:  # noqa: BLE001 - every failure goes to the future
         future.set_exception(exc)
 
 
