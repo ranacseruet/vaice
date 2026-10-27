@@ -35,6 +35,11 @@ def test_error_payload_mid_stream_raises():
         delta_text(sse({"error": {"code": 500, "message": "context full"}}))
 
 
+def test_a_broken_data_line_names_itself():
+    with pytest.raises(RuntimeError, match=r"stream line.*not json"):
+        delta_text(b"data: {not json")
+
+
 class FakeResponse:
     def __init__(self, status, body="", lines=()):
         self.status_code, self.text, self._lines = status, body, lines
@@ -119,6 +124,12 @@ def test_transcribe_asks_for_a_verbatim_transcript_and_returns_it_stripped(monke
 def test_transcribe_of_null_content_is_empty(monkeypatch):
     capture_post(monkeypatch, FakeResponse(200, json.dumps({"choices": [{"message": {"content": None}}]})))
     assert llm.transcribe("AAAA") == ""
+
+
+def test_transcribe_of_an_unshaped_200_names_the_body(monkeypatch):
+    capture_post(monkeypatch, FakeResponse(200, json.dumps({"unexpected": "not the OpenAI shape"})))
+    with pytest.raises(RuntimeError, match="unexpected llama-server response"):
+        llm.transcribe("AAAA")
 
 
 def test_transcribe_http_error_keeps_llama_servers_reason(monkeypatch):

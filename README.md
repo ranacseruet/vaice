@@ -173,7 +173,8 @@ vaice does not read `.env` itself.
 ```
 
 Unit tests use fakes for the models: sentence splitting, SSE parsing (including llama.cpp's
-`"content": null` first chunk), llama-server errors (HTTP and mid-stream), transcripts, history
+`"content": null` first chunk and a malformed `data:` line), llama-server errors (HTTP, mid-stream
+and an unexpected 200 shape), transcripts, history
 trimming and persistence (including a disk that can't be written), failed replies (before, during
 and after the reply, a failure that can't be recorded, and one no one could show in the UI),
 barge-in recording (driven with
