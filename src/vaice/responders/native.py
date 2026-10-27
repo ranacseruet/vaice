@@ -134,7 +134,9 @@ def _spoken_part(text: str, frames: int, handed_out: int) -> str:
     if handed_out >= frames:
         return text
     words = text.split()
-    return " ".join(words[: round(len(words) * handed_out / frames)])
+    # truncate, don't round: the same conservative estimate as Turn.close() — words the user had
+    # no time to hear are never credited to the reply
+    return " ".join(words[: int(len(words) * handed_out / frames)])
 
 
 class NativeResponder:
