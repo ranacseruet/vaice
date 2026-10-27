@@ -246,7 +246,7 @@ def test_every_change_is_saved_with_no_temp_files_left(tmp_path):
     assert os.listdir(tmp_path) == ["c.json"]
 
 
-def test_a_failed_write_leaves_the_previous_file_intact(tmp_path, monkeypatch):
+def test_a_failed_write_is_a_warning_and_the_conversation_continues_in_memory(tmp_path, monkeypatch, caplog):
     path = tmp_path / "c.json"
     c = Conversation(path)
     exchange(c, "q", "a")
@@ -256,11 +256,18 @@ def test_a_failed_write_leaves_the_previous_file_intact(tmp_path, monkeypatch):
         raise OSError("disk full")
 
     monkeypatch.setattr(conv.os, "replace", boom)
-    with pytest.raises(OSError, match="disk full"):
-        c.start_turn()
+    with caplog.at_level(logging.WARNING, logger=conv.__name__):
+        c.start_turn()  # no raise: a full disk must not end the conversation
 
-    assert path.read_text() == before
-    assert os.listdir(tmp_path) == ["c.json"]
+    assert path.read_text() == before  # the old file is intact
+    assert os.listdir(tmp_path) == ["c.json"]  # and no temp file is left behind
+    assert "disk full" in caplog.text
+    assert len(c) == 2  # the new turn is in memory even though it could not be saved
+
+    # and the conversation keeps working in memory
+    turn = c.start_turn()
+    turn.set_user_text("still works")
+    assert turn.user_text == "still works" and len(c) == 3
 
 
 @pytest.mark.parametrize("content", ["{not json", '{"version": 1}', '{"version": 2, "turns": []}', '{"version": 1, "turns": [1]}'])
@@ -344,6 +351,23 @@ def test_fail_keeps_a_transcript_the_responder_did_report():
     turn.fail("boom")
 
     assert turn.user_text == "what was asked" and turn.error == "boom"
+
+
+def test_fail_closes_the_turn_even_when_recording_the_error_fails():
+    saves = []
+
+    def on_change():
+        saves.append(1)
+        if len(saves) > 1:  # the error itself cannot be saved
+            raise OSError("disk full")
+
+    turn = Turn(on_change=on_change)
+
+    with pytest.raises(OSError, match="disk full"):
+        turn.fail("boom")
+
+    assert turn.closed.is_set() and turn.complete  # the turn is closed all the same
+    assert turn.error == "boom"
 
 
 def test_close_keeps_the_share_of_the_reply_that_had_played():

@@ -74,12 +74,14 @@ class Turn:
         """The reply failed. `message` is shown in the UI, never sent to the model; a transcript
         the responder never reported counts as inaudible so the next turn's history doesn't wait."""
         with self._lock:
-            self.error = message
-            if self.user_text is None:
-                self.user_text = ""
-                self.transcribed.set()
-            self._changed()
-        self.finish()  # also a no-op if the turn was already closed
+            try:
+                self.error = message
+                if self.user_text is None:
+                    self.user_text = ""
+                    self.transcribed.set()
+                self._changed()
+            finally:
+                self.finish()  # also a no-op if the turn was already closed
 
     def finish(self) -> None:
         """The reply ran to the end. A turn already closed (interrupted) stays as it was."""
@@ -226,19 +228,33 @@ class Conversation:
             self._save()
 
     def _save(self) -> None:
+        """Write the conversation to disk.
+
+        A failed write is a warning, not an error: the conversation stays in memory and the reply
+        continues (a full disk or a read-only file must not end a conversation). Only the
+        persistence is lost.
+        """
         if not self._path:
             return
         with self._lock:  # re-entrant: also serializes writers so they can't clobber each other's temp file
-            data = {"version": _VERSION, "turns": [t.to_dict() for t in self._turns]}
-            self._path.parent.mkdir(parents=True, exist_ok=True)
-            fd, tmp = tempfile.mkstemp(dir=self._path.parent, prefix=self._path.name, suffix=".tmp")
+            tmp: str | None = None
             try:
+                data = {"version": _VERSION, "turns": [t.to_dict() for t in self._turns]}
+                self._path.parent.mkdir(parents=True, exist_ok=True)
+                fd, tmp = tempfile.mkstemp(dir=self._path.parent, prefix=self._path.name, suffix=".tmp")
                 with os.fdopen(fd, "w", encoding="utf-8") as f:
                     json.dump(data, f)
                 os.replace(tmp, self._path)  # readers see the old file or the new one, never half of one
-            except BaseException:
-                os.unlink(tmp)
-                raise
+                tmp = None
+            except OSError as exc:
+                log.warning("could not save the conversation to %s (%s: %s); continuing in memory",
+                            self._path, type(exc).__name__, exc)
+            finally:
+                if tmp is not None:
+                    try:
+                        os.unlink(tmp)
+                    except OSError:
+                        pass  # the temp file is already gone, or cannot be removed either
 
     def _load(self) -> list[Turn]:
         try:
