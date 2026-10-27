@@ -86,7 +86,7 @@ def make_handler(responder: Responder, conversation: Conversation):
                 # the connection survives.
                 messages = conversation.messages_for_ui()
                 if turn is None:  # the turn could not even be started: the reason is shown on its own
-                    messages = messages + [{"role": "assistant", "content": f"(error: {_error_text(exc)})"}]
+                    messages.append({"role": "assistant", "content": f"(error: {_error_text(exc)})"})
             except Exception:
                 log.exception("[%s] could not show the failure in the chatbot", responder.name)
                 return

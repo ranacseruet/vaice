@@ -68,7 +68,10 @@ def test_standalone_turn_works_without_a_conversation():
 
 @pytest.mark.parametrize(
     "count, window, expected",
-    [(0, 10, 0), (10, 10, 0), (11, 10, 5), (15, 10, 5), (16, 10, 10), (21, 10, 15), (3, 1, 2), (7, 0, 7), (5, 3, 2), (9, 4, 6)],
+    [
+        (0, 10, 0), (10, 10, 0), (11, 10, 5), (15, 10, 5), (16, 10, 10),
+        (21, 10, 15), (3, 1, 2), (7, 0, 7), (5, 3, 2), (9, 4, 6),
+    ],
 )
 def test_window_start_drops_whole_blocks_of_the_oldest_turns(count, window, expected):
     assert window_start(count, window) == expected
@@ -77,7 +80,7 @@ def test_window_start_drops_whole_blocks_of_the_oldest_turns(count, window, expe
 def test_window_start_never_keeps_more_than_the_window_and_moves_only_every_block():
     window = 10
     starts = [window_start(n, window) for n in range(40)]
-    assert all(n - s <= window for n, s in zip(range(40), starts))
+    assert all(n - s <= window for n, s in zip(range(40), starts, strict=True))
     # stable prefix: between drops the start index does not move
     assert starts[11:16] == [5] * 5
     assert starts[16:21] == [10] * 5
@@ -209,7 +212,9 @@ def test_persistence_round_trip(tmp_path):
 
 def test_loaded_turn_without_transcript_gets_empty_text_and_is_complete(tmp_path):
     path = tmp_path / "c.json"
-    path.write_text(json.dumps({"version": 1, "turns": [{"user": None, "assistant": "x", "interrupted": False, "complete": False}]}))
+    path.write_text(json.dumps(
+        {"version": 1, "turns": [{"user": None, "assistant": "x", "interrupted": False, "complete": False}]}
+    ))
 
     (turn,) = Conversation(path)._turns
 
@@ -226,7 +231,9 @@ def test_a_saved_error_round_trips_and_older_files_without_it_still_load(tmp_pat
 
     assert loaded._turns[0].error == "boom"
 
-    path.write_text(json.dumps({"version": 1, "turns": [{"user": "q", "assistant": "a", "interrupted": False, "complete": True}]}))
+    path.write_text(json.dumps(
+        {"version": 1, "turns": [{"user": "q", "assistant": "a", "interrupted": False, "complete": True}]}
+    ))
     (turn,) = Conversation(path)._turns
     assert turn.error == ""
 
@@ -270,7 +277,10 @@ def test_a_failed_write_is_a_warning_and_the_conversation_continues_in_memory(tm
     assert turn.user_text == "still works" and len(c) == 3
 
 
-@pytest.mark.parametrize("content", ["{not json", '{"version": 1}', '{"version": 2, "turns": []}', '{"version": 1, "turns": [1]}'])
+@pytest.mark.parametrize(
+    "content",
+    ["{not json", '{"version": 1}', '{"version": 2, "turns": []}', '{"version": 1, "turns": [1]}'],
+)
 def test_corrupt_file_is_moved_aside_with_a_warning(tmp_path, caplog, content):
     path = tmp_path / "conversation.json"
     path.write_text(content)

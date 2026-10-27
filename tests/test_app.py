@@ -8,9 +8,8 @@ import numpy as np
 import pytest
 from fastrtc import AdditionalOutputs
 
-from vaice import app
+from vaice import app, lifecycle
 from vaice import conversation as conv
-from vaice import lifecycle
 from vaice.app import CHATBOT_HEIGHT, UI_TITLE, VIEW_REFRESH_SECONDS, build_stream, make_handler, parse_args
 from vaice.conversation import Conversation
 from vaice.interruptible import InterruptSafeReplyOnPause
@@ -182,7 +181,11 @@ def test_ui_has_the_transcript_a_reset_button_and_loads_the_stored_conversation(
     (button,) = [c for c in config["components"] if c["type"] == "button"]
     assert chatbot["props"]["type"] == "messages"
     assert button["props"]["value"] == "New conversation"
-    triggers = {(d["targets"][0][1], tuple(d["outputs"])) for d in config["dependencies"] if d["targets"][0][1] in ("load", "click")}
+    triggers = {
+        (d["targets"][0][1], tuple(d["outputs"]))
+        for d in config["dependencies"]
+        if d["targets"][0][1] in ("load", "click")
+    }
     assert triggers == {("load", (chatbot["id"],)), ("click", (chatbot["id"],))}
 
     conversation.start_turn().set_user_text("hello")

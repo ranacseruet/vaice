@@ -15,7 +15,7 @@ uv venv .venv && uv pip install -e ".[dev]"   # setup
 .venv/bin/vaice [--backend auto|cascade|native]    # run; UI at http://127.0.0.1:7860
 ```
 
-There is no linter or formatter configured. Unit tests use fakes for the models; native tests skip where MLX isn't installed. There is **no automated test against the real models or the browser mic**: verify the audio path by hand (run each `--backend`, ask the same question, check the `[native] time to first audio` log lines).
+Ruff is configured (`pyproject.toml`: line length 120, lint rules in `[tool.ruff.lint]`); it is not a formatter, so no formatting step. Unit tests use fakes for the models; native tests skip where MLX isn't installed. There is **no automated test against the real models or the browser mic**: verify the audio path by hand (run each `--backend`, ask the same question, check the `[native] time to first audio` log lines).
 
 ## Architecture
 
