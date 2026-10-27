@@ -1,7 +1,9 @@
 """Gradio/WebRTC voice UI: pause detection → responder (audio in, audio out)."""
 import argparse
+import json
 import logging
 import time
+from functools import partial
 
 import gradio as gr
 import numpy as np
@@ -15,7 +17,8 @@ from vaice.responders import BACKENDS, Responder, create_responder
 
 log = logging.getLogger(__name__)
 
-UI_TRANSCRIPT_WAIT = 2.0  # seconds to hold the transcript update for the user's transcript
+UI_TRANSCRIPT_WAIT = 2.0  # seconds to hold the transcript update; the timer backstops one that lands late
+VIEW_REFRESH_SECONDS = 1.0  # how often the chatbot re-checks the conversation (see refresh_view)
 ERROR_TEXT_LIMIT = 200  # characters of a failure shown in the UI; the traceback goes to the log
 CHATBOT_HEIGHT = 500  # pixels; the default (400) leaves the transcript cramped next to the mic
 UI_TITLE = "vaice"  # the heading above the mic
@@ -28,6 +31,20 @@ def _subtitle(responder: Responder) -> str:
 
 def _error_text(exc: Exception) -> str:
     return " ".join(f"{type(exc).__name__}: {exc}".split())[:ERROR_TEXT_LIMIT]
+
+
+def refresh_view(conversation: Conversation, known: str) -> tuple:
+    """The timer's tick: the chatbot's new view when the conversation changed, silence when not.
+
+    The reply pushes its last update before a late transcript arrives (native transcribes after
+    answering), so without this the "…" would sit in the chatbot until the next exchange or a
+    page reload. Views are compared as JSON so an unchanged transcript is never re-rendered.
+    """
+    view = conversation.messages_for_ui()
+    rendered = json.dumps(view, ensure_ascii=False)
+    if rendered == known:
+        return gr.skip(), known  # gr.skip(): leave the chatbot alone
+    return view, rendered
 
 
 def make_handler(responder: Responder, conversation: Conversation):
@@ -104,6 +121,11 @@ def build_stream(responder: Responder, conversation: Conversation) -> Stream:
 
         new_conversation.click(reset, outputs=chatbot)
         chatbot.clear(reset)  # the chatbot's own trash icon would otherwise only clear the view
+
+        # refresh_view's backstop: catches conversation changes no reply update covered (a late
+        # transcript, a barge-in's trimmed text); seen holds the view it last rendered
+        seen = gr.State("")
+        gr.Timer(VIEW_REFRESH_SECONDS).tick(partial(refresh_view, conversation), inputs=[seen], outputs=[chatbot, seen])
     return stream
 
 
