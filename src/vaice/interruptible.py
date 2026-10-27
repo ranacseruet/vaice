@@ -28,20 +28,28 @@ class InterruptSafeReplyOnPause(ReplyOnPause):
             raise RuntimeError("fastrtc's ReplyOnPause has no `generator` attribute: InterruptSafeReplyOnPause needs updating")
 
     def copy(self):
-        """fastrtc copies the handler for each connection, and ReplyOnPause.copy() builds a plain ReplyOnPause."""
-        return type(self)(
-            self.fn,
-            self.startup_fn,
-            self.algo_options,
-            self.model_options,
-            self.can_interrupt,
-            self.expected_layout,
-            self.output_sample_rate,
-            self.output_frame_size,
-            self.input_sample_rate,
-            self.model,
-            self.needs_args,
-        )
+        """fastrtc copies the handler for each connection, and ReplyOnPause.copy() builds a plain ReplyOnPause.
+
+        The arguments go by keyword: a fastrtc release that adds, drops or reorders a parameter
+        then fails loudly here instead of silently handing the handler the wrong value.
+        """
+        return type(self)(**self._copy_kwargs())
+
+    def _copy_kwargs(self) -> dict:
+        """The arguments `ReplyOnPause.__init__` takes, taken from this handler."""
+        return {
+            "fn": self.fn,
+            "startup_fn": self.startup_fn,
+            "algo_options": self.algo_options,
+            "model_options": self.model_options,
+            "can_interrupt": self.can_interrupt,
+            "expected_layout": self.expected_layout,
+            "output_sample_rate": self.output_sample_rate,
+            "output_frame_size": self.output_frame_size,
+            "input_sample_rate": self.input_sample_rate,
+            "model": self.model,
+            "needs_args": self.needs_args,
+        }
 
     def emit(self):
         started_with = self.generator

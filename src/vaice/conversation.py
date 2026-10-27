@@ -98,7 +98,9 @@ class Turn:
                 if played < self._audio_seconds:
                     self.interrupted = True
                     words = self.assistant_text.split()
-                    self.assistant_text = " ".join(words[: int(len(words) * played / self._audio_seconds)])
+                    # At least one word: something was played, so the reply was not empty
+                    keep = max(1, int(len(words) * played / self._audio_seconds)) if words else 0
+                    self.assistant_text = " ".join(words[:keep])
             if not self.complete:
                 self.interrupted = True
             self.closed.set()

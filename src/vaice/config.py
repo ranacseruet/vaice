@@ -30,7 +30,6 @@ LLM_TIMEOUT = _number("VAICE_LLM_TIMEOUT", "120", float)
 TTS_MODEL = os.getenv("VAICE_TTS_MODEL", "mlx-community/Kokoro-82M-bf16")
 TTS_VOICE = os.getenv("VAICE_VOICE", "af_heart")
 TTS_SPEED = _number("VAICE_SPEED", "1.1", float)
-TTS_SAMPLE_RATE = 24000  # fixed by Kokoro
 
 PORT = _number("VAICE_PORT", "7860", int)
 

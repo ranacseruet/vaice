@@ -97,7 +97,8 @@ you click it is discarded, so say it again.
 - **Barge-in:** if you talk over a reply, it stops when you stop talking, and history keeps the
   part of the reply that had played, marked `(interrupted)`. That part is estimated, not measured:
   the words of the audio handed out, cut to the share that the time since the first audio could
-  have played (fastrtc queues audio ahead of playback). The native model writes its text well
+  have played (fastrtc queues audio ahead of playback). At least one word is kept, so an
+  interrupted reply is never recorded as empty. The native model writes its text well
   ahead of its audio, so its text is also split by the share of audio generated. Expect it to be
   off by a few words. The chunk that was being generated when you interrupted (≈ 0.8 s native, a
   sentence in cascade) is dropped instead of played; fastrtc would queue it after clearing its
@@ -159,8 +160,9 @@ Unit tests use fakes for the models: sentence splitting, SSE parsing (including 
 `"content": null` first chunk), llama-server errors (HTTP and mid-stream), transcripts, history
 trimming and persistence, barge-in recording (driven with fastrtc's thread-per-resume pattern),
 the stale-chunk drop and the reset-button stop (the real `ReplyOnPause`, interrupted mid-`next()`
-from another thread), cascade streaming order, native chunking/threading/cancellation, backend
-selection/fallback, and env-var parsing. The native tests are skipped where MLX isn't installed.
+from another thread), the per-connection `copy()` (its arguments go by keyword, so a reordered
+fastrtc signature fails the test), cascade streaming order, native chunking/threading/cancellation,
+backend selection/fallback, and env-var parsing. The native tests are skipped where MLX isn't installed.
 There is no automated test against the real models; verify the real audio path by hand with the
 steps above.
 
@@ -170,7 +172,7 @@ steps above.
 src/vaice/
   app.py            CLI + Gradio/WebRTC UI; wraps a Responder, logs time to first audio, transcript + reset
   interruptible.py  ReplyOnPause that drops the chunk generated while the user interrupts (fastrtc 0.0.34 race);
-                    silences the playing reply for "New conversation"
+                    silences the playing reply for "New conversation"; copies itself per connection
   config.py         env-driven settings (.env.example lists them with their defaults)
   conversation.py   Turn / Conversation: history, trimming, JSON persistence, failure notes
   audio.py          mic frame → base64 WAV / float mono
@@ -207,3 +209,9 @@ and register it in `responders/__init__.py`.
   processor each resample internally.
 - llama.cpp's `llama-server` only outputs text; it ignores `modalities`/`audio` request
   fields, which is why the cascade needs a separate TTS step.
+- fastrtc copies the handler for every connection, and its own `ReplyOnPause.copy()` builds a
+  plain `ReplyOnPause`, which would lose the stale-chunk fix. `interruptible.py` overrides
+  `copy()` and passes every argument **by keyword**, so a fastrtc release that adds, drops or
+  reorders a parameter fails loudly there instead of silently handing the handler the wrong value.
+- Kokoro's sample rate is fixed by the model, so it lives in `tts.py` (`SAMPLE_RATE`), not in the
+  env-driven settings in `config.py`.

@@ -1,5 +1,6 @@
 """The real fastrtc ReplyOnPause, driven the way fastrtc drives it: emit() on a fresh thread per chunk
 (`loop.run_in_executor`), receive() on another thread. Only the VAD model and the playback queue are fakes."""
+import inspect
 import threading
 
 import numpy as np
@@ -210,6 +211,55 @@ def test_copies_made_per_connection_keep_the_fix():
     assert copy.can_interrupt is False
     assert copy.model is original.model
     assert copy is not original
+
+
+def test_the_copy_passes_its_arguments_by_keyword_so_a_reordered_signature_cannot_misplace_them():
+    class Reordered(InterruptSafeReplyOnPause):
+        """fastrtc's arguments in a different order, as a future release might have them."""
+
+        def __init__(
+            self,
+            needs_args=False,
+            fn=None,
+            startup_fn=None,
+            algo_options=None,
+            model_options=None,
+            can_interrupt=True,
+            expected_layout="mono",
+            output_sample_rate=24000,
+            output_frame_size=None,
+            input_sample_rate=48000,
+            model=None,
+        ):
+            super().__init__(
+                fn=fn,
+                startup_fn=startup_fn,
+                algo_options=algo_options,
+                model_options=model_options,
+                can_interrupt=can_interrupt,
+                expected_layout=expected_layout,
+                output_sample_rate=output_sample_rate,
+                output_frame_size=output_frame_size,
+                input_sample_rate=input_sample_rate,
+                model=model,
+                needs_args=needs_args,
+            )
+
+    original = Reordered(fn=lambda _audio: iter([]), model=FakeVad(), can_interrupt=False, needs_args=True)
+
+    copy = original.copy()
+
+    assert copy.fn is original.fn
+    assert copy.can_interrupt is False
+    assert copy.needs_args is True
+    assert copy.model is original.model
+
+
+def test_the_copy_covers_every_argument_fastrtcs_reply_on_pause_takes():
+    expected = set(inspect.signature(ReplyOnPause.__init__).parameters) - {"self"}
+    handler = InterruptSafeReplyOnPause(lambda _audio: iter([]), model=FakeVad())
+
+    assert set(handler._copy_kwargs()) == expected
 
 
 def test_stop_playing_reply_silences_a_reply_in_flight():
