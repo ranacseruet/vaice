@@ -105,6 +105,10 @@ class _Worker:
 
     def submit(self, fn, *args) -> Future:
         """Run `fn(*args)` on the worker thread; the future carries the result or the exception."""
+        # Read without a lock, on purpose: stop() is only ever called with nothing in flight (a
+        # failed model load, or the finalizer), so it cannot race submit() today. If stop() is
+        # ever called mid-reply, this check and the queue need a lock: a task enqueued after the
+        # None sentinel would never be answered.
         if self._stopped:
             raise RuntimeError("the MLX worker has been stopped")
         future: Future = Future()
