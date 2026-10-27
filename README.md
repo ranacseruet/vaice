@@ -207,3 +207,8 @@ and register it in `responders/__init__.py`.
   processor each resample internally.
 - llama.cpp's `llama-server` only outputs text; it ignores `modalities`/`audio` request
   fields, which is why the cascade needs a separate TTS step.
+- The cascade speaks one sentence at a time, so the first audio only comes when the first
+  sentence is complete. A sentence ends at `.`, `!` or `?` followed by whitespace, except
+  after a title (`Dr.`), an initialism (`U.S.`), a list number, `etc.` and `a.m.`/`p.m.`,
+  which end a sentence only when the next word is capitalized ("at 3 p.m. Tomorrow" is two
+  sentences, "at 7 a.m. and then" is one).
