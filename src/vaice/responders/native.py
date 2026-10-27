@@ -134,9 +134,10 @@ def _spoken_part(text: str, frames: int, handed_out: int) -> str:
     if handed_out >= frames:
         return text
     words = text.split()
-    # truncate, don't round: the same conservative estimate as Turn.close() — words the user had
-    # no time to hear are never credited to the reply
-    return " ".join(words[: int(len(words) * handed_out / frames)])
+    # truncate, don't round: the same conservative estimate as Turn.close(), which floors and keeps
+    # at least one word because some audio played — words the user had no time to hear stay uncounted
+    keep = max(1, int(len(words) * handed_out / frames)) if handed_out else 0
+    return " ".join(words[:keep])
 
 
 class NativeResponder:
