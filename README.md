@@ -113,6 +113,9 @@ you click it is discarded, so say it again.
   for several turns and llama-server can keep reusing its cached prefix.
 - A corrupt `conversation.json` is renamed to `conversation.json.corrupt` (with a warning in the log)
   and a fresh conversation starts.
+- **A conversation that can't be written to disk** (full disk, read-only file) is only a warning in
+  the log: the reply goes on and the conversation stays in memory, but it is lost when the app stops.
+  The file that was there before is left untouched.
 - **A failed reply** (llama-server down or a model error) does not end the session: the log gets the
   traceback, the transcript shows what was heard of the reply plus `(error: …)`, and the next
   question works. The error note is kept on disk with the turn but is never sent to the model;
@@ -163,14 +166,15 @@ vaice does not read `.env` itself.
 
 Unit tests use fakes for the models: sentence splitting, SSE parsing (including llama.cpp's
 `"content": null` first chunk), llama-server errors (HTTP and mid-stream), transcripts, history
-trimming and persistence, barge-in recording (driven with fastrtc's thread-per-resume pattern),
-the stale-chunk drop and the reset-button stop (the real `ReplyOnPause`, interrupted mid-`next()`
-from another thread), cascade streaming order, native chunking/threading/cancellation and the exit
-path (a model call that never returns must not keep the process alive), the idle polling throttle
-(the handler must not spin while nobody is talking), backend
-selection/fallback, and env-var parsing. The native tests are skipped where MLX isn't installed.
-There is no automated test against the real models; verify the real audio path by hand with the
-steps above.
+trimming and persistence (including a disk that can't be written), failed replies (before, during
+and after the reply, a failure that can't be recorded, and one no one could show in the UI),
+barge-in recording (driven with fastrtc's thread-per-resume pattern), the stale-chunk drop and the
+reset-button stop (the real `ReplyOnPause`, interrupted mid-`next()` from another thread), cascade
+streaming order, native chunking/threading/cancellation and the exit path (a model call that never
+returns must not keep the process alive), the idle polling throttle (the handler must not spin
+while nobody is talking), backend selection/fallback, and env-var parsing. The native tests are
+skipped where MLX isn't installed. There is no automated test against the real models; verify the
+real audio path by hand with the steps above.
 
 ## Layout
 
@@ -226,3 +230,8 @@ and register it in `responders/__init__.py`.
   processor each resample internally.
 - llama.cpp's `llama-server` only outputs text; it ignores `modalities`/`audio` request
   fields, which is why the cascade needs a separate TTS step.
+- The cascade speaks one sentence at a time, so the first audio only comes when the first
+  sentence is complete. A sentence ends at `.`, `!` or `?` followed by whitespace, except
+  after a title (`Dr.`), an initialism (`U.S.`), a list number, `etc.` and `a.m.`/`p.m.`,
+  which end a sentence only when the next word is capitalized ("at 3 p.m. Tomorrow" is two
+  sentences, "at 7 a.m. and then" is one).
