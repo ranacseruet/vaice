@@ -194,12 +194,18 @@ def test_ui_has_the_transcript_a_reset_button_and_loads_the_stored_conversation(
     assert conversation.messages_for_ui() == []
 
 
+def one_component(components, type_name, place):
+    found = [c for c in components if c["type"] == type_name]
+    assert len(found) == 1, f"expected exactly one {type_name} component for {place}, found {len(found)}"
+    return found[0]
+
+
 def test_the_page_says_which_backend_answers():
     stream = build_stream(FakeResponder(), Conversation())
     config = stream.ui.get_config_file()
 
-    (title,) = [c for c in config["components"] if c["type"] == "html"]
-    (subtitle,) = [c for c in config["components"] if c["type"] == "markdown"]
+    title = one_component(config["components"], "html", "the heading")
+    subtitle = one_component(config["components"], "markdown", "the backend subtitle")
     assert UI_TITLE in title["props"]["value"]
     assert FakeResponder.name in subtitle["props"]["value"]
 
@@ -207,7 +213,7 @@ def test_the_page_says_which_backend_answers():
 def test_the_chatbot_is_taller_and_does_not_render_html_tags():
     stream = build_stream(FakeResponder(), Conversation())
 
-    (chatbot,) = [c for c in stream.ui.get_config_file()["components"] if c["type"] == "chatbot"]
+    chatbot = one_component(stream.ui.get_config_file()["components"], "chatbot", "the transcript")
     assert chatbot["props"]["height"] == CHATBOT_HEIGHT
     # Gradio 6.0 flips the default to True; the model can put anything in the transcript
     assert chatbot["props"]["allow_tags"] is False
