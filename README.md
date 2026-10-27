@@ -160,11 +160,15 @@ vaice does not read `.env` itself.
 | `VAICE_NATIVE_PROMPT` | `Respond with interleaved text and audio. Reply naturally and concisely in 1 to 2 spoken sentences.` | system prompt for native |
 | `VAICE_LLM_URL` | `http://localhost:8001/v1/chat/completions` | llama-server chat endpoint (cascade); the `/health` check uses the same host and port. Only llama.cpp is tested |
 | `VAICE_LLM_MODEL` | `gemma-4-12b` | model name sent in the request (informational for llama-server) |
-| `VAICE_PROMPT` | `Reply naturally and concisely in 1 to 2 spoken sentences.` | system prompt for the reply (cascade) |
+| `VAICE_LLM_PROMPT` | `Reply naturally and concisely in 1 to 2 spoken sentences.` | system prompt for the reply (cascade); `VAICE_PROMPT` still works |
 | `VAICE_LLM_TIMEOUT` | `120` | seconds (cascade) |
 | `VAICE_TTS_MODEL` | `mlx-community/Kokoro-82M-bf16` | MLX Kokoro repo (cascade) |
-| `VAICE_VOICE` | `af_heart` | Kokoro voice (cascade) |
-| `VAICE_SPEED` | `1.1` | speech speed (cascade) |
+| `VAICE_TTS_VOICE` | `af_heart` | Kokoro voice (cascade); `VAICE_VOICE` still works |
+| `VAICE_TTS_SPEED` | `1.1` | speech speed (cascade); `VAICE_SPEED` still works |
+
+The three `VAICE_LLM_*`/`VAICE_TTS_*` names above replaced shorter ones (`VAICE_PROMPT`, `VAICE_VOICE`,
+`VAICE_SPEED`) that named neither the backend nor the stage. Both spellings work; if you set both,
+the longer name wins, so an old `.env` keeps working while you migrate.
 
 ## Tests
 
