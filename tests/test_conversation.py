@@ -382,6 +382,27 @@ def test_close_keeps_the_share_of_the_reply_that_had_played():
     assert turn.interrupted and turn.assistant_text == "a b c"
 
 
+def test_an_interrupted_reply_keeps_at_least_one_word():
+    turn = Turn()
+    turn.audio_handed_out(8.0, now=10.0)
+    turn.set_assistant_text("a b c d e f g h")
+    turn.finish()
+
+    turn.close(now=10.1)  # 0.1 of 8 s played: a fraction of a word
+
+    assert turn.interrupted and turn.assistant_text == "a"
+
+
+def test_an_interrupted_reply_with_no_text_stays_empty():
+    turn = Turn()
+    turn.audio_handed_out(8.0, now=10.0)
+    turn.finish()
+
+    turn.close(now=10.1)
+
+    assert turn.interrupted and turn.assistant_text == ""
+
+
 def test_close_after_the_audio_finished_playing_keeps_everything():
     turn = Turn()
     turn.audio_handed_out(8.0, now=10.0)

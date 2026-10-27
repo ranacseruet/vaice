@@ -110,7 +110,8 @@ gone.
 - **Barge-in:** if you talk over a reply, it stops when you stop talking, and history keeps the
   part of the reply that had played, marked `(interrupted)`. That part is estimated, not measured:
   the words of the audio handed out, cut to the share that the time since the first audio could
-  have played (fastrtc queues audio ahead of playback). The native model writes its text well
+  have played (fastrtc queues audio ahead of playback). At least one word is kept, so an
+  interrupted reply is never recorded as empty. The native model writes its text well
   ahead of its audio, so its text is also split by the share of audio generated. Expect it to be
   off by a few words. The chunk that was being generated when you interrupted (≈ 0.8 s native, a
   sentence in cascade) is dropped instead of played; fastrtc would queue it after clearing its
@@ -175,14 +176,17 @@ Unit tests use fakes for the models: sentence splitting, SSE parsing (including 
 `"content": null` first chunk), llama-server errors (HTTP and mid-stream), transcripts, history
 trimming and persistence (including a disk that can't be written), failed replies (before, during
 and after the reply, a failure that can't be recorded, and one no one could show in the UI),
-barge-in recording (driven with fastrtc's thread-per-resume pattern), the stale-chunk drop and the
-reset-button stop (the real `ReplyOnPause`, interrupted mid-`next()` from another thread), cascade
-streaming order, native chunking/threading/cancellation and the exit path (a model call that never
-returns must not keep the process alive), the idle polling throttle (the handler must not spin
-while nobody is talking), backend selection/fallback, the page heading and the chatbot's layout,
-what **New conversation** does to the history, and env-var parsing. The native tests are skipped
-where MLX isn't installed. There is no automated test against the real models; verify the real
-audio path by hand with the steps above.
+barge-in recording (driven with
+fastrtc's thread-per-resume pattern), the stale-chunk drop and the reset-button stop (the real
+`ReplyOnPause`, interrupted mid-`next()` from another thread), the per-connection `copy()` (its
+arguments go by keyword, so a reordered fastrtc signature fails the test), cascade streaming
+order, native chunking/threading/cancellation and the exit path (a model call that never returns
+must not keep the process alive), the idle polling throttle (the handler must not spin while
+nobody is talking), the page heading and the chatbot's layout, what **New conversation** does to
+the history, backend selection/fallback, and env-var parsing. The native tests are skipped where
+MLX isn't installed.
+There is no automated test against the real models; verify the real audio path by hand with the
+steps above.
 
 ## Layout
 
@@ -190,7 +194,8 @@ audio path by hand with the steps above.
 src/vaice/
   app.py            CLI + Gradio/WebRTC UI; wraps a Responder, logs time to first audio, transcript + reset
   interruptible.py  ReplyOnPause that drops the chunk generated while the user interrupts (fastrtc 0.0.34 race);
-                    silences the playing reply for "New conversation"; throttles fastrtc's idle polling
+                    silences the playing reply for "New conversation"; throttles fastrtc's idle polling;
+                    copies itself per connection
   lifecycle.py      the stop signal: Ctrl+C asks the app and its responders to give up
   config.py         env-driven settings (.env.example lists them with their defaults)
   conversation.py   Turn / Conversation: history, trimming, JSON persistence, failure notes
@@ -245,3 +250,9 @@ and register it in `responders/__init__.py`.
   sentences, "at 7 a.m. and then" is one).
 - Gradio 6.0 flips `gr.Chatbot(allow_tags)` to `True`, which would render whatever the model
   writes as HTML. `app.py` sets it to `False` explicitly, so the transcript is always plain text.
+- fastrtc copies the handler for every connection, and its own `ReplyOnPause.copy()` builds a
+  plain `ReplyOnPause`, which would lose the stale-chunk fix. `interruptible.py` overrides
+  `copy()` and passes every argument **by keyword**, so a fastrtc release that adds, drops or
+  reorders a parameter fails loudly there instead of silently handing the handler the wrong value.
+- Kokoro's sample rate is fixed by the model, so it lives in `tts.py` (`SAMPLE_RATE`), not in the
+  env-driven settings in `config.py`.

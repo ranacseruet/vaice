@@ -7,6 +7,8 @@ import numpy as np
 from vaice import config
 from vaice.sentences import clean_for_speech
 
+SAMPLE_RATE = 24000  # fixed by Kokoro
+
 
 @lru_cache(maxsize=1)
 def load_model():
@@ -27,4 +29,4 @@ def speak(text: str) -> Iterator[tuple[int, np.ndarray]]:
     if not text:
         return
     for res in load_model().generate(text=text, voice=config.TTS_VOICE, speed=config.TTS_SPEED):
-        yield (config.TTS_SAMPLE_RATE, np.array(res.audio, dtype=np.float32))
+        yield (SAMPLE_RATE, np.array(res.audio, dtype=np.float32))
