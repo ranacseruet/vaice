@@ -132,6 +132,12 @@ def test_transcribe_of_an_unshaped_200_names_the_body(monkeypatch):
         llm.transcribe("AAAA")
 
 
+def test_transcribe_of_a_non_json_200_names_the_text(monkeypatch):
+    capture_post(monkeypatch, FakeResponse(200, "<html>not found</html>"))
+    with pytest.raises(RuntimeError, match=r"unexpected llama-server response.*html"):
+        llm.transcribe("AAAA")
+
+
 def test_transcribe_http_error_keeps_llama_servers_reason(monkeypatch):
     body = '{"error":{"code":400,"message":"audio too long"}}'
     capture_post(monkeypatch, FakeResponse(400, body))

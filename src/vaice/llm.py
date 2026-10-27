@@ -78,9 +78,11 @@ def transcribe(audio_b64: str) -> str:
     }
     r = requests.post(config.LLM_URL, json=payload, timeout=config.LLM_TIMEOUT)
     _check(r)
-    body = r.json()
     try:  # a 200 that is not the OpenAI shape (a proxy, a different server) must say so clearly
+        body = r.json()
         content = body["choices"][0]["message"]["content"]
+    except ValueError as exc:  # not JSON at all: a proxy's HTML error page, another server
+        raise RuntimeError(f"unexpected llama-server response: {r.text[:300]!r}") from exc
     except (KeyError, IndexError, TypeError) as exc:
         raise RuntimeError(f"unexpected llama-server response: {str(body)[:300]}") from exc
     return (content or "").strip()
