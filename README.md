@@ -119,7 +119,8 @@ gone.
 - **Trimming:** each prompt includes at most the last `VAICE_HISTORY_TURNS` exchanges. The oldest
   are dropped in blocks of half that, not one at a time, so the start of the prompt stays the same
   for several turns and llama-server can keep reusing its cached prefix.
-- A corrupt `conversation.json` is renamed to `conversation.json.corrupt` (with a warning in the log)
+- A corrupt `conversation.json` is renamed to `conversation.json.corrupt` (with a warning in the log;
+  if it cannot even be renamed, vaice starts empty and leaves the file where it is)
   and a fresh conversation starts.
 - **A conversation that can't be written to disk** (full disk, read-only file) is only a warning in
   the log: the reply goes on and the conversation stays in memory, but it is lost when the app stops.
