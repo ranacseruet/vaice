@@ -88,8 +88,10 @@ it as a transcript. The **New conversation** button (and the chatbot's trash ico
 silences a reply that is still playing or queued; a question you were half-way through saying when
 you click it is discarded, so say it again.
 
-- **What the model sees:** earlier turns as plain text. If a transcript is missing or empty,
-  history shows `(inaudible)`.
+- **What the model sees:** earlier turns as plain text. A turn whose transcript has not arrived
+  yet (it is still being transcribed) is left out of the prompt entirely, so the model never sees
+  a reply to a question it cannot read and never reads it as `(inaudible)`. A transcript that
+  arrived but is empty shows `(inaudible)`.
   - **native:** the current question as audio. Your side of history is transcribed by LFM's ASR
     mode on the model's worker thread after the reply is generated, so it doesn't delay the first audio.
   - **cascade:** a transcript of the current question, so the whole conversation is text. Gemma first
