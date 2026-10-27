@@ -179,7 +179,8 @@ CI (`.github/workflows/ci.yml`) runs both on Python 3.10 and 3.12, on an Apple S
 request.
 
 Unit tests use fakes for the models: sentence splitting, SSE parsing (including llama.cpp's
-`"content": null` first chunk), llama-server errors (HTTP and mid-stream), transcripts, history
+`"content": null` first chunk and a malformed `data:` line), llama-server errors (HTTP, mid-stream,
+an unexpected 200 shape and a 200 that is not JSON at all), transcripts, history
 trimming and persistence (including a disk that can't be written), failed replies (before, during
 and after the reply, a failure that can't be recorded, and one no one could show in the UI),
 barge-in recording (driven with

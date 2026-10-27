@@ -21,7 +21,10 @@ def delta_text(line: bytes) -> str:
     data = line[6:].decode("utf-8")
     if data == "[DONE]":
         return ""
-    chunk = json.loads(data)
+    try:
+        chunk = json.loads(data)
+    except json.JSONDecodeError as exc:  # a broken data: line must name itself, not just "Expecting value"
+        raise RuntimeError(f"unexpected llama-server stream line: {data[:200]!r}") from exc
     if "error" in chunk:  # llama-server reports mid-stream failures as a data line too
         raise RuntimeError(f"llama-server error: {chunk['error']}")
     choices = chunk.get("choices") or []  # final usage chunk may have none
@@ -75,7 +78,14 @@ def transcribe(audio_b64: str) -> str:
     }
     r = requests.post(config.LLM_URL, json=payload, timeout=config.LLM_TIMEOUT)
     _check(r)
-    return (r.json()["choices"][0]["message"]["content"] or "").strip()
+    try:  # a 200 that is not the OpenAI shape (a proxy, a different server) must say so clearly
+        body = r.json()
+        content = body["choices"][0]["message"]["content"]
+    except ValueError as exc:  # not JSON at all: a proxy's HTML error page, another server
+        raise RuntimeError(f"unexpected llama-server response: {r.text[:300]!r}") from exc
+    except (KeyError, IndexError, TypeError) as exc:
+        raise RuntimeError(f"unexpected llama-server response: {str(body)[:300]}") from exc
+    return (content or "").strip()
 
 
 def check_server() -> None:
