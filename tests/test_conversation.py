@@ -156,12 +156,20 @@ def test_history_uses_a_transcript_that_arrives_late(monkeypatch):
     assert c.history(before=second) == [("user", "late question"), ("assistant", "answer (interrupted)")]
 
 
-def test_history_falls_back_to_inaudible_when_the_transcript_never_arrives():
+def test_history_leaves_a_pending_transcript_out_of_the_prompt():
     c = Conversation()
-    first = c.start_turn()
-    first.set_assistant_text("answer")
-    assert c.history(before=c.start_turn())[0] == ("user", INAUDIBLE)
-    assert exchange(c, "")  # an empty transcript is inaudible too
+    pending = c.start_turn()
+    pending.set_assistant_text("an answer to a question the model cannot see")
+
+    # The transcript has not arrived yet: the whole exchange is left out, so the prompt
+    # never holds a reply to a question that is missing (and never says the user was
+    # unintelligible while they are still being transcribed).
+    assert c.history(before=c.start_turn()) == []
+
+
+def test_history_shows_a_transcript_that_arrived_empty_as_inaudible():
+    c = Conversation()
+    assert exchange(c, "")  # an empty transcript is inaudible
     assert c.history(before=c.start_turn())[-1] == ("user", INAUDIBLE)
 
 

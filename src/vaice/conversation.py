@@ -152,8 +152,18 @@ def _spoken(turn: Turn) -> str:
 
 
 def to_messages(turns: list[Turn]) -> list[Message]:
+    """The prompt messages for `turns`: what the user said and what was answered.
+
+    A turn whose transcript is still pending is dropped whole: the question has not been
+    transcribed yet, so the answer to it would be a dangling reply, and `(inaudible)` would
+    wrongly say the user was unintelligible rather than still being transcribed. A transcript
+    that arrived but is empty counts as inaudible.
+    """
     messages: list[Message] = []
     for turn in turns:
+        if turn.user_text is None:
+            log.debug("dropping a turn from the prompt: its transcript has not arrived yet")
+            continue
         messages.append(("user", turn.user_text or INAUDIBLE))
         if turn.assistant_text:
             messages.append(("assistant", _spoken(turn)))
