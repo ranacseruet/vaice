@@ -63,6 +63,9 @@ The first run downloads models (about a minute, longer for native). When you see
 click record, ask a question, then stop talking. Use headphones, otherwise the speakers
 feed back into the mic.
 
+The heading says which backend is answering (`native` or `cascade`), so the page tells you what
+you are talking to without reading the log.
+
 The log prints `using native|cascade backend` at startup, and for every reply
 `[native] time to first audio: N.NNs` / `[native] reply finished in N.NNs`, so you can always
 tell which path answered and compare the two backends. A `WARNING ... falling back to cascade`
@@ -80,7 +83,9 @@ Both backends remember the conversation. It is saved to `~/.vaice/conversation.j
 `VAICE_DATA_DIR`) after every change, so it survives page reloads and restarts, and the page shows
 it as a transcript. The **New conversation** button (and the chatbot's trash icon) clears it and
 silences a reply that is still playing or queued; a question you were half-way through saying when
-you click it is discarded, so say it again.
+you click it is discarded, so say it again. What you say *after* the click is the first turn of the
+new conversation: it is answered as usual, but the model gets no earlier turns, because they are
+gone.
 
 - **What the model sees:** earlier turns as plain text. If a transcript is missing or empty,
   history shows `(inaudible)`.
@@ -160,7 +165,8 @@ Unit tests use fakes for the models: sentence splitting, SSE parsing (including 
 trimming and persistence, barge-in recording (driven with fastrtc's thread-per-resume pattern),
 the stale-chunk drop and the reset-button stop (the real `ReplyOnPause`, interrupted mid-`next()`
 from another thread), cascade streaming order, native chunking/threading/cancellation, backend
-selection/fallback, and env-var parsing. The native tests are skipped where MLX isn't installed.
+selection/fallback, the page heading and the chatbot's layout, what **New conversation** does to
+the history, and env-var parsing. The native tests are skipped where MLX isn't installed.
 There is no automated test against the real models; verify the real audio path by hand with the
 steps above.
 
@@ -207,3 +213,5 @@ and register it in `responders/__init__.py`.
   processor each resample internally.
 - llama.cpp's `llama-server` only outputs text; it ignores `modalities`/`audio` request
   fields, which is why the cascade needs a separate TTS step.
+- Gradio 6.0 flips `gr.Chatbot(allow_tags)` to `True`, which would render whatever the model
+  writes as HTML. `app.py` sets it to `False` explicitly, so the transcript is always plain text.
