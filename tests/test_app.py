@@ -11,7 +11,7 @@ from fastrtc import AdditionalOutputs
 from vaice import app
 from vaice import conversation as conv
 from vaice import lifecycle
-from vaice.app import build_stream, make_handler, parse_args
+from vaice.app import CHATBOT_HEIGHT, UI_TITLE, build_stream, make_handler, parse_args
 from vaice.conversation import Conversation
 from vaice.interruptible import InterruptSafeReplyOnPause
 from vaice.responders.cascade import CascadeResponder
@@ -195,6 +195,44 @@ def test_ui_has_the_transcript_a_reset_button_and_loads_the_stored_conversation(
     conversation.start_turn().set_user_text("hello again")
     stream.ui.fns[clear["id"]].fn()
     assert conversation.messages_for_ui() == []
+
+
+def one_component(components, type_name, place):
+    found = [c for c in components if c["type"] == type_name]
+    assert len(found) == 1, f"expected exactly one {type_name} component for {place}, found {len(found)}"
+    return found[0]
+
+
+def test_the_page_says_which_backend_answers():
+    stream = build_stream(FakeResponder(), Conversation())
+    config = stream.ui.get_config_file()
+
+    title = one_component(config["components"], "html", "the heading")
+    subtitle = one_component(config["components"], "markdown", "the backend subtitle")
+    assert UI_TITLE in title["props"]["value"]
+    assert FakeResponder.name in subtitle["props"]["value"]
+
+
+def test_the_chatbot_is_taller_and_does_not_render_html_tags():
+    stream = build_stream(FakeResponder(), Conversation())
+
+    chatbot = one_component(stream.ui.get_config_file()["components"], "chatbot", "the transcript")
+    assert chatbot["props"]["height"] == CHATBOT_HEIGHT
+    # Gradio 6.0 flips the default to True; the model can put anything in the transcript
+    assert chatbot["props"]["allow_tags"] is False
+
+
+def test_what_you_say_after_new_conversation_is_the_next_turn():
+    conversation = Conversation()
+    stream = build_stream(FakeResponder(), conversation)
+    (click,) = [d for d in stream.ui.get_config_file()["dependencies"] if d["targets"][0][1] == "click"]
+
+    conversation.start_turn().set_user_text("said before the reset")
+    stream.ui.fns[click["id"]].fn()  # the button
+
+    turn = conversation.start_turn()  # what you say next
+    assert conversation.history(before=turn) == []  # the old conversation is gone
+    assert conversation.messages_for_ui() == [{"role": "user", "content": "…"}]
 
 
 def test_the_stream_drops_the_chunk_a_barge_in_leaves_in_flight():

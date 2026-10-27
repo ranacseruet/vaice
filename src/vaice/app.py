@@ -17,6 +17,13 @@ log = logging.getLogger(__name__)
 
 UI_TRANSCRIPT_WAIT = 2.0  # seconds to hold the transcript update for the user's transcript
 ERROR_TEXT_LIMIT = 200  # characters of a failure shown in the UI; the traceback goes to the log
+CHATBOT_HEIGHT = 500  # pixels; the default (400) leaves the transcript cramped next to the mic
+UI_TITLE = "vaice"  # the heading above the mic
+
+
+def _subtitle(responder: Responder) -> str:
+    """The line under the heading: which backend is answering."""
+    return f"{responder.name} backend · running locally"
 
 
 def _error_text(exc: Exception) -> str:
@@ -75,13 +82,15 @@ def make_handler(responder: Responder, conversation: Conversation):
 
 
 def build_stream(responder: Responder, conversation: Conversation) -> Stream:
-    chatbot = gr.Chatbot(type="messages", label="Conversation")
+    chatbot = gr.Chatbot(type="messages", label="Conversation", height=CHATBOT_HEIGHT, allow_tags=False)
     stream = Stream(
         handler=InterruptSafeReplyOnPause(make_handler(responder, conversation)),
         modality="audio",
         mode="send-receive",
         additional_outputs=[chatbot],
         additional_outputs_handler=lambda old, new: new,
+        # The heading says which backend answers, so the page tells you what you are talking to
+        ui_args={"title": UI_TITLE, "subtitle": _subtitle(responder)},
     )
     with stream.ui:
         stream.ui.load(conversation.messages_for_ui, outputs=chatbot)  # show the stored conversation on every page load
