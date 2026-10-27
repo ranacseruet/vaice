@@ -74,9 +74,11 @@ Notes on the native backend: LFM2.5-Audio is a 1.5B model, English only, so expe
 answers than Gemma 12B. Replies are capped at 512 tokens (text and audio frames together);
 if one is cut off, the log says so.
 
-Ctrl+C stops the app: the reply that is in flight is abandoned and the process exits right
-away, even if the model call never returns (the log says `the app is stopping; the reply is
-abandoned`). The turns that were already finished are on disk.
+On the native backend, Ctrl+C stops the app: the reply that is in flight is abandoned and the
+process exits right away, even if the model call never returns (the log says `the app is
+stopping; the reply is abandoned`). The turns that were already finished are on disk. The
+cascade does not have this guarantee: its reply runs inside a blocking request to
+llama-server, so Ctrl+C may wait for that request to time out (`VAICE_LLM_TIMEOUT`).
 
 ## Conversation history
 
