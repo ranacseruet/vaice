@@ -228,7 +228,7 @@ def test_a_failed_reply_is_finished_not_marked_interrupted():
             raise RuntimeError("llama-server fell over")
 
     conversation = Conversation()
-    *chunks, update = make_handler(Failing(), conversation)(AUDIO)  # no raise: fastrtc would kill the connection
+    *chunks, update = make_handler(Failing(), conversation)(AUDIO)  # no raise: the error goes to the UI
 
     assert len(chunks) == 1
     assert isinstance(update, AdditionalOutputs)
@@ -276,7 +276,27 @@ def test_a_failed_reply_is_logged_with_its_traceback(monkeypatch, caplog):
     assert any(r.exc_info for r in caplog.records)
 
 
-def test_a_failure_that_cannot_be_saved_still_shows_the_error_and_keeps_the_connection(monkeypatch, caplog):
+def test_the_connection_survives_when_the_ui_update_itself_fails(monkeypatch, caplog):
+    class Failing(FakeResponder):
+        def respond(self, audio, history, turn):
+            raise RuntimeError("llama-server fell over")
+
+    conversation = Conversation()
+
+    def boom(self):
+        raise RuntimeError("the view exploded")
+
+    monkeypatch.setattr(Conversation, "messages_for_ui", boom)
+
+    with caplog.at_level(logging.ERROR, logger="vaice.app"):
+        yields = list(make_handler(Failing(), conversation)(AUDIO))  # no raise: this would kill the connection
+
+    assert yields == []  # no audio and no view to hand over, but the generator ended normally
+    assert "[fake] reply failed" in caplog.text
+    assert "could not show the failure in the chatbot" in caplog.text
+
+
+def test_a_failure_that_cannot_be_recorded_still_shows_the_error_and_keeps_the_connection(monkeypatch, caplog):
     class Failing(FakeResponder):
         def respond(self, audio, history, turn):
             raise RuntimeError("llama-server fell over")
@@ -294,7 +314,7 @@ def test_a_failure_that_cannot_be_saved_still_shows_the_error_and_keeps_the_conn
     monkeypatch.setattr(conversation, "_save", save_that_fails_on_the_second_call)
 
     with caplog.at_level(logging.ERROR, logger="vaice.app"):
-        *_, update = make_handler(Failing(), conversation)(AUDIO)  # no raise: fastrtc would kill the connection
+        *_, update = make_handler(Failing(), conversation)(AUDIO)  # no raise: the error goes to the UI
 
     assert isinstance(update, AdditionalOutputs)
     assert update.args == (
@@ -303,7 +323,67 @@ def test_a_failure_that_cannot_be_saved_still_shows_the_error_and_keeps_the_conn
             {"role": "assistant", "content": "(error: RuntimeError: llama-server fell over)"},
         ],
     )
-    assert "could not save the failure" in caplog.text
+    assert "could not record the failure on the turn" in caplog.text
+
+
+def test_a_failure_before_the_reply_starts_is_reported_in_the_ui_and_does_not_escape(monkeypatch, caplog):
+    conversation = Conversation()
+
+    def boom():
+        raise RuntimeError("cannot start a turn")
+
+    monkeypatch.setattr(conversation, "start_turn", boom)
+
+    with caplog.at_level(logging.ERROR, logger="vaice.app"):
+        outputs = list(make_handler(FakeResponder(), conversation)(AUDIO))
+
+    (update,) = outputs
+    assert isinstance(update, AdditionalOutputs)
+    assert update.args == ([{"role": "assistant", "content": "(error: RuntimeError: cannot start a turn)"}],)
+    assert "[fake] reply failed" in caplog.text
+
+
+def test_a_failure_reading_the_history_is_recorded_on_the_turn(monkeypatch, caplog):
+    conversation = Conversation()
+
+    def boom(before):
+        raise RuntimeError("history exploded")
+
+    monkeypatch.setattr(conversation, "history", boom)
+
+    with caplog.at_level(logging.ERROR, logger="vaice.app"):
+        outputs = list(make_handler(FakeResponder(), conversation)(AUDIO))
+
+    (update,) = outputs
+    assert isinstance(update, AdditionalOutputs)
+    assert update.args == (
+        [
+            {"role": "user", "content": "(inaudible)"},
+            {"role": "assistant", "content": "(error: RuntimeError: history exploded)"},
+        ],
+    )
+    assert conversation._turns[0].error == "RuntimeError: history exploded"
+    assert conversation._turns[0].complete
+
+
+def test_a_failure_finishing_the_turn_is_reported_in_the_ui(monkeypatch, caplog):
+    def boom(self):
+        raise RuntimeError("cannot finish the turn")
+
+    monkeypatch.setattr(conv.Turn, "finish", boom)
+    conversation = Conversation()
+
+    with caplog.at_level(logging.ERROR, logger="vaice.app"):
+        *chunks, update = make_handler(FakeResponder(), conversation)(AUDIO)
+
+    assert len(chunks) == 1  # the audio that was handed out before the failure
+    assert isinstance(update, AdditionalOutputs)
+    assert update.args == (
+        [
+            {"role": "user", "content": "what was asked"},
+            {"role": "assistant", "content": "an answer (error: RuntimeError: cannot finish the turn)"},
+        ],
+    )
 
 
 def test_a_reply_whose_audio_is_still_playing_when_the_next_turn_starts_is_cut_to_what_played(monkeypatch):

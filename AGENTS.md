@@ -35,6 +35,7 @@ Config is entirely env-driven in `config.py` (`VAICE_*`); `--backend` overrides 
 - **Gemma + history:** with earlier turns in the prompt, Gemma often mishears a new audio clip or answers an earlier question, so the cascade transcribes first and keeps the conversation in text. Transcribe with `temperature: 0`; the server's default sampling mishears words.
 - **mlx-audio LFM multi-turn:** `generate_from_chat_state` can't replay earlier assistant audio and prefills from scratch each call, so history is text and only the current clip is audio (one clip per `ChatState`).
 - **Input audio:** raw 48 kHz browser audio works as-is on both backends (each resamples internally); `audio.py` handles int16 → float scaling and base64 WAV.
+- **A reply error must not escape the generator:** fastrtc wraps the per-connection `emit()` in `webrtc_error_handler` (`webrtc_connection_mixin.py`), so an error that escapes the reply generator comes back as a `WebRTCError`, which the player loop re-raises (`utils.py: player_worker_decode`) — the connection's audio task dies and the page stays mute until a reload. `app.py` therefore catches the error inside the generator, records it on the turn and shows it in the chatbot (`tests/test_interruptible.py` pins both halves); even reading the state back for the UI is guarded, so the generator itself never raises. `conversation.py:_save()` treats a failed write as a warning: the conversation continues in memory and is lost when the app stops.
 
 ## Repo conventions
 
