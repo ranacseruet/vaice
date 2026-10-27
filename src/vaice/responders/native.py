@@ -2,8 +2,9 @@
 import logging
 import queue
 import threading
+import weakref
 from collections.abc import Iterator, Sequence
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future
 
 import mlx.core as mx
 import numpy as np
@@ -17,7 +18,7 @@ from mlx_audio.sts.models.lfm_audio.model import (
 )
 from mlx_audio.sts.models.lfm_audio.processor import ChatState, LFM2AudioProcessor
 
-from vaice import config
+from vaice import config, lifecycle
 from vaice.audio import to_mono_float
 from vaice.conversation import Message, Turn
 from vaice.responders.base import AudioFrame
@@ -35,10 +36,89 @@ MAX_NEW_TOKENS = 512  # counts text tokens and audio frames together
 WARMUP_ASR_WAIT = 60  # seconds to wait for the warm-up transcription before giving up on the model
 ASR_PROMPT = "Perform ASR."
 ASR_MAX_NEW_TOKENS = 256
+# How often the consumer checks whether the app is stopping while it waits for the model
+POLL_SECONDS = 0.25
 # Control tokens the model emits as text; decode_text would spell them out
 _CONTROL_TOKENS = {AUDIO_START_TOKEN, IM_END_TOKEN, TEXT_END_TOKEN}
 
 _DONE = object()
+
+
+def _run_tasks(tasks: queue.Queue) -> None:
+    """Run the queued tasks one at a time, until the queue is closed."""
+    while True:
+        task = tasks.get()
+        if task is None:
+            return
+        _run_one(task)
+        # The task holds the future, which may hold the exception of a failed reply; that
+        # traceback holds the responder (and with it this worker). Drop the task before waiting
+        # for the next one, or the worker would never be collected and its thread would never
+        # stop.
+        del task
+
+
+def _run_one(task) -> None:
+    """Run one task in its own frame, so that nothing of it outlives the call."""
+    future, fn = task
+    if not future.set_running_or_notify_cancel():
+        return  # cancelled before it started
+    try:
+        future.set_result(fn())
+    except BaseException as exc:
+        future.set_exception(exc)
+
+
+def _stop_tasks(tasks: queue.Queue) -> None:
+    """Cancel the queued tasks and let the worker thread exit after the current one.
+
+    The thread is never waited for: it may be stuck inside a model call, and waiting for it is
+    exactly the hang the daemon thread avoids.
+    """
+    while True:
+        try:
+            task = tasks.get_nowait()
+        except queue.Empty:
+            break
+        if task is not None:
+            task[0].cancel()  # the caller gets a CancelledError instead of waiting forever
+    tasks.put(None)
+
+
+class _Worker:
+    """One daemon thread that runs the MLX calls, one at a time.
+
+    Not a `ThreadPoolExecutor`: `concurrent.futures.thread._python_exit` joins the pool's worker
+    threads when the interpreter exits, and those threads are not daemons. A model call that
+    never returns (a stuck generation) would then keep the app alive at exit. A daemon thread
+    is abandoned with the process instead.
+    """
+
+    def __init__(self, name: str = "vaice-mlx"):
+        self._tasks: queue.Queue = queue.Queue()
+        self._stopped = False
+        self._thread = threading.Thread(target=_run_tasks, args=(self._tasks,), name=name, daemon=True)
+        self._thread.start()
+        # The thread must not keep the worker alive, or it would never stop; when the worker is
+        # gone, the thread is told to finish.
+        self._finalizer = weakref.finalize(self, _stop_tasks, self._tasks)
+
+    def submit(self, fn, *args) -> Future:
+        """Run `fn(*args)` on the worker thread; the future carries the result or the exception."""
+        # Read without a lock, on purpose: stop() is only ever called with nothing in flight (a
+        # failed model load, or the finalizer), so it cannot race submit() today. If stop() is
+        # ever called mid-reply, this check and the queue need a lock: a task enqueued after the
+        # None sentinel would never be answered.
+        if self._stopped:
+            raise RuntimeError("the MLX worker has been stopped")
+        future: Future = Future()
+        self._tasks.put((future, lambda: fn(*args)))
+        return future
+
+    def stop(self) -> None:
+        """Give up on the queued tasks and let the thread exit when it is done with the current one."""
+        self._stopped = True
+        _stop_tasks(self._tasks)
 
 
 def _spoken_part(text: str, frames: int, handed_out: int) -> str:
@@ -68,32 +148,33 @@ class NativeResponder:
 
     name = "native"
 
-    def __init__(self, model, processor, prompt: str = config.NATIVE_PROMPT, executor: ThreadPoolExecutor | None = None):
+    def __init__(self, model, processor, prompt: str = config.NATIVE_PROMPT, worker: "_Worker | None" = None):
         self._model = model
         self._processor = processor
         self._prompt = prompt
-        self._executor = executor or ThreadPoolExecutor(max_workers=1, thread_name_prefix="vaice-mlx")
+        self._worker = worker or _Worker()
 
     @classmethod
     def load(cls, model_name: str = config.NATIVE_MODEL) -> "NativeResponder":
-        executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="vaice-mlx")
+        worker = _Worker()
         try:
-            model, processor = executor.submit(
+            model, processor = worker.submit(
                 lambda: (LFM2AudioModel.from_pretrained(model_name), LFM2AudioProcessor.from_pretrained(model_name))
             ).result()
-            responder = cls(model, processor, executor=executor)
+            responder = cls(model, processor, worker=worker)
             # The first generation costs ~2s extra (kernel compilation); pay it at startup, not on the first question
             # (this also compiles the ASR path, which runs after generation)
             turn = Turn()
             for _ in responder.respond((16000, np.zeros((1, 8000), dtype=np.int16)), [], turn):
                 pass
         except BaseException:
-            executor.shutdown(wait=True)  # don't leave a live worker behind (auto mode falls back to cascade)
+            worker.stop()  # don't leave a live worker behind (auto mode falls back to cascade)
             raise
         if not turn.transcribed.wait(WARMUP_ASR_WAIT):  # the ASR warm-up; generation itself was consumed above
             # The worker may be stuck inside the ASR call: abandon it rather than hang startup here
-            # (auto mode falls back to cascade; the thread exits on its own if the ASR ever returns).
-            executor.shutdown(wait=False, cancel_futures=True)
+            # (auto mode falls back to cascade; the daemon thread dies with the process if the call
+            # never returns).
+            worker.stop()
             raise RuntimeError(f"native warm-up transcription did not finish in {WARMUP_ASR_WAIT}s")
         return responder
 
@@ -101,21 +182,45 @@ class NativeResponder:
         chunks: queue.Queue = queue.Queue()
         cancelled = threading.Event()
         progress = [("", 0)]  # (reply text, audio frames) generated so far; replaced whole by the worker
+        # The queued work must not hold the responder strongly: the worker holds the queue, and the
+        # queue would then hold the responder, which holds the worker - a cycle that would keep the
+        # worker (and its thread) alive after the responder is gone. The generator below keeps the
+        # responder alive while the reply is running, so the weak reference still resolves then.
+        ref = weakref.ref(self)
 
         def work() -> None:
+            responder = ref()
             try:
-                for item in self._generate(audio, history, turn, cancelled, progress):
+                if responder is None:  # the responder is gone: there is nothing to reply for
+                    return
+                for item in responder._generate(audio, history, turn, cancelled, progress):
                     chunks.put(item)
             except BaseException as exc:  # re-raised in the consumer below
                 chunks.put(exc)
             finally:
                 chunks.put(_DONE)  # first, so the consumer isn't held up by the transcription
-            self._transcribe_into(audio, turn)
+            if responder is not None:
+                responder._transcribe_into(audio, turn)
 
-        self._executor.submit(work)
+        future = self._worker.submit(work)
         handed_out = 0
         try:
-            while (item := chunks.get()) is not _DONE:
+            while True:
+                try:
+                    item = chunks.get(timeout=POLL_SECONDS)
+                except queue.Empty:
+                    if lifecycle.stopping.is_set():
+                        # The app is stopping: don't wait for a model call that may never return.
+                        # The worker thread is a daemon, so the process can exit with it stuck.
+                        log.warning("the app is stopping; the reply is abandoned")
+                        return
+                    if future.cancelled():
+                        # The worker was stopped before the reply started: nothing will ever arrive.
+                        log.warning("the MLX worker was stopped; the reply is abandoned")
+                        return
+                    continue
+                if item is _DONE:
+                    break
                 if isinstance(item, BaseException):
                     raise item
                 frame, n_frames = item

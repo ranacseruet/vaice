@@ -8,8 +8,9 @@ import numpy as np
 from fastrtc import AdditionalOutputs, Stream
 
 from vaice import config
-from vaice.conversation import Conversation
+from vaice.conversation import Conversation, Turn
 from vaice.interruptible import InterruptSafeReplyOnPause, stop_playing_reply
+from vaice.lifecycle import install_stop_handler, request_stop
 from vaice.responders import BACKENDS, Responder, create_responder
 
 log = logging.getLogger(__name__)
@@ -33,32 +34,47 @@ def make_handler(responder: Responder, conversation: Conversation):
     def reply(audio: tuple[int, np.ndarray]):
         """Called by ReplyOnPause when the speaker stops; streams audio back as it is produced."""
         start = time.perf_counter()  # before history(): waiting for the last transcript counts as latency
-        turn = conversation.start_turn()
-        history = conversation.history(before=turn)
-        first = True
+        turn: Turn | None = None
         try:
+            turn = conversation.start_turn()
+            history = conversation.history(before=turn)
+            first = True
             for chunk in responder.respond(audio, history, turn):
                 if first:
                     log.info("[%s] time to first audio: %.2fs", responder.name, time.perf_counter() - start)
                     first = False
                 turn.audio_handed_out(len(chunk[1]) / chunk[0])
                 yield chunk
+            log.info("[%s] reply finished in %.2fs", responder.name, time.perf_counter() - start)
+            # Not reached when the reply is interrupted: the next turn marks this one interrupted instead
+            turn.finish()
         except Exception as exc:
-            # Swallowed on purpose: fastrtc turns an emit() error into a WebRTCError that kills the
-            # connection's audio task, so re-raising here would leave the page mute until a reload.
-            try:
-                turn.fail(_error_text(exc))  # what was heard of the reply, plus why it stopped
-            except OSError:
-                # e.g. the conversation file can't be written: the error is still in the turn's
-                # memory and shown below; only the persistence failed. Re-raising would brick the
-                # connection just like the original bug.
-                log.exception("[%s] could not save the failure on the turn", responder.name)
+            # Swallowed on purpose: fastrtc wraps the per-connection emit() in
+            # webrtc_error_handler (webrtc_connection_mixin.py), so an error that escapes the reply
+            # generator comes back as a WebRTCError, which the player loop re-raises (utils.py:
+            # player_worker_decode) — the connection's audio task dies and the page stays mute
+            # until a reload. Catching the error here keeps the connection and shows the reason
+            # in the chatbot instead of only in the log.
             log.exception("[%s] reply failed", responder.name)
-            yield AdditionalOutputs(conversation.messages_for_ui())  # show the error, keep the connection
+            if turn is not None:
+                try:
+                    turn.fail(_error_text(exc))  # what was heard of the reply, plus why it stopped
+                except Exception:
+                    # The turn could not be recorded at all: the error is still in the turn's memory
+                    # and shown in the chatbot; only the recording failed.
+                    log.exception("[%s] could not record the failure on the turn", responder.name)
+            try:
+                # Guarded too: even reading the conversation back for the UI could fail (a bad turn
+                # record). The log now holds both errors, the chatbot keeps what it is showing, and
+                # the connection survives.
+                messages = conversation.messages_for_ui()
+                if turn is None:  # the turn could not even be started: the reason is shown on its own
+                    messages = messages + [{"role": "assistant", "content": f"(error: {_error_text(exc)})"}]
+            except Exception:
+                log.exception("[%s] could not show the failure in the chatbot", responder.name)
+                return
+            yield AdditionalOutputs(messages)  # show the error, keep the connection
             return
-        log.info("[%s] reply finished in %.2fs", responder.name, time.perf_counter() - start)
-        # Not reached when the reply is interrupted: the next turn marks this one interrupted instead
-        turn.finish()
         turn.transcribed.wait(UI_TRANSCRIPT_WAIT)
         yield AdditionalOutputs(conversation.messages_for_ui())
 
@@ -104,11 +120,18 @@ def main() -> None:
     args = parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
-    responder = create_responder(args.backend)
-    log.info("using %s backend", responder.name)
+    install_stop_handler()  # Ctrl+C: the responders give up, gradio closes the server
+    try:
+        responder = create_responder(args.backend)
+        log.info("using %s backend", responder.name)
 
-    conversation = Conversation(config.CONVERSATION_FILE, window=config.HISTORY_TURNS)
-    log.info("conversation history in %s (%d turns loaded)", config.CONVERSATION_FILE, len(conversation))
+        conversation = Conversation(config.CONVERSATION_FILE, window=config.HISTORY_TURNS)
+        log.info("conversation history in %s (%d turns loaded)", config.CONVERSATION_FILE, len(conversation))
 
-    stream = build_stream(responder, conversation)
-    stream.ui.launch(server_port=config.PORT)
+        stream = build_stream(responder, conversation)
+        stream.ui.launch(server_port=config.PORT)
+    except KeyboardInterrupt:
+        # Ctrl+C while the model was loading: nothing to close, just leave
+        log.info("stopped")
+    finally:
+        request_stop()  # the app is over: don't wait for a model call that may never return

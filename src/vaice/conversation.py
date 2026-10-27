@@ -74,12 +74,14 @@ class Turn:
         """The reply failed. `message` is shown in the UI, never sent to the model; a transcript
         the responder never reported counts as inaudible so the next turn's history doesn't wait."""
         with self._lock:
-            self.error = message
-            if self.user_text is None:
-                self.user_text = ""
-                self.transcribed.set()
-            self._changed()
-        self.finish()  # also a no-op if the turn was already closed
+            try:
+                self.error = message
+                if self.user_text is None:
+                    self.user_text = ""
+                    self.transcribed.set()
+                self._changed()
+            finally:
+                self.finish()  # also a no-op if the turn was already closed
 
     def finish(self) -> None:
         """The reply ran to the end. A turn already closed (interrupted) stays as it was."""
@@ -152,8 +154,18 @@ def _spoken(turn: Turn) -> str:
 
 
 def to_messages(turns: list[Turn]) -> list[Message]:
+    """The prompt messages for `turns`: what the user said and what was answered.
+
+    A turn whose transcript is still pending is dropped whole: the question has not been
+    transcribed yet, so the answer to it would be a dangling reply, and `(inaudible)` would
+    wrongly say the user was unintelligible rather than still being transcribed. A transcript
+    that arrived but is empty counts as inaudible.
+    """
     messages: list[Message] = []
     for turn in turns:
+        if turn.user_text is None:
+            log.debug("dropping a turn from the prompt: its transcript has not arrived yet")
+            continue
         messages.append(("user", turn.user_text or INAUDIBLE))
         if turn.assistant_text:
             messages.append(("assistant", _spoken(turn)))
@@ -216,19 +228,33 @@ class Conversation:
             self._save()
 
     def _save(self) -> None:
+        """Write the conversation to disk.
+
+        A failed write is a warning, not an error: the conversation stays in memory and the reply
+        continues (a full disk or a read-only file must not end a conversation). Only the
+        persistence is lost.
+        """
         if not self._path:
             return
         with self._lock:  # re-entrant: also serializes writers so they can't clobber each other's temp file
-            data = {"version": _VERSION, "turns": [t.to_dict() for t in self._turns]}
-            self._path.parent.mkdir(parents=True, exist_ok=True)
-            fd, tmp = tempfile.mkstemp(dir=self._path.parent, prefix=self._path.name, suffix=".tmp")
+            tmp: str | None = None
             try:
+                data = {"version": _VERSION, "turns": [t.to_dict() for t in self._turns]}
+                self._path.parent.mkdir(parents=True, exist_ok=True)
+                fd, tmp = tempfile.mkstemp(dir=self._path.parent, prefix=self._path.name, suffix=".tmp")
                 with os.fdopen(fd, "w", encoding="utf-8") as f:
                     json.dump(data, f)
                 os.replace(tmp, self._path)  # readers see the old file or the new one, never half of one
-            except BaseException:
-                os.unlink(tmp)
-                raise
+                tmp = None
+            except OSError as exc:
+                log.warning("could not save the conversation to %s (%s: %s); continuing in memory",
+                            self._path, type(exc).__name__, exc)
+            finally:
+                if tmp is not None:
+                    try:
+                        os.unlink(tmp)
+                    except OSError:
+                        pass  # the temp file is already gone, or cannot be removed either
 
     def _load(self) -> list[Turn]:
         try:

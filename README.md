@@ -77,6 +77,12 @@ Notes on the native backend: LFM2.5-Audio is a 1.5B model, English only, so expe
 answers than Gemma 12B. Replies are capped at 512 tokens (text and audio frames together);
 if one is cut off, the log says so.
 
+On the native backend, Ctrl+C stops the app: the reply that is in flight is abandoned and the
+process exits right away, even if the model call never returns (the log says `the app is
+stopping; the reply is abandoned`). The turns that were already finished are on disk. The
+cascade does not have this guarantee: its reply runs inside a blocking request to
+llama-server, so Ctrl+C may wait for that request to time out (`VAICE_LLM_TIMEOUT`).
+
 ## Conversation history
 
 Both backends remember the conversation. It is saved to `~/.vaice/conversation.json` (see
@@ -87,8 +93,10 @@ you click it is discarded, so say it again. What you say *after* the click is th
 new conversation: it is answered as usual, but the model gets no earlier turns, because they are
 gone.
 
-- **What the model sees:** earlier turns as plain text. If a transcript is missing or empty,
-  history shows `(inaudible)`.
+- **What the model sees:** earlier turns as plain text. A turn whose transcript has not arrived
+  yet (it is still being transcribed) is left out of the prompt entirely, so the model never sees
+  a reply to a question it cannot read and never reads it as `(inaudible)`. A transcript that
+  arrived but is empty shows `(inaudible)`.
   - **native:** the current question as audio. Your side of history is transcribed by LFM's ASR
     mode on the model's worker thread after the reply is generated, so it doesn't delay the first audio.
   - **cascade:** a transcript of the current question, so the whole conversation is text. Gemma first
@@ -112,6 +120,9 @@ gone.
   for several turns and llama-server can keep reusing its cached prefix.
 - A corrupt `conversation.json` is renamed to `conversation.json.corrupt` (with a warning in the log)
   and a fresh conversation starts.
+- **A conversation that can't be written to disk** (full disk, read-only file) is only a warning in
+  the log: the reply goes on and the conversation stays in memory, but it is lost when the app stops.
+  The file that was there before is left untouched.
 - **A failed reply** (llama-server down or a model error) does not end the session: the log gets the
   traceback, the transcript shows what was heard of the reply plus `(error: …)`, and the next
   question works. The error note is kept on disk with the turn but is never sent to the model;
@@ -162,13 +173,16 @@ vaice does not read `.env` itself.
 
 Unit tests use fakes for the models: sentence splitting, SSE parsing (including llama.cpp's
 `"content": null` first chunk), llama-server errors (HTTP and mid-stream), transcripts, history
-trimming and persistence, barge-in recording (driven with fastrtc's thread-per-resume pattern),
-the stale-chunk drop and the reset-button stop (the real `ReplyOnPause`, interrupted mid-`next()`
-from another thread), cascade streaming order, native chunking/threading/cancellation, backend
-selection/fallback, the page heading and the chatbot's layout, what **New conversation** does to
-the history, and env-var parsing. The native tests are skipped where MLX isn't installed.
-There is no automated test against the real models; verify the real audio path by hand with the
-steps above.
+trimming and persistence (including a disk that can't be written), failed replies (before, during
+and after the reply, a failure that can't be recorded, and one no one could show in the UI),
+barge-in recording (driven with fastrtc's thread-per-resume pattern), the stale-chunk drop and the
+reset-button stop (the real `ReplyOnPause`, interrupted mid-`next()` from another thread), cascade
+streaming order, native chunking/threading/cancellation and the exit path (a model call that never
+returns must not keep the process alive), the idle polling throttle (the handler must not spin
+while nobody is talking), backend selection/fallback, the page heading and the chatbot's layout,
+what **New conversation** does to the history, and env-var parsing. The native tests are skipped
+where MLX isn't installed. There is no automated test against the real models; verify the real
+audio path by hand with the steps above.
 
 ## Layout
 
@@ -176,7 +190,8 @@ steps above.
 src/vaice/
   app.py            CLI + Gradio/WebRTC UI; wraps a Responder, logs time to first audio, transcript + reset
   interruptible.py  ReplyOnPause that drops the chunk generated while the user interrupts (fastrtc 0.0.34 race);
-                    silences the playing reply for "New conversation"
+                    silences the playing reply for "New conversation"; throttles fastrtc's idle polling
+  lifecycle.py      the stop signal: Ctrl+C asks the app and its responders to give up
   config.py         env-driven settings (.env.example lists them with their defaults)
   conversation.py   Turn / Conversation: history, trimming, JSON persistence, failure notes
   audio.py          mic frame → base64 WAV / float mono
@@ -207,11 +222,26 @@ and register it in `responders/__init__.py`.
   Kokoro uses MLX's default stream. Put any model that creates its own MLX streams on a single
   worker thread the same way. The native transcription (ASR) runs on that same worker, right after
   the reply is generated.
+- fastrtc polls the reply handler in a tight loop while nobody is talking (`utils.py`:
+  `player_worker_decode`), which burned most of a core (~32k calls/s, measured). An idle
+  `emit()` therefore waits for the pause event instead of returning at once: ~37 calls/s and
+  ~1% of a core. The wait ends as soon as the pause is detected, so the reply still starts
+  right away.
+- The native MLX worker is a **daemon** thread, not a `ThreadPoolExecutor`: at exit the
+  interpreter joins a thread pool's workers (`concurrent.futures.thread._python_exit`) and those
+  threads are not daemons, so a model call that never returns would keep the app alive. A daemon
+  thread is abandoned with the process instead, and Ctrl+C asks the reply in flight to give up
+  (`lifecycle.py`).
 - Gemma needs the text prompt **before** the audio in the message content (the cascade's
   transcription request).
 - Raw 48 kHz browser audio works as-is on both backends: llama.cpp and the mlx-audio
   processor each resample internally.
 - llama.cpp's `llama-server` only outputs text; it ignores `modalities`/`audio` request
   fields, which is why the cascade needs a separate TTS step.
+- The cascade speaks one sentence at a time, so the first audio only comes when the first
+  sentence is complete. A sentence ends at `.`, `!` or `?` followed by whitespace, except
+  after a title (`Dr.`), an initialism (`U.S.`), a list number, `etc.` and `a.m.`/`p.m.`,
+  which end a sentence only when the next word is capitalized ("at 3 p.m. Tomorrow" is two
+  sentences, "at 7 a.m. and then" is one).
 - Gradio 6.0 flips `gr.Chatbot(allow_tags)` to `True`, which would render whatever the model
   writes as HTML. `app.py` sets it to `False` explicitly, so the transcript is always plain text.

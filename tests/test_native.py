@@ -1,8 +1,11 @@
 """tests for the native backend"""
 import gc
 import logging
+import subprocess
+import sys
 import threading
 import time
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -19,6 +22,7 @@ from mlx_audio.sts.models.lfm_audio.model import (  # noqa: E402
     LFMModality,
 )
 
+from vaice import lifecycle  # noqa: E402
 from vaice.conversation import Turn  # noqa: E402
 from vaice.responders import native  # noqa: E402
 from vaice.responders.native import (  # noqa: E402
@@ -119,6 +123,26 @@ def reply(responder, history=(), turn=None):
 AUDIO = (48000, np.zeros((1, 480), dtype=np.int16))
 
 
+def worker_threads():
+    return [t for t in threading.enumerate() if t.name.startswith("vaice-mlx")]
+
+
+def wait_for_no_worker_threads(timeout=5):
+    """Wait until the MLX worker threads are gone; they stop themselves, but not synchronously.
+
+    `gc.collect()` is needed: a responder that is only referenced from a reference cycle (an
+    exception traceback holding the generator frames) is not freed until the cycle is broken,
+    and only then does its worker's finalizer stop the thread.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        gc.collect()
+        if not worker_threads():
+            return True
+        time.sleep(0.01)
+    return not worker_threads()
+
+
 def test_chunks_are_decoded_with_left_context_and_cover_every_frame_exactly_once():
     processor = FakeProcessor()
     chunks = list(NativeResponder(FakeModel(25), processor).respond(AUDIO, [], Turn()))
@@ -178,7 +202,7 @@ def test_abandoning_a_reply_stops_generation_and_frees_the_worker():
     next(gen)
     gen.close()  # user interrupted
 
-    responder._executor.submit(lambda: None).result(timeout=10)  # worker is free for the next request
+    responder._worker.submit(lambda: None).result(timeout=10)  # worker is free for the next request
     assert model.steps < 2000
 
 
@@ -216,7 +240,7 @@ def test_closing_a_reply_from_another_thread_while_it_is_generating_fails_but_dr
     assert len(in_flight["chunk"][1]) == FRAMES_PER_CHUNK * SAMPLES_PER_FRAME  # it came back normally
 
     gen.close()  # CPython finalizing the dropped generator
-    responder._executor.submit(lambda: None).result(timeout=10)  # worker is free for the next request
+    responder._worker.submit(lambda: None).result(timeout=10)  # worker is free for the next request
     assert model.steps < 2000
 
 
@@ -252,18 +276,16 @@ def test_failed_load_leaves_no_worker_thread_behind(monkeypatch):
 
     monkeypatch.setattr(native.LFM2AudioModel, "from_pretrained", boom)
 
-    # Earlier tests drop their executors; their idle workers exit on their own, but not
-    # synchronously. Wait (and break any reference cycle holding an executor), so the
+    # Earlier tests drop their responders; their idle workers exit on their own, but not
+    # synchronously. Wait (and break any reference cycle holding a responder), so the
     # assertion below only judges this test's own load failure.
     gc.collect()
-    deadline = time.monotonic() + 5
-    while time.monotonic() < deadline and [t for t in threading.enumerate() if t.name.startswith("vaice-mlx")]:
-        time.sleep(0.01)
+    assert wait_for_no_worker_threads()  # earlier tests' workers are gone
 
     with pytest.raises(RuntimeError, match="weights missing"):
         NativeResponder.load("nonexistent/model")
 
-    assert not [t for t in threading.enumerate() if t.name.startswith("vaice-mlx")]
+    assert wait_for_no_worker_threads()  # the failed load stopped its own worker
 
 
 def test_history_is_added_as_text_turns_before_the_current_audio_question():
@@ -397,7 +419,7 @@ def test_loading_warms_up_both_generation_and_transcription(monkeypatch):
     try:
         assert [call[0] for call in model.calls] == ["interleaved", "sequential"]
     finally:
-        responder._executor.shutdown(wait=True)
+        responder._worker.stop()
 
 
 def test_a_warm_up_transcription_that_never_finishes_fails_fast(monkeypatch):
@@ -410,7 +432,152 @@ def test_a_warm_up_transcription_that_never_finishes_fails_fast(monkeypatch):
         NativeResponder.load("fake/model")  # the stuck ASR worker was abandoned, not waited for
 
     # it finishes (or exits) on its own; the test doesn't leave a worker behind
-    deadline = time.monotonic() + 5
-    while time.monotonic() < deadline and [t for t in threading.enumerate() if t.name.startswith("vaice-mlx")]:
-        time.sleep(0.01)
-    assert not [t for t in threading.enumerate() if t.name.startswith("vaice-mlx")]
+    assert wait_for_no_worker_threads()
+
+
+class BlockingModel:
+    """The model never returns until it is released."""
+
+    def __init__(self):
+        self.release = threading.Event()
+
+    def generate_from_chat_state(self, chat, mode="interleaved", **kwargs):
+        self.release.wait()  # as long as nobody releases it
+        return
+        yield  # makes this a generator
+
+
+def test_the_mlx_worker_runs_on_a_daemon_thread():
+    """The interpreter must not wait for the worker.
+
+    A `ThreadPoolExecutor` would not do: `concurrent.futures.thread._python_exit` joins the
+    pool's threads at exit, and those are not daemons. A model call that never returns would
+    then keep the app alive.
+    """
+    responder = NativeResponder(FakeModel(1), FakeProcessor())
+    try:
+        workers = [t for t in threading.enumerate() if t.name.startswith("vaice-mlx")]
+        assert workers and all(t.daemon for t in workers)
+    finally:
+        responder._worker.stop()
+
+
+def test_the_worker_thread_goes_away_with_the_responder():
+    responder = NativeResponder(FakeModel(1), FakeProcessor())
+    assert worker_threads()
+
+    del responder
+    assert wait_for_no_worker_threads()  # gc.collect() inside: the responder can be cycle-collected
+
+
+def test_a_reply_that_is_queued_when_the_worker_stops_is_abandoned():
+    """The consumer must not wait for a reply that will never come."""
+    model = BlockingModel()
+    responder = NativeResponder(model, FakeProcessor())
+    first = reply(responder)  # takes the worker, and never finishes
+    second = reply(responder)  # queued behind the first one
+
+    def pull(gen):
+        list(gen)
+
+    running = []
+    for gen in (first, second):
+        thread = threading.Thread(target=pull, args=(gen,))
+        thread.start()
+        running.append(thread)
+        time.sleep(0.2)  # the first one takes the worker, the second one queues behind it
+
+    responder._worker.stop()  # the queued reply is cancelled
+
+    running[1].join(timeout=5)
+    assert not running[1].is_alive()  # it gave up instead of waiting forever
+    model.release.set()  # let the first reply finish, so it does not linger
+    running[0].join(timeout=5)
+    assert not running[0].is_alive()
+
+
+def test_the_reply_is_abandoned_when_the_app_is_stopping():
+    """Ctrl+C: the reply is given up instead of waiting for a model call that never returns."""
+    model = BlockingModel()
+    responder = NativeResponder(model, FakeProcessor())
+    lifecycle.stopping.set()
+    try:
+        started = time.monotonic()
+        chunks = list(reply(responder))
+    finally:
+        lifecycle.stopping.clear()
+        model.release.set()  # let the worker finish, so it does not linger
+
+    assert chunks == []
+    assert time.monotonic() - started < 5  # it did not wait for the model
+
+
+# What the app does when the model is stuck and the user presses Ctrl+C: the reply generator is
+# resumed on the event loop's default executor (fastrtc tracks.py: loop.run_in_executor(None,
+# self.event_handler_emit)), and that thread is not a daemon thread, so the interpreter would
+# wait for it at exit. The reply has to be abandoned instead.
+STUCK_EXIT_SCRIPT = '''
+import asyncio
+import sys
+import threading
+
+import numpy as np
+
+from vaice import lifecycle
+from vaice.conversation import Turn
+from vaice.responders.native import NativeResponder
+
+sys.path.insert(0, sys.argv[1])
+from test_native import FakeProcessor
+
+
+class StuckModel:
+    """The model never returns."""
+
+    def generate_from_chat_state(self, chat, mode="interleaved", **kwargs):
+        threading.Event().wait()
+        yield
+
+
+AUDIO = (48000, np.zeros((1, 480), dtype=np.int16))
+
+
+def pull(gen):
+    """What fastrtc does with the reply generator (reply_on_pause.py: next(self.generator))."""
+    try:
+        return next(gen)
+    except StopIteration:
+        return None
+
+
+async def main():
+    responder = NativeResponder(StuckModel(), FakeProcessor())
+    gen = responder.respond(AUDIO, [], Turn())
+    loop = asyncio.get_running_loop()
+    task = loop.run_in_executor(None, pull, gen)
+    await asyncio.sleep(1.0)
+    lifecycle.request_stop()  # Ctrl+C
+    await asyncio.wait_for(task, timeout=10)
+
+
+asyncio.run(main())
+print("exited cleanly")
+'''
+
+
+def test_a_stuck_model_call_does_not_keep_the_process_alive(tmp_path):
+    script = tmp_path / "stuck_exit.py"
+    script.write_text(STUCK_EXIT_SCRIPT)
+
+    try:
+        result = subprocess.run(
+            [sys.executable, str(script), str(Path(__file__).parent)],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except subprocess.TimeoutExpired:
+        pytest.fail("the process did not exit: the app would hang at exit")
+
+    assert result.returncode == 0, result.stderr[-3000:]
+    assert "exited cleanly" in result.stdout
