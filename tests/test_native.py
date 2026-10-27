@@ -347,6 +347,11 @@ def test_spoken_part_splits_the_text_by_the_share_of_audio():
     assert native._spoken_part("one two three four", 40, 20) == "one two"
     assert native._spoken_part("one two three four", 40, 40) == "one two three four"
     assert native._spoken_part("one two", 0, 0) == ""  # no audio, nothing said
+    # truncation, like Turn.close(): 3.5 words' worth of audio never credits the 4th word
+    assert native._spoken_part("one two three four", 8, 7) == "one two three"
+    # ... and like close, never empty: some audio was handed out, so one word stays
+    assert native._spoken_part("one two three", 40, 10) == "one"
+    assert native._spoken_part("one two three", 40, 0) == ""  # no audio handed out at all
 
 
 def test_no_audio_means_no_assistant_text():
