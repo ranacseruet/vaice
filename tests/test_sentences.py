@@ -65,6 +65,8 @@ def test_am_pm_does_not_end_a_sentence_before_a_lower_case_word():
     assert list(split_sentences(["The flight leaves at 7 a.m. and arrives at 9 p.m."])) == [
         "The flight leaves at 7 a.m. and arrives at 9 p.m."
     ]
+    # the lower-case word can also arrive later: the deferred decision covers that too
+    assert list(split_sentences(["Meet at 3 p.m. ", "and then leave."])) == ["Meet at 3 p.m. and then leave."]
 
 
 def test_am_pm_waits_for_the_next_fragment_to_decide():
