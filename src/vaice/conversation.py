@@ -269,7 +269,15 @@ class Conversation:
         # Not JSON or not our shape. Other read errors (permissions, I/O) propagate: the file may be fine.
         except (ValueError, KeyError, TypeError) as exc:
             aside = self._path.with_name(self._path.name + ".corrupt")
-            os.replace(self._path, aside)
+            try:
+                os.replace(self._path, aside)
+            except OSError as move_exc:  # e.g. the file or its directory belongs to someone else
+                # A broken file that cannot be moved aside stays where it is: starting empty and
+                # continuing in memory beats a traceback at startup (later saves warn on their own).
+                log.warning("could not read conversation %s (%s: %s) and could not move it aside "
+                            "(%s: %s); starting empty, the file is left in place",
+                            self._path, type(exc).__name__, exc, type(move_exc).__name__, move_exc)
+                return []
             log.warning("could not read conversation %s (%s: %s); moved it to %s and starting empty",
                         self._path, type(exc).__name__, exc, aside)
             return []

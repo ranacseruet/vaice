@@ -286,6 +286,24 @@ def test_corrupt_file_is_moved_aside_with_a_warning(tmp_path, caplog, content):
     assert len(Conversation(path)) == 1
 
 
+def test_a_corrupt_file_that_cannot_be_moved_aside_still_starts_empty(tmp_path, caplog, monkeypatch):
+    path = tmp_path / "conversation.json"
+    path.write_text("{not json")
+
+    def no_move(src, dst):  # e.g. the file or its directory belongs to another user
+        raise PermissionError(13, "Read-only file system")
+
+    monkeypatch.setattr(conv.os, "replace", no_move)
+    with caplog.at_level(logging.WARNING, logger=conv.__name__):
+        c = Conversation(path)  # startup must not die on the failed quarantine
+
+    assert len(c) == 0
+    assert path.exists()  # the unreadable file is left where it is
+    assert "could not move it aside" in caplog.text and "starting empty" in caplog.text
+    exchange(c, "works", "in memory")  # the conversation continues in memory (the saves warn)
+    assert len(c) == 1
+
+
 def test_missing_file_starts_empty_without_warning(tmp_path, caplog):
     with caplog.at_level(logging.WARNING, logger=conv.__name__):
         assert len(Conversation(tmp_path / "nope.json")) == 0
