@@ -2,10 +2,13 @@
 (`loop.run_in_executor`), receive() on another thread. Only the VAD model and the playback queue are fakes."""
 import inspect
 import threading
+import time
 
 import numpy as np
 from fastrtc import AdditionalOutputs, ReplyOnPause
+from fastrtc.utils import WebRTCError, webrtc_error_handler
 
+from vaice import interruptible
 from vaice.interruptible import InterruptSafeReplyOnPause, stop_playing_reply
 
 ONE_SECOND = (48000, np.zeros((1, 48000), dtype=np.int16))  # at least AlgoOptions.audio_chunk_duration
@@ -303,3 +306,88 @@ def test_stop_playing_reply_without_a_queue_or_reset_does_not_raise():
 
     stop_playing_reply(Bare())
     stop_playing_reply(ReplyOnPause(lambda _audio: iter([]), model=FakeVad()))  # no audio track yet
+
+
+def test_a_reply_error_that_escapes_reaches_fastrtc_as_a_webrtc_error():
+    """What makes app.py's catch necessary: fastrtc wraps the per-connection emit() in
+    webrtc_error_handler (webrtc_connection_mixin.py), so an error that escapes the reply
+    generator comes back as a WebRTCError, which the player loop re-raises (utils.py:
+    player_worker_decode) — the connection's audio task dies and the page stays mute until a
+    reload."""
+    def reply(_audio):
+        yield chunk(1.0)
+        raise RuntimeError("llama-server fell over")
+
+    rig = Rig(InterruptSafeReplyOnPause, reply)
+    rig.user_speaks_then_pauses()
+    rig.handler.emit = webrtc_error_handler(rig.handler.emit)  # as fastrtc does per connection
+
+    assert rig.start_emit().join()[1][0] == 1.0  # the first chunk
+    error = rig.start_emit().join()  # the generator raises on the next chunk
+
+    assert isinstance(error, WebRTCError)
+    assert isinstance(error.__cause__, RuntimeError)
+
+
+def test_the_app_keeps_a_reply_error_from_reaching_fastrtc():
+    """The other half: the app catches the error inside the generator, so fastrtc gets a
+    transcript update instead of a WebRTCError and the connection keeps working."""
+    from vaice.app import make_handler
+    from vaice.conversation import Conversation
+
+    class Failing:
+        name = "fake"
+
+        def respond(self, audio, history, turn):
+            yield chunk(1.0)
+            raise RuntimeError("llama-server fell over")
+
+    rig = Rig(InterruptSafeReplyOnPause, make_handler(Failing(), Conversation()))
+    rig.user_speaks_then_pauses()
+    rig.handler.emit = webrtc_error_handler(rig.handler.emit)  # as fastrtc does per connection
+
+    assert rig.start_emit().join()[1][0] == 1.0
+    second = rig.start_emit().join()
+
+    assert isinstance(second, AdditionalOutputs)  # the error, shown in the chatbot
+
+def test_an_idle_emit_waits_for_the_pause_event_instead_of_returning_at_once(monkeypatch):
+    """fastrtc polls emit() in a tight loop; returning at once makes it spin."""
+    monkeypatch.setattr(interruptible, "IDLE_WAIT_SECONDS", 0.05, raising=False)
+    rig = Rig(InterruptSafeReplyOnPause, lambda _audio: iter([]))
+
+    started = time.monotonic()
+    assert rig.handler.emit() is None
+    elapsed = time.monotonic() - started
+
+    assert elapsed >= 0.04  # it waited for the pause event
+
+
+def test_the_reply_starts_as_soon_as_the_pause_is_detected(monkeypatch):
+    """The idle wait must not delay the reply: it ends when the pause event is set."""
+    monkeypatch.setattr(interruptible, "IDLE_WAIT_SECONDS", 5.0, raising=False)  # a long wait: it has to end early
+    rig = Rig(InterruptSafeReplyOnPause, lambda _audio: iter([chunk(1.0)]))
+
+    emit = rig.start_emit()  # waits for the pause event
+    time.sleep(0.05)
+    assert emit.thread.is_alive()  # it is waiting, not spinning
+    rig.handler.event.set()  # the VAD detected a pause
+
+    started = time.monotonic()
+    result = emit.join()
+
+    assert result[1][0] == 1.0  # the reply's first chunk
+    assert time.monotonic() - started < 1.0  # it did not wait for the timeout
+
+
+def test_the_idle_emit_rate_is_bounded():
+    """Without the wait, fastrtc's loop calls emit() ~32k times a second (measured)."""
+    rig = Rig(InterruptSafeReplyOnPause, lambda _audio: iter([]))
+
+    started = time.monotonic()
+    calls = 0
+    while time.monotonic() - started < 0.2:
+        rig.handler.emit()
+        calls += 1
+
+    assert calls <= 30  # 0.2 s at 20 ms per call is 10 calls; without the wait it is thousands
