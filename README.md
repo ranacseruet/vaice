@@ -74,6 +74,12 @@ Notes on the native backend: LFM2.5-Audio is a 1.5B model, English only, so expe
 answers than Gemma 12B. Replies are capped at 512 tokens (text and audio frames together);
 if one is cut off, the log says so.
 
+On the native backend, Ctrl+C stops the app: the reply that is in flight is abandoned and the
+process exits right away, even if the model call never returns (the log says `the app is
+stopping; the reply is abandoned`). The turns that were already finished are on disk. The
+cascade does not have this guarantee: its reply runs inside a blocking request to
+llama-server, so Ctrl+C may wait for that request to time out (`VAICE_LLM_TIMEOUT`).
+
 ## Conversation history
 
 Both backends remember the conversation. It is saved to `~/.vaice/conversation.json` (see
@@ -162,12 +168,12 @@ Unit tests use fakes for the models: sentence splitting, SSE parsing (including 
 `"content": null` first chunk), llama-server errors (HTTP and mid-stream), transcripts, history
 trimming and persistence (including a disk that can't be written), failed replies (before, during
 and after the reply, a failure that can't be recorded, and one no one could show in the UI),
-barge-in recording (driven with
-fastrtc's thread-per-resume pattern), the stale-chunk drop and the reset-button stop (the real
-`ReplyOnPause`, interrupted mid-`next()` from another thread), cascade streaming order, native
-chunking/threading/cancellation, backend selection/fallback, and env-var parsing. The native tests
-are skipped where MLX isn't installed. There is no automated test against the real models; verify
-the real audio path by hand with the steps above.
+barge-in recording (driven with fastrtc's thread-per-resume pattern), the stale-chunk drop and the
+reset-button stop (the real `ReplyOnPause`, interrupted mid-`next()` from another thread), cascade
+streaming order, native chunking/threading/cancellation and the exit path (a model call that never
+returns must not keep the process alive), backend selection/fallback, and env-var parsing. The
+native tests are skipped where MLX isn't installed. There is no automated test against the real
+models; verify the real audio path by hand with the steps above.
 
 ## Layout
 
@@ -176,6 +182,7 @@ src/vaice/
   app.py            CLI + Gradio/WebRTC UI; wraps a Responder, logs time to first audio, transcript + reset
   interruptible.py  ReplyOnPause that drops the chunk generated while the user interrupts (fastrtc 0.0.34 race);
                     silences the playing reply for "New conversation"
+  lifecycle.py      the stop signal: Ctrl+C asks the app and its responders to give up
   config.py         env-driven settings (.env.example lists them with their defaults)
   conversation.py   Turn / Conversation: history, trimming, JSON persistence, failure notes
   audio.py          mic frame → base64 WAV / float mono
@@ -206,6 +213,11 @@ and register it in `responders/__init__.py`.
   Kokoro uses MLX's default stream. Put any model that creates its own MLX streams on a single
   worker thread the same way. The native transcription (ASR) runs on that same worker, right after
   the reply is generated.
+- The native MLX worker is a **daemon** thread, not a `ThreadPoolExecutor`: at exit the
+  interpreter joins a thread pool's workers (`concurrent.futures.thread._python_exit`) and those
+  threads are not daemons, so a model call that never returns would keep the app alive. A daemon
+  thread is abandoned with the process instead, and Ctrl+C asks the reply in flight to give up
+  (`lifecycle.py`).
 - Gemma needs the text prompt **before** the audio in the message content (the cascade's
   transcription request).
 - Raw 48 kHz browser audio works as-is on both backends: llama.cpp and the mlx-audio
