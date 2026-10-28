@@ -6,6 +6,7 @@ import threading
 
 import numpy as np
 import pytest
+from fake_realtime import pcm
 from fastrtc import AdditionalOutputs
 
 from vaice import app, lifecycle
@@ -13,7 +14,7 @@ from vaice import conversation as conv
 from vaice.app import CHATBOT_HEIGHT, UI_TITLE, VIEW_REFRESH_SECONDS, build_stream, make_handler, parse_args
 from vaice.conversation import Conversation
 from vaice.interruptible import InterruptSafeReplyOnPause
-from vaice.responders.cascade import CascadeResponder
+from vaice.responders.llamacpp import LlamaCppResponder
 
 AUDIO = (48000, np.zeros((1, 480), dtype=np.int16))
 
@@ -105,22 +106,35 @@ def finalize(gen):
     t.join()
 
 
+class SentenceResponder:
+    """Speaks its replies a sentence at a time, two chunks each, and records a sentence's text only
+    after both chunks went out: a reply cut off mid-sentence keeps the sentences before it."""
+
+    name = "sentences"
+
+    def __init__(self, replies, questions):
+        self.histories = []
+        self._replies = iter(replies)
+        self._questions = iter(questions)
+
+    def respond(self, audio, history, turn):
+        self.histories.append(list(history))
+        turn.set_user_text(next(self._questions))
+        spoken = []
+        for sentence in next(self._replies):
+            if turn.closed.is_set():
+                return
+            yield (24000, np.zeros(1, dtype=np.float32))
+            yield (24000, np.zeros(1, dtype=np.float32))
+            spoken.append(sentence)
+            turn.set_assistant_text(" ".join(spoken))
+
+
 def barge_in_setup(tmp_path):
-    histories = []
-    replies = iter([["First one. Second one. Third one."], ["Fine."]])
-    questions = iter(["question one", "question two"])
-
-    def stream_reply(_b64, history):
-        histories.append(list(history))
-        return iter(next(replies))
-
-    def speak(_sentence):
-        yield (24000, np.zeros(1, dtype=np.float32))
-        yield (24000, np.zeros(1, dtype=np.float32))
-
+    replies = [["First one.", "Second one.", "Third one."], ["Fine."]]
+    responder = SentenceResponder(replies, ["question one", "question two"])
     conversation = Conversation(tmp_path / "conversation.json")
-    handler = make_handler(CascadeResponder(stream_reply, speak, lambda _b64: next(questions)), conversation)
-    return handler, conversation, histories
+    return make_handler(responder, conversation), conversation, responder.histories
 
 
 def test_barge_in_keeps_the_partial_reply_and_a_late_finalization_changes_nothing(tmp_path):
@@ -158,10 +172,47 @@ def test_barge_in_keeps_the_partial_reply_and_a_late_finalization_changes_nothin
     assert [t.complete for t in conversation._turns] == [False, True]
 
 
+def test_the_old_backend_name_is_fine_in_the_environment_too(monkeypatch):
+    monkeypatch.setattr(app.config, "BACKEND", "cascade")
+    assert parse_args([]).backend == "cascade"
+
+
+def test_two_questions_through_the_app_and_the_llamacpp_backend(tmp_path, realtime):
+    server = realtime(
+        reply=[("text", "It is Paris."), ("audio", pcm(1, 2)), ("audio", pcm(3)), ("done",)],
+        transcription=[("transcript", "What is the capital of France?")],
+    )
+    conversation = Conversation(tmp_path / "conversation.json")
+    handler = make_handler(LlamaCppResponder(server.url, "Be brief."), conversation)
+
+    def ask(n):
+        gen = handler(AUDIO)
+        outputs = []
+        while not isinstance(item := resume(gen, f"fastrtc-{n}-{len(outputs)}"), StopIteration):
+            outputs.append(item)
+        return outputs
+
+    first = ask(1)
+    assert [type(o) for o in first] == [tuple, tuple, AdditionalOutputs]
+    assert conversation._turns[0].transcribed.wait(3)
+    assert conversation.messages_for_ui() == [
+        {"role": "user", "content": "What is the capital of France?"},
+        {"role": "assistant", "content": "It is Paris."},
+    ]
+
+    ask(2)
+    second = [c for c in server.connections if c.session and c.session.get("type") != "transcription"][1]
+    assert second.session["instructions"].endswith(
+        "The conversation so far:\nUser: What is the capital of France?\nAssistant: It is Paris."
+    )
+    assert conversation._turns[1].complete
+
+
 def test_backend_flag_overrides_env_default(monkeypatch):
     monkeypatch.setattr(app.config, "BACKEND", "native")
     assert parse_args([]).backend == "native"
-    assert parse_args(["--backend", "cascade"]).backend == "cascade"
+    assert parse_args(["--backend", "llamacpp"]).backend == "llamacpp"
+    assert parse_args(["--backend", "cascade"]).backend == "cascade"  # the old name of llamacpp
 
 
 def test_invalid_backend_from_env_is_a_usage_error_not_a_traceback(monkeypatch, capsys):

@@ -7,18 +7,21 @@ Two interchangeable backends produce the reply:
 
 | Backend | How it works | Strengths |
 |---|---|---|
-| **native** | One speech-to-speech model ([LFM2.5-Audio-1.5B](https://huggingface.co/mlx-community/LFM2.5-Audio-1.5B-8bit) via mlx-audio) hears your audio directly and answers in audio | Fastest: first audio ≈ 0.3–0.45 s after you stop talking |
-| **cascade** | Gemma (llama.cpp) transcribes your audio, then replies in text; Kokoro speaks each sentence as it completes | Much bigger model (12B) → smarter answers, better at using the conversation; ≈ 1.5–2.5 s to first audio (≈ 5 s on the first question) |
+| **llamacpp** | One speech-to-speech model ([LFM3-Audio-2B](https://huggingface.co/LiquidAI/LFM3-Audio-2B-GGUF)) on a llama.cpp `llama-server` hears your audio and answers in its own voice, streamed over the server's `/v1/realtime` WebSocket | A larger model than native (2B vs 1.5B). Measured on one Apple Silicon Mac: first audio ≈ 0.35–0.4 s after you stop talking in the app's own log (≈ 0.2–0.35 s of that is the server) |
+| **native** | One speech-to-speech model ([LFM2.5-Audio-1.5B](https://huggingface.co/mlx-community/LFM2.5-Audio-1.5B-8bit) via mlx-audio) runs inside vaice | Nothing else to start: no server; first audio ≈ 0.3–0.45 s |
 
-`auto` (the default) uses native if it loads and falls back to cascade, with a warning, if not.
+`auto` (the default) uses llamacpp if its server is up and serves a model with audio output, and falls back to
+native, with a warning, if not. `cascade` is the old name of `llamacpp` (the backend used to transcribe with Gemma
+and speak with Kokoro); `--backend cascade` and `VAICE_BACKEND=cascade` still work.
 
 ```
 browser mic ─WebRTC─▶ fastrtc (VAD: detects you stopped talking)
                          │  audio
                          ▼
                   Responder.respond(audio, history, turn) ──▶ audio chunks ─WebRTC─▶ browser speakers
-                   ├─ NativeResponder   mlx-audio speech-to-speech model
-                   └─ CascadeResponder  llama-server :8001 (transcribe, then reply) → sentences → Kokoro TTS
+                   ├─ LlamaCppResponder  llama-server :8001 /v1/realtime (WebSocket): its own speech streams back;
+                   │                     a second session transcribes your audio in parallel
+                   └─ NativeResponder    mlx-audio speech-to-speech model
                          │ both also record your transcript and what they said on `turn`
                          ▼
                   Conversation (~/.vaice/conversation.json) ──▶ transcript in the UI
@@ -26,22 +29,24 @@ browser mic ─WebRTC─▶ fastrtc (VAD: detects you stopped talking)
 
 ## Requirements
 
-- Apple Silicon Mac (mlx-audio runs on MLX)
-- Python 3.10–3.12 (spaCy, pulled in by `misaki[en]`, has no wheels for 3.13+ yet)
+- Apple Silicon Mac (mlx-audio runs on MLX; also needed for the fallback)
+- Python 3.10–3.12 (what CI tests; the dependencies also resolve on 3.13 and 3.14, but nothing was run there)
 - [uv](https://docs.astral.sh/uv/)
 - **Native backend:** nothing else; the model (~2.3 GB) downloads on first run.
-- **Cascade backend:** a llama.cpp `llama-server` running an **audio-capable** model with its `--mmproj`, e.g.:
+- **llamacpp backend:** a llama.cpp `llama-server` **b11960 or newer** (v0.8.0) running an **audio-output** model:
+  it needs the `/v1/realtime` WebSocket. At the time of writing, Homebrew's llama.cpp (0.7.0) is too old, so build
+  it from source:
 
   ```bash
-  llama-server --model ./gemma-4-12b/gemma-4-12B-it-UD-Q4_K_XL.gguf \
-    --mmproj ./gemma-4-12b/mmproj-BF16.gguf --port 8001 \
-    --chat-template-kwargs '{"enable_thinking":false}'
+  git clone https://github.com/ggml-org/llama.cpp && cd llama.cpp
+  cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j --target llama-server
+  build/bin/llama-server -hf LiquidAI/LFM3-Audio-2B-GGUF:Q4_K_M --port 8001
   ```
 
-  **Only llama.cpp `llama-server` is supported and tested.** The cascade sends audio as an OpenAI-style
-  `input_audio` content part and relies on llama-server's `/health` endpoint, so other
-  OpenAI-compatible servers (Ollama, LM Studio, oMLX, …) are untested and may not accept audio at all.
-  Point `VAICE_LLM_URL` at a different host or port if llama-server isn't on `:8001`.
+  **Only llama.cpp `llama-server` is supported and tested.** vaice speaks its `/v1/realtime` events, reads
+  `/health` and `/v1/models` (to check that the model outputs audio), so other servers (Ollama, LM Studio,
+  oMLX, …) are untested and will not work. Point `VAICE_LLAMACPP_URL` at a different host or port if llama-server
+  isn't on `:8001`.
 
 ## Setup
 
@@ -53,35 +58,35 @@ uv pip install -e ".[dev]"
 ## Run
 
 ```bash
-.venv/bin/vaice                      # auto: native if it loads, else cascade
-.venv/bin/vaice --backend cascade    # force Gemma + Kokoro (needs llama-server on :8001)
-.venv/bin/vaice --backend native     # force the speech-to-speech model; fail if it can't load
+.venv/bin/vaice                      # auto: llamacpp if llama-server is up with an audio model, else native
+.venv/bin/vaice --backend llamacpp   # force llama-server's speech (needs llama-server on :8001); no fallback
+.venv/bin/vaice --backend native     # force the MLX speech-to-speech model; fail if it can't load
 ```
 
-The first run downloads models (about a minute, longer for native). When you see
+The first native run downloads its model (about a minute or more; llama-server downloads its own with `-hf`). When you see
 `Running on local URL: http://127.0.0.1:7860`, open it in Chrome, allow the microphone,
 click record, ask a question, then stop talking. Use headphones, otherwise the speakers
 feed back into the mic.
 
-The heading says which backend is answering (`native` or `cascade`), so the page tells you what
+The heading says which backend is answering (`native` or `llamacpp`), so the page tells you what
 you are talking to without reading the log.
 
-The log prints `using native|cascade backend` at startup, and for every reply
-`[native] time to first audio: N.NNs` / `[native] reply finished in N.NNs`, so you can always
-tell which path answered and compare the two backends. A `WARNING ... falling back to cascade`
-means `auto` couldn't load native; the traceback after it says why. A
-`WARNING ... llama-server not reachable` at startup means cascade replies will fail until
-llama-server is up. Run it once with each `--backend` and ask the same question.
+The log prints `using native|llamacpp backend` at startup, and for every reply
+`[llamacpp] time to first audio: N.NNs` / `[llamacpp] reply finished in N.NNs`, so you can always
+tell which path answered and compare the two backends. A `WARNING ... falling back to native`
+means `auto` couldn't use llama.cpp (server not reachable, still loading, or its model has no audio
+output); the message and traceback after it say why. With `--backend llamacpp` a
+`WARNING ... llama-server not reachable` at startup means replies will fail until llama-server is up,
+and a model without audio output is an error that names the model. Run it once with each `--backend`
+and ask the same question.
 
-Notes on the native backend: LFM2.5-Audio is a 1.5B model, English only, so expect simpler
-answers than Gemma 12B. Replies are capped at 512 tokens (text and audio frames together);
-if one is cut off, the log says so.
+Notes on the native backend: LFM2.5-Audio is a 1.5B model, English only. Replies are capped at 512
+tokens (text and audio frames together) on both backends; if one is cut off, the log says so.
 
-On the native backend, Ctrl+C stops the app: the reply that is in flight is abandoned and the
-process exits right away, even if the model call never returns (the log says `the app is
-stopping; the reply is abandoned`). The turns that were already finished are on disk. The
-cascade does not have this guarantee: its reply runs inside a blocking request to
-llama-server, so Ctrl+C may wait for that request to time out (`VAICE_LLM_TIMEOUT`).
+Ctrl+C stops the app on both backends: the reply that is in flight is abandoned and the process exits,
+even if the model or the server never answers, or never completes the connection (the log says
+`the app is stopping; the reply is abandoned`). Measured: about 1 s with no browser connected, about 5–6 s
+with one connected mid-reply (both backends; gradio closing the server). The turns that were already finished are on disk.
 
 ## Conversation history
 
@@ -95,40 +100,43 @@ gone.
 
 - **The page keeps up:** the chatbot view is re-checked once a second and re-rendered only when it
   actually changed, so a transcript that arrives *after* the reply ended (native transcribes after
-  answering) replaces the "…" without waiting for the next exchange or a page reload.
+  answering; llamacpp's can land late too) replaces the "…" without waiting for the next exchange or a page reload.
 - **What the model sees:** earlier turns as plain text. A turn whose transcript has not arrived
   yet (it is still being transcribed) is left out of the prompt entirely, so the model never sees
   a reply to a question it cannot read and never reads it as `(inaudible)`. A transcript that
   arrived but is empty shows `(inaudible)`.
-  - **native:** the current question as audio. Your side of history is transcribed by LFM's ASR
-    mode on the model's worker thread after the reply is generated, so it doesn't delay the first audio.
-  - **cascade:** a transcript of the current question, so the whole conversation is text. Gemma first
-    transcribes your audio (greedy, ≈ 0.4–0.8 s), then replies to the transcript. Sending the audio
-    straight to Gemma works for a single question, but with earlier turns in the prompt Gemma often
-    misheard the new clip or answered an earlier question; in a measured 10-turn conversation the
-    text route got the follow-ups right ("And what about Germany?", "Multiply that by 10.") where the
-    audio route mostly didn't. If the transcript is empty (a cough, noise), there is no reply.
-  - The 1.5B native model uses the last few turns well but often forgets things said much earlier
-    (e.g. your name from the first turn), even though they are in its prompt.
+  - **llamacpp:** the current question as audio, and the earlier turns as text in the session's
+    instructions (`User: …` / `Assistant: …` lines after the prompt). llama-server's realtime
+    sessions refuse earlier assistant turns as conversation items, so every reply opens a fresh session
+    and vaice stays the single owner of the history (windowing, barge-in cuts and **New conversation**
+    all apply). The transcript of your side comes from a second, transcription session on the same audio,
+    opened in parallel with the reply (measured ≈ 0.35–0.4 s, so it is usually there before the reply ends).
+    No language is set, so the model detects it.
+  - **native:** the current question as audio, earlier turns as text. Your side of history is transcribed
+    by LFM's ASR mode on the model's worker thread after the reply is generated, so it doesn't delay the
+    first audio.
+  - The small models use the last few turns well but often forget things said much earlier
+    (e.g. your name from the first turn), even though they are in the prompt.
 - **Barge-in:** if you talk over a reply, it stops when you stop talking, and history keeps the
   part of the reply that had played, marked `(interrupted)`. That part is estimated, not measured:
   the words of the audio handed out, cut to the share that the time since the first audio could
   have played (fastrtc queues audio ahead of playback). At least one word is kept, so an
-  interrupted reply is never recorded as empty. The native model writes its text well
-  ahead of its audio, so its text is also split by the share of audio generated. Expect it to be
-  off by a few words. The chunk that was being generated when you interrupted (≈ 0.8 s native, a
-  sentence in cascade) is dropped instead of played; fastrtc would queue it after clearing its
+  interrupted reply is never recorded as empty. The LFM models write their text well
+  ahead of their audio, so the text is also split by the share of audio generated (for llamacpp, the share
+  of the audio received so far). Expect it to be off by a few words. The chunk that was being generated
+  when you interrupted (≈ 0.8 s native) is dropped instead of played; fastrtc would queue it after clearing its
   playback queue ([#2](https://github.com/ranacseruet/vaice/issues/2)).
 - **Trimming:** each prompt includes at most the last `VAICE_HISTORY_TURNS` exchanges. The oldest
   are dropped in blocks of half that, not one at a time, so the start of the prompt stays the same
-  for several turns and llama-server can keep reusing its cached prefix.
+  for several turns (neither backend reuses a prefix today: native prefills from scratch and every llamacpp reply is a
+  fresh session, so this only keeps the prompt stable).
 - A corrupt `conversation.json` is renamed to `conversation.json.corrupt` (with a warning in the log;
   if it cannot even be renamed, vaice starts empty and leaves the file where it is)
   and a fresh conversation starts.
 - **A conversation that can't be written to disk** (full disk, read-only file) is only a warning in
   the log: the reply goes on and the conversation stays in memory, but it is lost when the app stops.
   The file that was there before is left untouched.
-- **A failed reply** (llama-server down or a model error) does not end the session: the log gets the
+- **A failed reply** (llama-server down, an `error` event from it, or a model error) does not end the session: the log gets the
   traceback, the transcript shows what was heard of the reply plus `(error: …)`, and the next
   question works. The error note is kept on disk with the turn but is never sent to the model;
   a question the failed reply never transcribed counts as `(inaudible)`.
@@ -156,23 +164,23 @@ vaice does not read `.env` itself.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `VAICE_BACKEND` | `auto` | `auto`, `cascade` or `native` (overridden by `--backend`) |
+| `VAICE_BACKEND` | `auto` | `auto`, `llamacpp` or `native` (overridden by `--backend`); `cascade` is the old name of `llamacpp` |
 | `VAICE_PORT` | `7860` | UI port |
 | `VAICE_DATA_DIR` | `~/.vaice` | where `conversation.json` is kept |
 | `VAICE_HISTORY_TURNS` | `10` | past exchanges included in each prompt (`0` = none); older ones are dropped in blocks |
 | `VAICE_NATIVE_MODEL` | `mlx-community/LFM2.5-Audio-1.5B-8bit` | mlx-audio speech-to-speech model; empty disables native |
 | `VAICE_NATIVE_PROMPT` | `Respond with interleaved text and audio. Reply naturally and concisely in 1 to 2 spoken sentences.` | system prompt for native |
-| `VAICE_LLM_URL` | `http://localhost:8001/v1/chat/completions` | llama-server chat endpoint (cascade); the `/health` check uses the same host and port. Only llama.cpp is tested |
-| `VAICE_LLM_MODEL` | `gemma-4-12b` | model name sent in the request (informational for llama-server) |
-| `VAICE_LLM_PROMPT` | `Reply naturally and concisely in 1 to 2 spoken sentences.` | system prompt for the reply (cascade); `VAICE_PROMPT` still works |
-| `VAICE_LLM_TIMEOUT` | `120` | seconds (cascade) |
-| `VAICE_TTS_MODEL` | `mlx-community/Kokoro-82M-bf16` | MLX Kokoro repo (cascade) |
-| `VAICE_TTS_VOICE` | `af_heart` | Kokoro voice (cascade); `VAICE_VOICE` still works |
-| `VAICE_TTS_SPEED` | `1.1` | speech speed (cascade); `VAICE_SPEED` still works |
+| `VAICE_LLAMACPP_URL` | `http://localhost:8001` | llama-server (llamacpp): only scheme, host and port are used (`/health`, `/v1/models` and `ws://…/v1/realtime` hang off it); an old `VAICE_LLM_URL` with a path such as `/v1/chat/completions` still works. Only llama.cpp is tested |
+| `VAICE_LLAMACPP_PROMPT` | `Reply naturally and concisely in 1 to 2 spoken sentences.` | system prompt for the reply (llamacpp); vaice puts `Respond with interleaved text and audio.` in front of it, so the prompt only says how to answer |
+| `VAICE_LLAMACPP_TIMEOUT` | `120` | seconds (llamacpp): to open a connection to llama-server, and the longest silence from it before the reply fails |
 
-The three `VAICE_LLM_*`/`VAICE_TTS_*` names above replaced shorter ones (`VAICE_PROMPT`, `VAICE_VOICE`,
-`VAICE_SPEED`) that named neither the backend nor the stage. Both spellings work; if you set both,
-the longer name wins, so an old `.env` keeps working while you migrate.
+`VAICE_LLAMACPP_URL`, `VAICE_LLAMACPP_PROMPT` and `VAICE_LLAMACPP_TIMEOUT` replaced `VAICE_LLM_URL`,
+`VAICE_LLM_PROMPT` (and before it `VAICE_PROMPT`) and `VAICE_LLM_TIMEOUT`. Both spellings work; if you set
+both, the new name wins, so an old `.env` keeps working while you migrate.
+
+`VAICE_LLM_MODEL`, `VAICE_TTS_MODEL`, `VAICE_TTS_VOICE` (`VAICE_VOICE`) and `VAICE_TTS_SPEED` (`VAICE_SPEED`)
+belonged to the old Gemma + Kokoro pipeline; nothing reads them any more, so setting them is harmless and
+has no effect. The voice is the model's own.
 
 ## Tests
 
@@ -185,20 +193,21 @@ CI (`.github/workflows/ci.yml`) runs both on Python 3.10 and 3.12, on an Apple S
 — the native tests need MLX, which has no Linux wheels — for every push to `main` and every pull
 request.
 
-Unit tests use fakes for the models: sentence splitting, SSE parsing (including llama.cpp's
-`"content": null` first chunk and a malformed `data:` line), llama-server errors (HTTP, mid-stream,
-an unexpected 200 shape and a 200 that is not JSON at all), transcripts, history
+Unit tests use fakes for the models: the llamacpp backend against a fake `/v1/realtime` server
+(`tests/fake_realtime.py`: the session setup and what goes into the instructions, the 48 kHz → 16 kHz
+conversion, the frames and text that come back, an `error` event, a server that hangs up or goes
+silent, the transcription session, and a process that must still exit when the server never answers),
+the startup check of llama-server, transcripts, history
 trimming and persistence (including a disk that can't be written), failed replies (before, during
 and after the reply, a failure that can't be recorded, and one no one could show in the UI),
 barge-in recording (driven with
 fastrtc's thread-per-resume pattern), the stale-chunk drop and the reset-button stop (the real
 `ReplyOnPause`, interrupted mid-`next()` from another thread), the per-connection `copy()` (its
-arguments go by keyword, so a reordered fastrtc signature fails the test), cascade streaming
-order, native chunking/threading/cancellation and the exit path (a model call that never returns
+arguments go by keyword, so a reordered fastrtc signature fails the test), native chunking/threading/cancellation and the exit path (a model call that never returns
 must not keep the process alive), the idle polling throttle (the handler must not spin while
 nobody is talking), the page heading and the chatbot's layout, what **New conversation** does to
-the history, backend selection/fallback, and env-var parsing. The native tests are skipped where
-MLX isn't installed.
+the history, backend selection/fallback, and env-var parsing. The llamacpp tests resume the reply
+generator on a fresh thread each time, like fastrtc. The native tests are skipped where MLX isn't installed.
 There is no automated test against the real models; verify the real audio path by hand with the
 steps above.
 
@@ -213,16 +222,14 @@ src/vaice/
   lifecycle.py      the stop signal: Ctrl+C asks the app and its responders to give up
   config.py         env-driven settings (.env.example lists them with their defaults)
   conversation.py   Turn / Conversation: history, trimming, JSON persistence, failure notes
-  audio.py          mic frame → base64 WAV / float mono
+  audio.py          mic frame → mono PCM16 at the model's rate (resampled) and back to float32
   responders/
     base.py         Responder protocol (audio + history in → audio chunks out; reports transcript and spoken text)
-    __init__.py     create_responder(): auto / cascade / native selection + fallback
-    cascade.py      llama.cpp text stream → sentences → Kokoro
+    __init__.py     create_responder(): auto / llamacpp / native selection + fallback (cascade = llamacpp)
+    llamacpp.py     llama-server /v1/realtime: a reply session and a transcription session per turn, startup check
     native.py       mlx-audio speech-to-speech model
-  llm.py            llama.cpp client: streaming reply + transcription (cascade)
-  sentences.py      text fragments → sentences; markdown cleanup for TTS (cascade)
-  tts.py            Kokoro synthesis (cascade)
 tests/
+  fake_realtime.py  a fake /v1/realtime server for the llamacpp tests
 ```
 
 To add a backend, implement `respond(audio, history, turn) -> Iterator[(sample_rate, float32 samples)]`
@@ -236,11 +243,9 @@ and register it in `responders/__init__.py`.
   measurably diverged from decoding the whole reply.
 - MLX streams are bound to the thread that created them, but fastrtc resumes the reply
   generator from a different worker thread for each chunk. `NativeResponder` therefore loads
-  and runs the model on one dedicated thread and hands chunks back through a queue. The
-  cascade's Kokoro TTS is also MLX and does run on fastrtc's threads; that works only because
-  Kokoro uses MLX's default stream. Put any model that creates its own MLX streams on a single
-  worker thread the same way. The native transcription (ASR) runs on that same worker, right after
-  the reply is generated.
+  and runs the model on one dedicated thread and hands chunks back through a queue. Put any
+  model that creates its own MLX streams on a single worker thread the same way. The native
+  transcription (ASR) runs on that same worker, right after the reply is generated.
 - fastrtc polls the reply handler in a tight loop while nobody is talking (`utils.py`:
   `player_worker_decode`), which burned most of a core (~32k calls/s, measured). An idle
   `emit()` therefore waits for the pause event instead of returning at once: ~37 calls/s and
@@ -251,22 +256,29 @@ and register it in `responders/__init__.py`.
   threads are not daemons, so a model call that never returns would keep the app alive. A daemon
   thread is abandoned with the process instead, and Ctrl+C asks the reply in flight to give up
   (`lifecycle.py`).
-- Gemma needs the text prompt **before** the audio in the message content (the cascade's
-  transcription request).
-- Raw 48 kHz browser audio works as-is on both backends: llama.cpp and the mlx-audio
-  processor each resample internally.
-- llama.cpp's `llama-server` only outputs text; it ignores `modalities`/`audio` request
-  fields, which is why the cascade needs a separate TTS step.
-- The cascade speaks one sentence at a time, so the first audio only comes when the first
-  sentence is complete. A sentence ends at `.`, `!` or `?` followed by whitespace, except
-  after a title (`Dr.`), an initialism (`U.S.`), a list number, `etc.` and `a.m.`/`p.m.`,
-  which end a sentence only when the next word is capitalized ("at 3 p.m. Tomorrow" is two
-  sentences, "at 7 a.m. and then" is one).
+- The llamacpp backend's sockets also live on daemon threads of their own (one per session, one
+  session for the reply and one for the transcript), never on the thread fastrtc resumes the
+  generator on. The `websockets` sync client itself would cope with being read from a different
+  thread each time (only *concurrent* `recv()` calls are refused), but `connect()` and `close()`
+  can block for their timeouts, and a stuck thread of fastrtc's executor keeps the process alive
+  after Ctrl+C. The generator only reads a queue, polling every 0.25 s for the stop signal and
+  for the end of the turn; closing the socket is what cancels the reply on the server.
+- llama-server's realtime sessions reject `conversation.item.create` with the assistant role
+  ("only user messages and function call outputs are supported"), so earlier turns can't be replayed
+  as items. Each reply is a fresh session with the history as text in `instructions`
+  (the model uses it: "And roughly how many people live there?" after a question about Paris
+  is answered about Paris). A conversation session never sends a transcript of the user's audio,
+  so a second session of type `transcription` hears the same audio.
+- The sample rates come from `session.created` (`audio.input.format.rate`, `audio.output.format.rate`:
+  16 kHz in, 24 kHz out for LFM3-Audio), never assumed. The mic's 48 kHz audio is resampled to the
+  input rate (`scipy.signal.resample_poly`) and sent in one `input_audio_buffer.append`; the pause
+  detection is fastrtc's (the session's `turn_detection` is `null`). The native backend and the
+  mlx-audio processor resample internally.
+- A reply cut off by `max_output_tokens` still ends with `response.done` status `completed`; only
+  `usage.output_tokens` (at the limit) gives it away, which is what the log warning checks.
 - Gradio 6.0 flips `gr.Chatbot(allow_tags)` to `True`, which would render whatever the model
   writes as HTML. `app.py` sets it to `False` explicitly, so the transcript is always plain text.
 - fastrtc copies the handler for every connection, and its own `ReplyOnPause.copy()` builds a
   plain `ReplyOnPause`, which would lose the stale-chunk fix. `interruptible.py` overrides
   `copy()` and passes every argument **by keyword**, so a fastrtc release that adds, drops or
   reorders a parameter fails loudly there instead of silently handing the handler the wrong value.
-- Kokoro's sample rate is fixed by the model, so it lives in `tts.py` (`SAMPLE_RATE`), not in the
-  env-driven settings in `config.py`.
