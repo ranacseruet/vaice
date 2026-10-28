@@ -19,13 +19,13 @@ class Responder(Protocol):
       (cumulative; text for audio that was never yielded must not be included);
     - `turn.set_user_text(...)` exactly once with the transcript of `audio`, also when the reply
       fails or is interrupted (on failure set "", then log or re-raise), so the next turn's history
-      never waits for it in vain. Transcribing alongside or after the reply (llamacpp, native) keeps
-      it off the path to the first audio; transcribing first is fine when the reply needs the text.
+      never waits for it in vain. Transcribing alongside or after the reply keeps it off the path
+      to the first audio; transcribing first is fine when the reply needs the text.
     `history` holds the earlier turns as text. `turn.closed` is set when the next turn starts;
     a responder may poll it to stop generating.
     """
 
-    name: str  # short label shown in logs, e.g. "native"
+    name: str  # short label shown in logs, e.g. "llamacpp"
 
     def respond(self, audio: AudioFrame, history: Sequence[Message], turn: Turn) -> Iterator[AudioFrame]: ...
 

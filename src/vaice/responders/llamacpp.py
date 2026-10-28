@@ -21,7 +21,7 @@ log = logging.getLogger(__name__)
 # Tells an interleaved-mode model (LFM3-Audio) to write its text alongside the speech; a fixed constant, so
 # a VAICE_LLAMACPP_PROMPT (or the older VAICE_LLM_PROMPT) only has to say how to answer
 MODE_INSTRUCTION = "Respond with interleaved text and audio."
-MAX_OUTPUT_TOKENS = 512  # counts text tokens and audio frames together, like the native backend's limit
+MAX_OUTPUT_TOKENS = 512  # counts text tokens and audio frames together
 # How often a waiting thread checks whether the reply was abandoned or the app is stopping
 POLL_SECONDS = 0.25
 # The close handshake of a socket whose server is busy or gone must not hold a thread for long
@@ -304,18 +304,15 @@ class LlamaCppResponder:
             cancelled.set()  # the session thread closes the socket, which cancels the reply on the server
 
 
-def check_server(url: str = config.LLAMACPP_URL, strict: bool = False) -> None:
+def check_server(url: str = config.LLAMACPP_URL) -> None:
     """Check at startup that llama-server is up and serves an audio-output model.
 
-    `strict` (backend `auto`) raises on anything short of that, so the factory falls back to the
-    native backend. Otherwise (`llamacpp` asked for explicitly) a server that is down or still
-    loading is only a warning or note, because it may be up by the first question; a server that
-    is up with a model that cannot speak raises, because no wait would fix that.
+    A server that is down or still loading is only a warning or note, because it may be up by the
+    first question. A server that is up with a model that cannot speak raises, because no wait
+    would fix that.
     """
 
     def unavailable(message: str) -> None:
-        if strict:
-            raise RuntimeError(message)
         log.warning("%s; replies will fail until it is up", message)
 
     health = f"{url}/health"
@@ -325,8 +322,6 @@ def check_server(url: str = config.LLAMACPP_URL, strict: bool = False) -> None:
         unavailable(f"llama-server not reachable at {health} ({exc})")
         return
     if r.status_code == 503:  # llama-server answers 503 "Loading model" until its weights are in
-        if strict:
-            raise RuntimeError(f"llama-server at {health} is still loading its model; cannot tell if it speaks")
         log.info("llama-server at %s is still loading its model", health)
         return
     if not r.ok:

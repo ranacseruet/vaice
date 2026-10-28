@@ -2,6 +2,7 @@
 import argparse
 import json
 import logging
+import os
 import time
 from functools import partial
 
@@ -13,7 +14,8 @@ from vaice import config
 from vaice.conversation import Conversation, Turn
 from vaice.interruptible import InterruptSafeReplyOnPause, stop_playing_reply
 from vaice.lifecycle import install_stop_handler, request_stop
-from vaice.responders import BACKEND_CHOICES, Responder, create_responder
+from vaice.responders.base import Responder
+from vaice.responders.llamacpp import LlamaCppResponder, check_server
 
 log = logging.getLogger(__name__)
 
@@ -24,9 +26,9 @@ CHATBOT_HEIGHT = 500  # pixels; the default (400) leaves the transcript cramped 
 UI_TITLE = "vaice"  # the heading above the mic
 
 
-def _subtitle(responder: Responder) -> str:
-    """The line under the heading: which backend is answering."""
-    return f"{responder.name} backend · running locally"
+def _subtitle() -> str:
+    """The line under the heading names the voice service."""
+    return "llama-server · speech-to-speech"
 
 
 def _error_text(exc: Exception) -> str:
@@ -36,9 +38,9 @@ def _error_text(exc: Exception) -> str:
 def refresh_view(conversation: Conversation, known: str) -> tuple:
     """The timer's tick: the chatbot's new view when the conversation changed, silence when not.
 
-    The reply pushes its last update before a late transcript arrives (native transcribes after
-    answering), so without this the "…" would sit in the chatbot until the next exchange or a
-    page reload. Views are compared as JSON so an unchanged transcript is never re-rendered.
+    The reply can finish before its parallel transcription session reports the transcript, so
+    without this the "…" would sit in the chatbot until the next exchange or a page reload. Views
+    are compared as JSON so an unchanged transcript is never re-rendered.
     """
     view = conversation.messages_for_ui()
     rendered = json.dumps(view, ensure_ascii=False)
@@ -106,8 +108,7 @@ def build_stream(responder: Responder, conversation: Conversation) -> Stream:
         mode="send-receive",
         additional_outputs=[chatbot],
         additional_outputs_handler=lambda old, new: new,
-        # The heading says which backend answers, so the page tells you what you are talking to
-        ui_args={"title": UI_TITLE, "subtitle": _subtitle(responder)},
+        ui_args={"title": UI_TITLE, "subtitle": _subtitle()},
     )
     with stream.ui:
         stream.ui.load(conversation.messages_for_ui, outputs=chatbot)  # show the stored conversation on every page load
@@ -130,27 +131,25 @@ def build_stream(responder: Responder, conversation: Conversation) -> Stream:
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(prog="vaice", description="Talk to a local model, hear it answer.")
-    parser.add_argument(
-        "--backend",
-        choices=BACKEND_CHOICES,
-        default=config.BACKEND,
-        help="default: $VAICE_BACKEND or auto; cascade is the old name of llamacpp",
-    )
-    args = parser.parse_args(argv)
-    if args.backend not in BACKEND_CHOICES:  # argparse doesn't validate defaults, e.g. from VAICE_BACKEND
-        parser.error(f"invalid backend {args.backend!r} (from VAICE_BACKEND): choose from {', '.join(BACKEND_CHOICES)}")
-    return args
+    parser = argparse.ArgumentParser(prog="vaice", description="Talk to a local llama-server audio model.")
+    if "VAICE_BACKEND" in os.environ:
+        parser.error(
+            "VAICE_BACKEND is no longer supported; vaice always uses llama-server. "
+            "Remove it, start llama-server with an audio-output model, and set VAICE_LLAMACPP_URL "
+            "if the server is not at http://localhost:8001."
+        )
+    return parser.parse_args(argv)
 
 
 def main() -> None:
-    args = parse_args()
+    parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     install_stop_handler()  # Ctrl+C: the responders give up, gradio closes the server
     try:
-        responder = create_responder(args.backend)
-        log.info("using %s backend", responder.name)
+        check_server()
+        responder = LlamaCppResponder()
+        log.info("using llama-server at %s", config.LLAMACPP_URL)
 
         conversation = Conversation(config.CONVERSATION_FILE, window=config.HISTORY_TURNS)
         log.info("conversation history in %s (%d turns loaded)", config.CONVERSATION_FILE, len(conversation))

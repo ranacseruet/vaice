@@ -2,9 +2,8 @@
 import signal
 import threading
 
-# Set when the app is asked to stop (Ctrl+C). The native backend uses it to give up on a reply
-# instead of waiting for a model call that may never return: the process would otherwise hang
-# at exit, because the thread that waits for the model is not a daemon thread.
+# Set when the app is asked to stop (Ctrl+C). The llama-server session threads use it to give up
+# on a reply instead of waiting for a server call that may never return.
 stopping = threading.Event()
 
 

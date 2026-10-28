@@ -45,19 +45,8 @@ def _server_url(*names: str, default: str) -> str:
     return server_base(default)
 
 
-# auto: the llama.cpp backend (llama-server's own speech) if the server is up and serves audio output,
-# else the native speech-to-speech model on MLX. `cascade` is the old name of `llamacpp`.
-BACKEND = os.getenv("VAICE_BACKEND", "auto")
-
-# Native backend (mlx-audio speech-to-speech). Empty VAICE_NATIVE_MODEL disables it.
-NATIVE_MODEL = os.getenv("VAICE_NATIVE_MODEL", "mlx-community/LFM2.5-Audio-1.5B-8bit")
-NATIVE_PROMPT = os.getenv(
-    "VAICE_NATIVE_PROMPT",
-    "Respond with interleaved text and audio. Reply naturally and concisely in 1 to 2 spoken sentences.",
-)
-
-# llama.cpp backend: llama-server's /v1/realtime. The "Respond with interleaved text and audio." mode line
-# is added in code (responders/llamacpp.py), so a prompt set for the older cascade keeps its meaning.
+# llama-server's /v1/realtime. The "Respond with interleaved text and audio." mode line
+# is added in code (responders/llamacpp.py), so a prompt set with the older VAICE_LLM_PROMPT name keeps its meaning.
 LLAMACPP_URL = _server_url("VAICE_LLAMACPP_URL", "VAICE_LLM_URL", default="http://localhost:8001")
 LLAMACPP_PROMPT = _env(
     "VAICE_LLAMACPP_PROMPT",
