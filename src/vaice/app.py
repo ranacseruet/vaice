@@ -15,7 +15,9 @@ from vaice.conversation import Conversation, Turn
 from vaice.interruptible import InterruptSafeReplyOnPause, stop_playing_reply
 from vaice.lifecycle import install_stop_handler, request_stop
 from vaice.responders.base import Responder
-from vaice.responders.llamacpp import LlamaCppResponder, check_server
+from vaice.responders.llamacpp import LlamaCppResponder, check_realtime_protocol, check_server
+from vaice.responders.routing import ModelCapabilities, resolve_pipeline
+from vaice.responders.text import TextResponder
 
 log = logging.getLogger(__name__)
 
@@ -26,8 +28,10 @@ CHATBOT_HEIGHT = 500  # pixels; the default (400) leaves the transcript cramped 
 UI_TITLE = "vaice"  # the heading above the mic
 
 
-def _subtitle() -> str:
+def _subtitle(responder: Responder | None = None) -> str:
     """The line under the heading names the voice service."""
+    if responder is not None and responder.name == "text":
+        return "local Whisper · OpenAI-compatible chat · local Kokoro"
     return "llama-server · speech-to-speech"
 
 
@@ -108,7 +112,7 @@ def build_stream(responder: Responder, conversation: Conversation) -> Stream:
         mode="send-receive",
         additional_outputs=[chatbot],
         additional_outputs_handler=lambda old, new: new,
-        ui_args={"title": UI_TITLE, "subtitle": _subtitle()},
+        ui_args={"title": UI_TITLE, "subtitle": _subtitle(responder)},
     )
     with stream.ui:
         stream.ui.load(conversation.messages_for_ui, outputs=chatbot)  # show the stored conversation on every page load
@@ -147,9 +151,21 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     install_stop_handler()  # Ctrl+C: the responders give up, gradio closes the server
     try:
-        check_server()
-        responder = LlamaCppResponder()
-        log.info("using llama-server at %s", config.LLAMACPP_URL)
+        text_url_matches_llama = f"{config.LLAMACPP_URL}/v1" == config.TEXT_URL
+        capabilities = check_server() if config.PIPELINE != "text" or text_url_matches_llama else None
+        realtime_protocol = False
+        if config.PIPELINE == "auto" and _has_audio_in_both_directions(capabilities):
+            realtime_protocol = check_realtime_protocol()
+        selected = resolve_pipeline(config.PIPELINE, capabilities, realtime_protocol=realtime_protocol)
+        if selected == "realtime":
+            responder = LlamaCppResponder()
+            log.info("using llama-server realtime audio at %s", config.LLAMACPP_URL)
+        else:
+            model_id = config.TEXT_MODEL or (
+                capabilities.model_id if capabilities is not None and text_url_matches_llama else ""
+            )
+            responder = TextResponder(model_id=model_id)
+            log.info("using the text chat pipeline at %s (model %s)", config.TEXT_URL, model_id or "auto")
 
         conversation = Conversation(config.CONVERSATION_FILE, window=config.HISTORY_TURNS)
         log.info("conversation history in %s (%d turns loaded)", config.CONVERSATION_FILE, len(conversation))
@@ -161,3 +177,13 @@ def main() -> None:
         log.info("stopped")
     finally:
         request_stop()  # the app is over: don't wait for a model call that may never return
+
+
+def _has_audio_in_both_directions(capabilities: ModelCapabilities | None) -> bool:
+    return bool(
+        capabilities is not None
+        and capabilities.input_modalities is not None
+        and capabilities.output_modalities is not None
+        and "audio" in capabilities.input_modalities
+        and "audio" in capabilities.output_modalities
+    )

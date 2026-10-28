@@ -15,6 +15,7 @@ from vaice import config, lifecycle
 from vaice.audio import from_pcm16, to_pcm16
 from vaice.conversation import Message, Turn
 from vaice.responders.base import AudioFrame, spoken_part
+from vaice.responders.routing import ModelCapabilities
 
 log = logging.getLogger(__name__)
 
@@ -304,12 +305,20 @@ class LlamaCppResponder:
             cancelled.set()  # the session thread closes the socket, which cancels the reply on the server
 
 
-def check_server(url: str = config.LLAMACPP_URL) -> None:
-    """Check at startup that llama-server is up and serves an audio-output model.
+def _advertised_modalities(architecture: dict, key: str) -> frozenset[str] | None:
+    """Read a modality list without treating absent or malformed metadata as unsupported."""
+    value = architecture.get(key)
+    if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+        return None
+    return frozenset(item.lower() for item in value)
+
+
+def check_server(url: str = config.LLAMACPP_URL) -> ModelCapabilities | None:
+    """Check health and read the selected model's advertised modalities.
 
     A server that is down or still loading is only a warning or note, because it may be up by the
-    first question. A server that is up with a model that cannot speak raises, because no wait
-    would fix that.
+    first question. Unknown modality metadata stays unknown so auto mode can ask for an explicit
+    adapter choice instead of inferring support.
     """
 
     def unavailable(message: str) -> None:
@@ -320,26 +329,51 @@ def check_server(url: str = config.LLAMACPP_URL) -> None:
         r = requests.get(health, timeout=CHECK_TIMEOUT)
     except requests.RequestException as exc:
         unavailable(f"llama-server not reachable at {health} ({exc})")
-        return
+        return None
     if r.status_code == 503:  # llama-server answers 503 "Loading model" until its weights are in
         log.info("llama-server at %s is still loading its model", health)
-        return
+        return None
     if not r.ok:
         unavailable(f"llama-server health check at {health} returned {r.status_code}: {r.text[:200]}")
-        return
+        return None
 
     models = f"{url}/v1/models"
     try:
         r = requests.get(models, timeout=CHECK_TIMEOUT)
         r.raise_for_status()
         entries = r.json()["data"]
-        names = [str(m.get("id")) for m in entries]
-        speaks = any("audio" in (m.get("architecture") or {}).get("output_modalities", []) for m in entries)
+        if not isinstance(entries, list):
+            raise TypeError("model list data is not an array")
+        preferred_id = config.TEXT_MODEL if config.PIPELINE == "text" else ""
+        selected = next(
+            (model for model in entries if preferred_id and str(model.get("id")) == preferred_id),
+            None,
+        )
+        if selected is None:
+            selected = {"id": preferred_id} if preferred_id else (entries[0] if entries else {})
+        architecture = selected.get("architecture") or {}
+        if not isinstance(architecture, dict):
+            architecture = {}
+        model_id = str(selected.get("id")) if selected.get("id") is not None else None
+        capabilities = ModelCapabilities(
+            model_id,
+            _advertised_modalities(architecture, "input_modalities"),
+            _advertised_modalities(architecture, "output_modalities"),
+        )
     except (requests.RequestException, ValueError, KeyError, TypeError, AttributeError) as exc:
         unavailable(f"could not read the model list at {models} ({type(exc).__name__}: {exc})")
-        return
-    if not speaks:
-        raise RuntimeError(
-            f"the model on llama-server at {url} ({', '.join(names) or 'none listed'}) does not output audio; "
-            "the llamacpp backend needs an audio-output model such as LiquidAI/LFM3-Audio-2B-GGUF"
-        )
+        return ModelCapabilities(None, None, None)
+    if capabilities.model_id is None:
+        log.warning("no model is listed at %s; modality capabilities are unknown", models)
+    return capabilities
+
+
+def check_realtime_protocol(url: str = config.LLAMACPP_URL, timeout: float = CHECK_TIMEOUT) -> bool:
+    """Confirm llama-server's realtime websocket handshake and audio session metadata."""
+    try:
+        with _open(url, timeout) as ws:
+            _Session(ws, timeout, lifecycle.stopping.is_set).rates()
+        return True
+    except (OSError, RuntimeError, WebSocketException, _Stopped) as exc:
+        log.warning("could not verify llama-server /v1/realtime at %s (%s)", url, exc)
+        return False

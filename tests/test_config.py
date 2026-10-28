@@ -109,3 +109,61 @@ def test_the_settings_are_read_from_the_environment_at_import(monkeypatch):
     finally:
         monkeypatch.undo()
         importlib.reload(config)
+
+
+def test_the_realtime_pipeline_remains_the_default_and_auto_is_available(monkeypatch):
+    monkeypatch.delenv("VAICE_PIPELINE", raising=False)
+    try:
+        reloaded = importlib.reload(config)
+        assert reloaded.PIPELINE == "realtime"
+        monkeypatch.setenv("VAICE_PIPELINE", "auto")
+        assert reloaded._choice("VAICE_PIPELINE", default="realtime", choices={"realtime", "text", "auto"}) == "auto"
+    finally:
+        monkeypatch.undo()
+        importlib.reload(config)
+
+
+def test_text_prompt_keeps_existing_prompt_aliases(monkeypatch):
+    monkeypatch.delenv("VAICE_TEXT_PROMPT", raising=False)
+    monkeypatch.delenv("VAICE_LLM_PROMPT", raising=False)
+    monkeypatch.setenv("VAICE_PROMPT", "old prompt")
+    assert config._env("VAICE_TEXT_PROMPT", "VAICE_LLM_PROMPT", "VAICE_PROMPT", default="brief") == "old prompt"
+
+
+def test_text_api_url_preserves_the_configured_api_prefix(monkeypatch):
+    monkeypatch.setenv("VAICE_TEXT_URL", "https://chat.example.test/gateway/openai/v1/")
+    assert config._text_api_url() == "https://chat.example.test/gateway/openai/v1"
+
+
+@pytest.mark.parametrize("value", ["ftp://chat.example.test/v1", "https://chat.example.test/v1?key=secret"])
+def test_text_api_url_rejects_non_http_urls_and_query_strings(monkeypatch, value):
+    monkeypatch.setenv("VAICE_TEXT_URL", value)
+    with pytest.raises(SystemExit, match="VAICE_TEXT_URL must be an http"):
+        config._text_api_url()
+
+
+def test_removed_model_and_tts_variables_stay_ignored(monkeypatch):
+    for name in ("VAICE_TEXT_MODEL", "VAICE_KOKORO_MODEL", "VAICE_KOKORO_SPEAKER", "VAICE_KOKORO_SPEED"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("VAICE_LLM_MODEL", "legacy-model")
+    monkeypatch.setenv("VAICE_TTS_MODEL", "legacy-kokoro-model")
+    monkeypatch.setenv("VAICE_TTS_VOICE", "af_heart")
+    monkeypatch.setenv("VAICE_TTS_SPEED", "not-a-number")
+    try:
+        reloaded = importlib.reload(config)
+        assert reloaded.TEXT_MODEL == ""
+        assert reloaded.KOKORO_MODEL.name == "model.onnx"
+        assert reloaded.KOKORO_SPEAKER == "0"
+        assert reloaded.KOKORO_SPEED == 1.0
+    finally:
+        monkeypatch.undo()
+        importlib.reload(config)
+
+
+def test_local_voice_model_paths_are_configurable_and_expand_home(monkeypatch, tmp_path):
+    monkeypatch.setenv("VAICE_WHISPER_MODEL_DIR", "~/models/whisper")
+    monkeypatch.setenv("VAICE_KOKORO_MODEL_DIR", str(tmp_path / "kokoro"))
+    monkeypatch.setenv("VAICE_KOKORO_DATA_DIR", str(tmp_path / "espeak-ng-data"))
+    assert config._path("VAICE_WHISPER_MODEL_DIR", default="unused").name == "whisper"
+    assert config._path("VAICE_KOKORO_MODEL_DIR", default="unused") == tmp_path / "kokoro"
+    assert config._path("VAICE_KOKORO_DATA_DIR", default="unused") == tmp_path / "espeak-ng-data"

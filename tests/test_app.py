@@ -15,6 +15,7 @@ from vaice.app import CHATBOT_HEIGHT, UI_TITLE, VIEW_REFRESH_SECONDS, build_stre
 from vaice.conversation import Conversation
 from vaice.interruptible import InterruptSafeReplyOnPause
 from vaice.responders.llamacpp import LlamaCppResponder
+from vaice.responders.routing import ModelCapabilities
 
 AUDIO = (48000, np.zeros((1, 480), dtype=np.int16))
 
@@ -551,6 +552,104 @@ def test_main_installs_the_stop_handler_and_asks_the_app_to_stop_when_the_server
         assert startup == ["check", "construct"]
         assert launched == [app.config.PORT]
         assert lifecycle.stopping.is_set()  # the server is gone: the responders may give up
+    finally:
+        signal.signal(signal.SIGINT, previous)
+        lifecycle.stopping.clear()
+
+
+def test_main_uses_the_explicit_text_pipeline(monkeypatch, tmp_path):
+    previous = signal.getsignal(signal.SIGINT)
+    selected = []
+
+    class FakeStream:
+        class ui:
+            @staticmethod
+            def launch(server_port):
+                selected.append(("launch", server_port))
+
+    monkeypatch.setattr(app, "parse_args", lambda: argparse.Namespace())
+    monkeypatch.setattr(app.config, "PIPELINE", "text")
+    monkeypatch.setattr(app.config, "TEXT_URL", "http://text-server:8001/gateway/v1")
+    monkeypatch.setattr(app.config, "TEXT_MODEL", "chat-model")
+    monkeypatch.setattr(app, "check_server", lambda: pytest.fail("text mode has its own API base"))
+    monkeypatch.setattr(
+        app,
+        "TextResponder",
+        lambda model_id: selected.append(("text", model_id, app.config.TEXT_URL)) or FakeResponder(),
+    )
+    monkeypatch.setattr(
+        app,
+        "build_stream",
+        lambda responder, conversation: selected.append(responder.name) or FakeStream(),
+    )
+    monkeypatch.setattr(app.config, "CONVERSATION_FILE", tmp_path / "conversation.json")
+    lifecycle.stopping.clear()
+
+    try:
+        app.main()
+        assert selected == [
+            ("text", "chat-model", "http://text-server:8001/gateway/v1"),
+            "fake",
+            ("launch", app.config.PORT),
+        ]
+    finally:
+        signal.signal(signal.SIGINT, previous)
+        lifecycle.stopping.clear()
+
+
+def test_main_auto_mode_probes_only_audio_complete_models(monkeypatch, tmp_path):
+    previous = signal.getsignal(signal.SIGINT)
+    events = []
+    capabilities = ModelCapabilities("audio-model", frozenset({"text", "audio"}), frozenset({"text", "audio"}))
+
+    class FakeStream:
+        class ui:
+            @staticmethod
+            def launch(server_port):
+                events.append("launch")
+
+    monkeypatch.setattr(app, "parse_args", lambda: argparse.Namespace())
+    monkeypatch.setattr(app.config, "PIPELINE", "auto")
+    monkeypatch.setattr(app, "check_server", lambda: capabilities)
+    monkeypatch.setattr(app, "check_realtime_protocol", lambda: events.append("probe") or True)
+    monkeypatch.setattr(app, "LlamaCppResponder", lambda: events.append("realtime") or FakeResponder())
+    monkeypatch.setattr(app, "build_stream", lambda responder, conversation: FakeStream())
+    monkeypatch.setattr(app.config, "CONVERSATION_FILE", tmp_path / "conversation.json")
+    lifecycle.stopping.clear()
+
+    try:
+        app.main()
+        assert events == ["probe", "realtime", "launch"]
+    finally:
+        signal.signal(signal.SIGINT, previous)
+        lifecycle.stopping.clear()
+
+
+def test_main_auto_mode_errors_clearly_for_unknown_capabilities(monkeypatch):
+    previous = signal.getsignal(signal.SIGINT)
+    monkeypatch.setattr(app, "parse_args", lambda: argparse.Namespace())
+    monkeypatch.setattr(app.config, "PIPELINE", "auto")
+    monkeypatch.setattr(app, "check_server", lambda: ModelCapabilities("model", None, None))
+    lifecycle.stopping.clear()
+
+    try:
+        with pytest.raises(RuntimeError, match="capabilities are unknown"):
+            app.main()
+    finally:
+        signal.signal(signal.SIGINT, previous)
+        lifecycle.stopping.clear()
+
+
+def test_main_auto_mode_errors_clearly_when_the_server_is_unavailable(monkeypatch):
+    previous = signal.getsignal(signal.SIGINT)
+    monkeypatch.setattr(app, "parse_args", lambda: argparse.Namespace())
+    monkeypatch.setattr(app.config, "PIPELINE", "auto")
+    monkeypatch.setattr(app, "check_server", lambda: None)
+    lifecycle.stopping.clear()
+
+    try:
+        with pytest.raises(RuntimeError, match="llama-server is unavailable"):
+            app.main()
     finally:
         signal.signal(signal.SIGINT, previous)
         lifecycle.stopping.clear()

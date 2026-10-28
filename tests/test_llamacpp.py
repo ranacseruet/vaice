@@ -15,6 +15,7 @@ from vaice import lifecycle
 from vaice.conversation import Turn
 from vaice.responders import llamacpp
 from vaice.responders.llamacpp import MAX_OUTPUT_TOKENS, MODE_INSTRUCTION, LlamaCppResponder, check_server
+from vaice.responders.routing import resolve_pipeline
 
 TONE = (8000 * np.sin(2 * np.pi * 440 * np.arange(4800) / 48000)).astype(np.int16)
 AUDIO = (48000, np.stack([TONE, np.zeros_like(TONE)]))  # 0.1 s of stereo browser audio
@@ -435,7 +436,14 @@ class Reply:
 
 
 def models(*modalities):
-    return {"data": [{"id": "LFM3", "architecture": {"output_modalities": list(modalities)}}]}
+    return {
+        "data": [
+            {
+                "id": "LFM3",
+                "architecture": {"input_modalities": ["text", "audio"], "output_modalities": list(modalities)},
+            }
+        ]
+    }
 
 
 def serve_checks(monkeypatch, health, listing=None):
@@ -453,20 +461,28 @@ def serve_checks(monkeypatch, health, listing=None):
 
 def test_a_server_with_an_audio_model_passes(monkeypatch):
     asked = serve_checks(monkeypatch, Reply(), Reply(body=models("text", "audio")))
-    check_server("http://h:1")
+    capabilities = check_server("http://h:1")
     assert asked[:2] == ["http://h:1/health", "http://h:1/v1/models"]
+    assert capabilities.model_id == "LFM3"
+    assert capabilities.input_modalities == frozenset({"text", "audio"})
+    assert capabilities.output_modalities == frozenset({"text", "audio"})
 
 
 def test_a_model_that_cannot_speak_is_an_error_naming_it(monkeypatch):
     serve_checks(monkeypatch, Reply(), Reply(body=models("text")))
-    with pytest.raises(RuntimeError, match=r"LFM3.*does not output audio.*LFM3-Audio-2B-GGUF"):
-        check_server("http://h:1")
+    capabilities = check_server("http://h:1")
+    with pytest.raises(RuntimeError, match=r"LFM3.*does not output audio"):
+        resolve_pipeline("realtime", capabilities)
 
 
-def test_a_model_list_without_modalities_counts_as_no_audio(monkeypatch):
+def test_a_model_list_without_modalities_keeps_capabilities_unknown(monkeypatch):
     serve_checks(monkeypatch, Reply(), Reply(body={"data": [{"id": "old"}]}))
-    with pytest.raises(RuntimeError, match="does not output audio"):
-        check_server("http://h:1")
+    capabilities = check_server("http://h:1")
+    assert capabilities.model_id == "old"
+    assert capabilities.input_modalities is None
+    assert capabilities.output_modalities is None
+    with pytest.raises(RuntimeError, match="capabilities are unknown"):
+        resolve_pipeline("auto", capabilities)
 
 
 def test_an_unreachable_server_is_a_warning_and_startup_can_continue(monkeypatch, caplog):
@@ -487,8 +503,10 @@ def test_a_server_still_loading_is_a_note_and_startup_can_continue(monkeypatch, 
 def test_an_unreadable_model_list_is_a_warning(monkeypatch, caplog):
     serve_checks(monkeypatch, Reply(), Reply(body=None))
     with caplog.at_level(logging.WARNING, logger="vaice.responders.llamacpp"):
-        assert check_server("http://h:1") is None
+        capabilities = check_server("http://h:1")
     assert "could not read the model list" in caplog.text
+    assert capabilities.input_modalities is None
+    assert capabilities.output_modalities is None
 
 
 def test_an_unhealthy_server_is_a_warning(monkeypatch, caplog):
@@ -501,3 +519,32 @@ def test_an_unhealthy_server_is_a_warning(monkeypatch, caplog):
 def test_a_secure_server_url_means_a_wss_socket():
     assert llamacpp._ws_url("http://h:1") == "ws://h:1/v1/realtime"
     assert llamacpp._ws_url("https://h:1") == "wss://h:1/v1/realtime"
+
+
+def test_realtime_protocol_probe_checks_the_handshake_audio_metadata(monkeypatch):
+    calls = []
+
+    class Connection:
+        def __enter__(self):
+            return object()
+
+        def __exit__(self, *_):
+            return None
+
+    class Session:
+        def __init__(self, *_):
+            pass
+
+        def rates(self):
+            return 16000, 24000
+
+    monkeypatch.setattr(llamacpp, "_open", lambda url, timeout: calls.append((url, timeout)) or Connection())
+    monkeypatch.setattr(llamacpp, "_Session", Session)
+
+    assert llamacpp.check_realtime_protocol("http://h:1", timeout=1.5)
+    assert calls == [("http://h:1", 1.5)]
+
+
+def test_realtime_protocol_probe_returns_false_for_a_non_realtime_endpoint(monkeypatch):
+    monkeypatch.setattr(llamacpp, "_open", lambda *_: (_ for _ in ()).throw(RuntimeError("upgrade rejected")))
+    assert not llamacpp.check_realtime_protocol("http://h:1")

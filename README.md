@@ -1,19 +1,18 @@
 # vaice
 
 Talk to a local model and hear it answer; the spoken reply streams back as it is generated.
-The conversation carries over between questions and is kept as text history.
-
-vaice uses one speech-to-speech model ([LFM3-Audio-2B](https://huggingface.co/LiquidAI/LFM3-Audio-2B-GGUF) or
-another compatible model) on a llama.cpp `llama-server`. The server hears your audio and streams its spoken
-reply over the `/v1/realtime` WebSocket. Choose and run the model separately; vaice does not bundle a model.
+The conversation carries over between questions and is kept as text history. The default path uses a
+llama.cpp realtime audio model. An optional text path transcribes with local Whisper Tiny, streams text
+from an OpenAI-compatible chat endpoint, and speaks each sentence with local Kokoro.
 
 ```
 browser mic ─WebRTC─▶ fastrtc (VAD: detects you stopped talking)
                          │  audio
                          ▼
-                  LlamaCppResponder  llama-server :8001 /v1/realtime (WebSocket): speech streams back;
-                   │                  a second session transcribes your audio in parallel
-                   │ records the transcript and spoken text on `turn`
+                  Responder
+                   ├── realtime (default): llama-server /v1/realtime (WebSocket) speaks and transcribes
+                   └── text (explicit): local Whisper → /v1/chat/completions → local Kokoro
+                    records the transcript and audio-covered text on `turn`
                    ▼
                   Conversation (~/.vaice/conversation.json) ──▶ transcript in the UI
 ```
@@ -22,9 +21,9 @@ browser mic ─WebRTC─▶ fastrtc (VAD: detects you stopped talking)
 
 - Python 3.10–3.12 (what CI tests; the dependencies also resolve on 3.13 and 3.14, but nothing was run there)
 - [uv](https://docs.astral.sh/uv/)
-- A llama.cpp `llama-server` **b11960 or newer** (v0.8.0) running a model with audio output. It needs the
-  `/v1/realtime` WebSocket. At the time of writing, Homebrew's llama.cpp (0.7.0) is too old, so build it
-  from source:
+- For the default `realtime` path: a llama.cpp `llama-server` **b11960 or newer** (v0.8.0) running a model
+  with audio input and output. It needs the `/v1/realtime` WebSocket. At the time of writing, Homebrew's
+  llama.cpp (0.7.0) is too old, so build it from source:
 
   ```bash
   git clone https://github.com/ggml-org/llama.cpp && cd llama.cpp
@@ -32,11 +31,17 @@ browser mic ─WebRTC─▶ fastrtc (VAD: detects you stopped talking)
   build/bin/llama-server -hf LiquidAI/LFM3-Audio-2B-GGUF:Q4_K_M --port 8001
   ```
 
-  **Only llama.cpp `llama-server` is supported and tested.** vaice speaks its `/v1/realtime` events and reads
-  `/health` and `/v1/models` to check that the selected model advertises audio output. Other servers (Ollama,
-  LM Studio, oMLX, …) are untested and will not work. Point `VAICE_LLAMACPP_URL` at a different host or port
-  if llama-server isn't on `:8001`. The CI runner is macOS; Linux and Windows audio behavior has not been
-  validated.
+  **Only llama.cpp `llama-server` is supported and tested for the realtime path.** vaice speaks its
+  `/v1/realtime` events and checks `/health` and `/v1/models`. Point `VAICE_LLAMACPP_URL` at a different host
+  or port if llama-server isn't on `:8001`. The CI runner is macOS; Linux and Windows audio behavior has not
+  been validated.
+
+- For the optional `text` path: an OpenAI-compatible server with `/v1/chat/completions` streaming and
+  `/v1/models`. Its API base defaults to `VAICE_LLAMACPP_URL` plus `/v1`; use `VAICE_TEXT_URL` for a different
+  host or a path prefix. Chat endpoint support must be selected explicitly because model modality metadata
+  alone does not establish that this endpoint works.
+- Python 3.10–3.12 and the optional sherpa-onnx CPU package plus model files if you choose `text`. Those
+  large speech models are downloaded separately and loaded only when the first text turn needs them.
 
   Current upstream llama.cpp documentation describes `/v1/realtime` conversation support for LFM3-Omni and
   the `--reasoning off` server option. vaice's integration has been exercised with LFM3-Audio; Omni behavior
@@ -48,26 +53,63 @@ browser mic ─WebRTC─▶ fastrtc (VAD: detects you stopped talking)
 ## Setup
 
 ```bash
-uv venv .venv            # picks Python 3.12 from .python-version
-uv pip install -e ".[dev]"
+uv venv .venv                       # picks Python 3.12 from .python-version
+uv pip install -e ".[dev]"          # default realtime path
+# For the optional local Whisper + Kokoro path:
+uv pip install -e ".[dev,local-voice]"
 ```
+
+### Local speech models for text mode
+
+The `local-voice` extra installs sherpa-onnx; it does not download model weights. These official
+sherpa-onnx archives match vaice's default paths and filenames:
+
+```bash
+mkdir -p ~/.vaice/models
+cd ~/.vaice/models
+curl -L -o whisper.tar.bz2 https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-whisper-tiny.tar.bz2
+tar xf whisper.tar.bz2
+rm whisper.tar.bz2
+curl -L -o kokoro.tar.bz2 https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-en-v0_19.tar.bz2
+tar xf kokoro.tar.bz2
+rm kokoro.tar.bz2
+curl -L -o kokoro-en-v0_19/lexicon-en-us.txt https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/lexicon-en-us.txt
+```
+
+This provides Whisper's `tiny-encoder.int8.onnx`, `tiny-decoder.int8.onnx`, and `tiny-tokens.txt`, plus
+Kokoro's `model.onnx`, `voices.bin`, `tokens.txt`, `espeak-ng-data/`, and the shared English lexicon.
+These filenames and the `OfflineRecognizer.from_whisper` / `OfflineTtsKokoroModelConfig` setup follow
+sherpa-onnx's [Whisper Tiny](https://k2-fsa.github.io/sherpa/onnx/pretrained_models/whisper/tiny.html),
+[Kokoro](https://k2-fsa.github.io/sherpa/onnx/tts/pretrained_models/kokoro.html), and
+[English lexicon](https://k2-fsa.github.io/sherpa/onnx/c-api/html/tts.html) documentation. The paths can
+be changed individually with the `VAICE_WHISPER_*` and `VAICE_KOKORO_*` settings below.
+The combined model process peaked at about 1.0 GiB RSS in a local smoke run; memory use varies by OS and
+runtime build.
 
 ## Run
 
 ```bash
-.venv/bin/vaice                      # connect to llama-server at VAICE_LLAMACPP_URL or localhost:8001
+.venv/bin/vaice                      # realtime default; connect to llama-server at VAICE_LLAMACPP_URL
+# VAICE_PIPELINE=text .venv/bin/vaice # local Whisper → text chat → local Kokoro
 ```
 
-llama-server downloads its model with `-hf`. When you see
-`Running on local URL: http://127.0.0.1:7860`, open it in Chrome, allow the microphone,
-click record, ask a question, then stop talking. Use headphones, otherwise the speakers
+For realtime mode, llama-server downloads its model with `-hf`. For text mode, run the selected
+OpenAI-compatible chat server and set `VAICE_TEXT_URL` if its API base differs from the default.
+When vaice prints `Running on local URL: http://127.0.0.1:7860`, open it in Chrome, allow the
+microphone, click record, ask a question, then stop talking. Use headphones, otherwise the speakers
 feed back into the mic.
 
-The page identifies llama-server as the active voice service. At startup, vaice checks the server:
-an unreachable or still-loading server is logged and the UI starts, so it can become available
-before your first question. A reachable server whose model does not advertise audio output is rejected.
-For each reply the log prints `[llamacpp] time to first audio: N.NNs` and `[llamacpp] reply finished in N.NNs`.
-Replies are capped at 512 tokens (text and audio frames together); the log reports truncation.
+The page identifies the active voice path. In realtime mode, vaice checks llama-server at startup: an
+unreachable or still-loading server is logged and the UI starts, so it can become available before
+your first question. Text mode uses `VAICE_TEXT_URL`; without `VAICE_TEXT_MODEL`, its model ID is
+discovered from `/models` on the first turn. Realtime replies are capped at 512 tokens (text and audio
+frames together); the log reports truncation.
+
+`VAICE_PIPELINE=realtime` keeps the default behavior. `VAICE_PIPELINE=text` selects local Whisper,
+OpenAI-compatible chat streaming, and local Kokoro. `VAICE_PIPELINE=auto` only selects realtime when
+`/v1/models` advertises both audio input and audio output and vaice verifies the `/v1/realtime` session
+handshake. Text-only metadata does not prove a chat-completions endpoint, so auto mode asks you to set
+`VAICE_PIPELINE=text` explicitly. Missing metadata is unknown, not a rejection or a capability claim.
 
 `--backend` has been removed. If `VAICE_BACKEND` is set, startup shows a migration error; remove it from
 your shell or `.env` file. `VAICE_NATIVE_MODEL` and `VAICE_NATIVE_PROMPT` are also removed and have no effect.
@@ -95,12 +137,12 @@ gone.
   yet (it is still being transcribed) is left out of the prompt entirely, so the model never sees
   a reply to a question it cannot read and never reads it as `(inaudible)`. A transcript that
   arrived but is empty shows `(inaudible)`.
-  - The current question is sent as audio; earlier turns are text in the session instructions
-    (`User: …` / `Assistant: …` lines after the prompt). llama-server's realtime sessions refuse earlier
-    assistant turns as conversation items, so every reply opens a fresh session and vaice stays the
-    single owner of the history (windowing, barge-in cuts and **New conversation** all apply). A second,
-    transcription session processes the same audio in parallel with the reply. No language is set, so
-    the model detects it.
+  - In realtime mode, the current question is sent as audio; earlier turns are text in the session
+    instructions (`User: …` / `Assistant: …` lines after the prompt). llama-server's realtime sessions
+    refuse earlier assistant turns as conversation items, so every reply opens a fresh session and vaice
+    stays the single owner of history. A second, transcription session processes the same audio in parallel.
+    In text mode, Whisper transcribes the current question locally before the chat request; earlier turns
+    and the transcript are sent as ordinary user/assistant messages.
   - The small models use the last few turns well but often forget things said much earlier
     (e.g. your name from the first turn), even though they are in the prompt.
 - **Barge-in:** if you talk over a reply, it stops when you stop talking, and history keeps the
@@ -108,8 +150,10 @@ gone.
   the words of the audio handed out, cut to the share that the time since the first audio could
   have played (fastrtc queues audio ahead of playback). At least one word is kept, so an
   interrupted reply is never recorded as empty. The LFM models write their text well
-  ahead of their audio, so the text is also split by the share of audio received so far. Expect it to be
-  off by a few words. The chunk that was being generated when you interrupted is dropped instead of played;
+  ahead of their audio, so the text is also split by the share of audio received so far. In text mode,
+  complete sentences are synthesized and queued in order; the visible cumulative text is limited to the
+  sentence samples handed out so far. Expect interrupted text cutoffs to be approximate at word boundaries.
+  The chunk that was being generated when you interrupted is dropped instead of played;
   fastrtc would queue it after clearing its
   playback queue ([#2](https://github.com/ranacseruet/vaice/issues/2)).
 - **Trimming:** each prompt includes at most the last `VAICE_HISTORY_TURNS` exchanges. The oldest
@@ -152,22 +196,44 @@ vaice does not read `.env` itself.
 | `VAICE_PORT` | `7860` | UI port |
 | `VAICE_DATA_DIR` | `~/.vaice` | where `conversation.json` is kept |
 | `VAICE_HISTORY_TURNS` | `10` | past exchanges included in each prompt (`0` = none); older ones are dropped in blocks |
-| `VAICE_LLAMACPP_URL` | `http://localhost:8001` | llama-server URL; only scheme, host and port are used (`/health`, `/v1/models` and `ws://…/v1/realtime` hang off it). The old `VAICE_LLM_URL` alias, including URLs with paths, still works |
-| `VAICE_LLAMACPP_PROMPT` | `Reply naturally and concisely in 1 to 2 spoken sentences.` | reply instructions; vaice adds `Respond with interleaved text and audio.` in front. The old `VAICE_LLM_PROMPT` and `VAICE_PROMPT` aliases still work |
+| `VAICE_PIPELINE` | `realtime` | `realtime`, `text`, or `auto`. Text mode is explicit because modality metadata does not prove a chat-completions endpoint exists |
+| `VAICE_LLAMACPP_URL` | `http://localhost:8001` | llama-server URL; only scheme, host and port are used (`/health`, `/v1/models`, and `/v1/realtime` hang off it). The old `VAICE_LLM_URL` alias, including URLs with paths, still works |
+| `VAICE_TEXT_URL` | `VAICE_LLAMACPP_URL` + `/v1` | OpenAI-compatible API base for text mode; its optional path prefix is preserved, and `/models` and `/chat/completions` are added |
+| `VAICE_LLAMACPP_PROMPT` | `Reply naturally and concisely in 1 to 2 spoken sentences.` | realtime instructions; vaice adds `Respond with interleaved text and audio.` in front. The old `VAICE_LLM_PROMPT` and `VAICE_PROMPT` aliases still work |
 | `VAICE_LLAMACPP_TIMEOUT` | `120` | seconds to open a connection or the longest silence from llama-server before a reply fails; the old `VAICE_LLM_TIMEOUT` alias still works |
+| `VAICE_TEXT_MODEL` | first model from `/models` | optional model ID for `/chat/completions` |
+| `VAICE_TEXT_PROMPT` | same default as realtime | system prompt sent to the text chat model; `VAICE_LLM_PROMPT` and `VAICE_PROMPT` remain aliases |
+| `VAICE_WHISPER_MODEL_DIR` | `~/.vaice/models/sherpa-onnx-whisper-tiny` | Whisper folder; defaults to `tiny-encoder.int8.onnx`, `tiny-decoder.int8.onnx`, and `tiny-tokens.txt` |
+| `VAICE_WHISPER_ENCODER` | under Whisper model dir | override the Whisper encoder file |
+| `VAICE_WHISPER_DECODER` | under Whisper model dir | override the Whisper decoder file |
+| `VAICE_WHISPER_TOKENS` | under Whisper model dir | override the Whisper tokens file |
+| `VAICE_WHISPER_LANGUAGE` | empty | Whisper language hint; empty means automatic language detection |
+| `VAICE_KOKORO_MODEL_DIR` | `~/.vaice/models/kokoro-en-v0_19` | Kokoro model folder |
+| `VAICE_KOKORO_MODEL` | `model.onnx` under model dir | override the ONNX model |
+| `VAICE_KOKORO_VOICES` | `voices.bin` under model dir | override Kokoro voices |
+| `VAICE_KOKORO_TOKENS` | `tokens.txt` under model dir | override Kokoro tokens |
+| `VAICE_KOKORO_DATA_DIR` | `espeak-ng-data` under model dir | Kokoro's espeak-ng data directory |
+| `VAICE_KOKORO_LEXICON` | `lexicon-en-us.txt` under model dir | English pronunciation lexicon |
+| `VAICE_KOKORO_SPEAKER` | `0` | numeric Kokoro speaker ID from 0 to 10 |
+| `VAICE_KOKORO_SPEED` | `1.0` | Kokoro speech speed |
 
 `VAICE_LLAMACPP_URL`, `VAICE_LLAMACPP_PROMPT` and `VAICE_LLAMACPP_TIMEOUT` replaced `VAICE_LLM_URL`,
 `VAICE_LLM_PROMPT` (and before it `VAICE_PROMPT`) and `VAICE_LLM_TIMEOUT`. Both spellings work; if you set
-both, the new name wins, so an old `.env` keeps working while you migrate.
+both, the new name wins. `VAICE_TEXT_URL` is a separate setting so an OpenAI-compatible API can use a
+path prefix without changing the historical `VAICE_LLM_URL` behavior.
 
 `VAICE_BACKEND` and `--backend` were removed with backend selection. If `VAICE_BACKEND` is still set,
 vaice stops at startup with instructions to remove it; it does not silently switch an old native selection
 to llama-server. `VAICE_NATIVE_MODEL` and `VAICE_NATIVE_PROMPT` are no longer read. Remove those lines from
 your `.env`; start a compatible llama-server and set `VAICE_LLAMACPP_URL` only if it uses a different URL.
 
-`VAICE_LLM_MODEL`, `VAICE_TTS_MODEL`, `VAICE_TTS_VOICE` (`VAICE_VOICE`) and `VAICE_TTS_SPEED` (`VAICE_SPEED`)
-belonged to the old Gemma + Kokoro pipeline; nothing reads them any more, so setting them is harmless and
-has no effect. The voice is the model's own.
+`VAICE_LLM_MODEL`, `VAICE_TTS_MODEL`, `VAICE_TTS_VOICE`, `VAICE_TTS_SPEED`, `VAICE_VOICE`, and
+`VAICE_SPEED` belonged to the removed Gemma + Kokoro path. They remain ignored and must not be used to
+configure this text pipeline. Use `VAICE_TEXT_MODEL` and the `VAICE_KOKORO_*` settings instead.
+
+The `local-voice` extra and the Whisper/Kokoro model files are only needed for `VAICE_PIPELINE=text`.
+They are imported and loaded lazily on the first text turn; the realtime default does not initialize them.
+Kokoro's English model supports numeric speaker IDs 0–10.
 
 ## Tests
 
@@ -194,8 +260,10 @@ the removed CLI/environment setting errors, the idle polling throttle (the handl
 while nobody is talking), the page heading and the chatbot's layout, and what **New conversation**
 does to the history. The llamacpp tests resume the reply generator on a fresh thread each time, like
 fastrtc.
-There is no automated test against the real models; verify the real audio path by hand with the
-steps above.
+The test suite uses fakes for chat and text generation. In addition, the sherpa-onnx 2.0.1 Whisper Tiny
+and Kokoro assets were smoke-tested locally: Whisper transcribed the official sample WAV and Kokoro
+generated finite 24 kHz audio. The complete browser microphone path still needs a manual run with the
+chosen chat server.
 
 ## Layout
 
@@ -212,7 +280,9 @@ src/vaice/
   responders/
     base.py         Responder protocol (audio + history in → audio chunks out; reports transcript and spoken text)
     __init__.py     responder package
-    llamacpp.py     llama-server /v1/realtime: a reply session and a transcription session per turn, startup check
+    llamacpp.py     llama-server /v1/realtime, its parallel transcription session, startup capability checks
+    routing.py      known/unknown model capability representation and pipeline selection
+    text.py         local Whisper + streamed OpenAI-compatible chat + local Kokoro sentence audio
 tests/
   fake_realtime.py  a fake /v1/realtime server for the llamacpp tests
 ```
