@@ -172,11 +172,6 @@ def test_barge_in_keeps_the_partial_reply_and_a_late_finalization_changes_nothin
     assert [t.complete for t in conversation._turns] == [False, True]
 
 
-def test_the_old_backend_name_is_fine_in_the_environment_too(monkeypatch):
-    monkeypatch.setattr(app.config, "BACKEND", "cascade")
-    assert parse_args([]).backend == "cascade"
-
-
 def test_two_questions_through_the_app_and_the_llamacpp_backend(tmp_path, realtime):
     server = realtime(
         reply=[("text", "It is Paris."), ("audio", pcm(1, 2)), ("audio", pcm(3)), ("done",)],
@@ -208,19 +203,28 @@ def test_two_questions_through_the_app_and_the_llamacpp_backend(tmp_path, realti
     assert conversation._turns[1].complete
 
 
-def test_backend_flag_overrides_env_default(monkeypatch):
-    monkeypatch.setattr(app.config, "BACKEND", "native")
-    assert parse_args([]).backend == "native"
-    assert parse_args(["--backend", "llamacpp"]).backend == "llamacpp"
-    assert parse_args(["--backend", "cascade"]).backend == "cascade"  # the old name of llamacpp
+def test_backend_selection_is_removed_from_the_cli(monkeypatch):
+    monkeypatch.delenv("VAICE_BACKEND", raising=False)
+    assert vars(parse_args([])) == {}
 
 
-def test_invalid_backend_from_env_is_a_usage_error_not_a_traceback(monkeypatch, capsys):
-    monkeypatch.setattr(app.config, "BACKEND", "Native")
+def test_removed_backend_flag_is_a_normal_usage_error(monkeypatch, capsys):
+    monkeypatch.delenv("VAICE_BACKEND", raising=False)
+    with pytest.raises(SystemExit) as exc:
+        parse_args(["--backend", "native"])
+    assert exc.value.code == 2
+    assert "unrecognized arguments: --backend native" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("value", ["native", "llamacpp", "", "stale-value"])
+def test_obsolete_backend_environment_variable_fails_with_migration_guidance(monkeypatch, capsys, value):
+    monkeypatch.setenv("VAICE_BACKEND", value)
     with pytest.raises(SystemExit) as exc:
         parse_args([])
     assert exc.value.code == 2
-    assert "VAICE_BACKEND" in capsys.readouterr().err
+    message = capsys.readouterr().err
+    assert "VAICE_BACKEND is no longer supported" in message
+    assert "llama-server" in message
 
 
 def test_ui_has_the_transcript_a_reset_button_and_loads_the_stored_conversation():
@@ -257,14 +261,14 @@ def one_component(components, type_name, place):
     return found[0]
 
 
-def test_the_page_says_which_backend_answers():
+def test_the_page_identifies_the_llama_server_service():
     stream = build_stream(FakeResponder(), Conversation())
     config = stream.ui.get_config_file()
 
     title = one_component(config["components"], "html", "the heading")
-    subtitle = one_component(config["components"], "markdown", "the backend subtitle")
+    subtitle = one_component(config["components"], "markdown", "the service subtitle")
     assert UI_TITLE in title["props"]["value"]
-    assert FakeResponder.name in subtitle["props"]["value"]
+    assert "llama-server" in subtitle["props"]["value"]
 
 
 def test_the_chatbot_is_taller_and_does_not_render_html_tags():
@@ -525,6 +529,7 @@ def test_main_installs_the_stop_handler_and_asks_the_app_to_stop_when_the_server
     """Ctrl+C must reach the responders, and the app must not wait for a stuck model call at exit."""
     previous = signal.getsignal(signal.SIGINT)
     launched = []
+    startup = []
 
     class FakeStream:
         class ui:  # a stand-in for the gradio app
@@ -533,8 +538,9 @@ def test_main_installs_the_stop_handler_and_asks_the_app_to_stop_when_the_server
             def launch(server_port):
                 launched.append(server_port)
 
-    monkeypatch.setattr(app, "parse_args", lambda: argparse.Namespace(backend="fake"))
-    monkeypatch.setattr(app, "create_responder", lambda backend: FakeResponder())
+    monkeypatch.setattr(app, "parse_args", lambda: argparse.Namespace())
+    monkeypatch.setattr(app, "check_server", lambda: startup.append("check"))
+    monkeypatch.setattr(app, "LlamaCppResponder", lambda: startup.append("construct") or FakeResponder())
     monkeypatch.setattr(app, "build_stream", lambda responder, conversation: FakeStream())
     monkeypatch.setattr(app.config, "CONVERSATION_FILE", tmp_path / "conversation.json")
 
@@ -542,6 +548,7 @@ def test_main_installs_the_stop_handler_and_asks_the_app_to_stop_when_the_server
         app.main()
 
         assert signal.getsignal(signal.SIGINT) is not previous  # Ctrl+C is handled
+        assert startup == ["check", "construct"]
         assert launched == [app.config.PORT]
         assert lifecycle.stopping.is_set()  # the server is gone: the responders may give up
     finally:

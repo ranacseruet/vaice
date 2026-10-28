@@ -141,8 +141,8 @@ def window_start(count: int, window: int) -> int:
     """Index of the first of `count` turns to keep when at most `window` fit.
 
     Drops whole blocks of the oldest turns, so the start only moves every `window // 2` turns
-    and the prompt prefix stays identical in between (no backend relies on prefix reuse today: native
-    prefills from scratch and every llamacpp reply is a fresh session).
+    and the prompt prefix stays identical in between (each reply uses a fresh llama-server session,
+    which does not reuse a prefix today).
     """
     if window <= 0:
         return count

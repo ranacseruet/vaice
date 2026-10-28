@@ -1,12 +1,11 @@
 [project]
 name = "vaice"
 version = "0.1.0"
-description = "Voice demo: talk to a local model and hear streamed spoken replies (LFM3-Audio on llama.cpp, or an MLX speech-to-speech model)"
+description = "Voice demo: talk to a local llama-server audio model and hear streamed spoken replies"
 readme = "README.md"
 requires-python = ">=3.10,<3.13"  # the range CI tests; deps also resolve on 3.13/3.14 (checked with uv), not run there
 dependencies = [
     "fastrtc[vad]",
-    "mlx-audio>=0.6.1",  # first version tested with the lfm_audio speech-to-speech model
     "numpy",
     "scipy>=1.10",  # resamples the mic audio to the llama.cpp model's input rate (audio.py)
     "requests",

@@ -15,8 +15,8 @@ def to_mono_float(samples: np.ndarray) -> np.ndarray:
 def to_pcm16(audio: tuple[int, np.ndarray], rate: int) -> bytes:
     """A fastrtc (sample_rate, samples) frame → mono little-endian PCM16 at `rate`.
 
-    The realtime endpoint wants exactly its input rate (16 kHz for LFM3-Audio), unlike the MLX model,
-    which resamples by itself; the browser delivers 48 kHz.
+    The realtime endpoint wants exactly its input rate (16 kHz for LFM3-Audio); the browser delivers
+    48 kHz.
     """
     sample_rate, samples = audio
     mono = to_mono_float(samples)

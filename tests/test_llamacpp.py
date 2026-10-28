@@ -400,8 +400,7 @@ def test_a_server_that_never_answers_does_not_keep_the_process_alive(
 
 
 def test_the_fresh_thread_per_next_harness_catches_state_tied_to_one_thread():
-    """A generator that keeps its resource in thread-local state works when one thread drives it
-    (the mistake the MLX lesson was about); the harness must fail it, since every next() has a new thread."""
+    """The harness must fail a thread-local generator because each next() runs on a new thread."""
 
     def thread_bound():
         local = threading.local()
@@ -452,18 +451,16 @@ def serve_checks(monkeypatch, health, listing=None):
     return asked
 
 
-def test_a_server_with_an_audio_model_passes_both_modes(monkeypatch):
+def test_a_server_with_an_audio_model_passes(monkeypatch):
     asked = serve_checks(monkeypatch, Reply(), Reply(body=models("text", "audio")))
-    check_server("http://h:1", strict=True)
-    check_server("http://h:1", strict=False)
+    check_server("http://h:1")
     assert asked[:2] == ["http://h:1/health", "http://h:1/v1/models"]
 
 
-@pytest.mark.parametrize("strict", [True, False])
-def test_a_model_that_cannot_speak_is_an_error_naming_it(monkeypatch, strict):
+def test_a_model_that_cannot_speak_is_an_error_naming_it(monkeypatch):
     serve_checks(monkeypatch, Reply(), Reply(body=models("text")))
     with pytest.raises(RuntimeError, match=r"LFM3.*does not output audio.*LFM3-Audio-2B-GGUF"):
-        check_server("http://h:1", strict=strict)
+        check_server("http://h:1")
 
 
 def test_a_model_list_without_modalities_counts_as_no_audio(monkeypatch):
@@ -472,41 +469,33 @@ def test_a_model_list_without_modalities_counts_as_no_audio(monkeypatch):
         check_server("http://h:1")
 
 
-def test_an_unreachable_server_is_a_warning_unless_strict(monkeypatch, caplog):
+def test_an_unreachable_server_is_a_warning_and_startup_can_continue(monkeypatch, caplog):
     serve_checks(monkeypatch, requests.ConnectionError("refused"))
     with caplog.at_level(logging.WARNING, logger="vaice.responders.llamacpp"):
-        check_server("http://h:1")
+        assert check_server("http://h:1") is None
     assert "not reachable at http://h:1/health" in caplog.text
     assert "replies will fail until it is up" in caplog.text
-    with pytest.raises(RuntimeError, match="not reachable"):
-        check_server("http://h:1", strict=True)
 
 
-def test_a_server_still_loading_is_a_note_unless_strict(monkeypatch, caplog):
+def test_a_server_still_loading_is_a_note_and_startup_can_continue(monkeypatch, caplog):
     serve_checks(monkeypatch, Reply(503, "Loading model"))
     with caplog.at_level(logging.INFO, logger="vaice.responders.llamacpp"):
-        check_server("http://h:1")
+        assert check_server("http://h:1") is None
     assert "still loading" in caplog.text
-    with pytest.raises(RuntimeError, match="still loading"):
-        check_server("http://h:1", strict=True)
 
 
-def test_an_unreadable_model_list_is_a_warning_unless_strict(monkeypatch, caplog):
+def test_an_unreadable_model_list_is_a_warning(monkeypatch, caplog):
     serve_checks(monkeypatch, Reply(), Reply(body=None))
     with caplog.at_level(logging.WARNING, logger="vaice.responders.llamacpp"):
-        check_server("http://h:1")
+        assert check_server("http://h:1") is None
     assert "could not read the model list" in caplog.text
-    with pytest.raises(RuntimeError, match="could not read the model list"):
-        check_server("http://h:1", strict=True)
 
 
-def test_an_unhealthy_server_is_a_warning_unless_strict(monkeypatch, caplog):
+def test_an_unhealthy_server_is_a_warning(monkeypatch, caplog):
     serve_checks(monkeypatch, Reply(500, "boom"))
     with caplog.at_level(logging.WARNING, logger="vaice.responders.llamacpp"):
-        check_server("http://h:1")
+        assert check_server("http://h:1") is None
     assert "returned 500" in caplog.text
-    with pytest.raises(RuntimeError, match="returned 500"):
-        check_server("http://h:1", strict=True)
 
 
 def test_a_secure_server_url_means_a_wss_socket():
