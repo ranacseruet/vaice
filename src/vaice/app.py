@@ -13,7 +13,7 @@ from vaice import config
 from vaice.conversation import Conversation, Turn
 from vaice.interruptible import InterruptSafeReplyOnPause, stop_playing_reply
 from vaice.lifecycle import install_stop_handler, request_stop
-from vaice.responders import BACKENDS, Responder, create_responder
+from vaice.responders import BACKEND_CHOICES, Responder, create_responder
 
 log = logging.getLogger(__name__)
 
@@ -131,10 +131,15 @@ def build_stream(responder: Responder, conversation: Conversation) -> Stream:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="vaice", description="Talk to a local model, hear it answer.")
-    parser.add_argument("--backend", choices=BACKENDS, default=config.BACKEND, help="default: $VAICE_BACKEND or auto")
+    parser.add_argument(
+        "--backend",
+        choices=BACKEND_CHOICES,
+        default=config.BACKEND,
+        help="default: $VAICE_BACKEND or auto; cascade is the old name of llamacpp",
+    )
     args = parser.parse_args(argv)
-    if args.backend not in BACKENDS:  # argparse doesn't validate defaults, e.g. from VAICE_BACKEND
-        parser.error(f"invalid backend {args.backend!r} (from VAICE_BACKEND): choose from {', '.join(BACKENDS)}")
+    if args.backend not in BACKEND_CHOICES:  # argparse doesn't validate defaults, e.g. from VAICE_BACKEND
+        parser.error(f"invalid backend {args.backend!r} (from VAICE_BACKEND): choose from {', '.join(BACKEND_CHOICES)}")
     return args
 
 

@@ -21,7 +21,7 @@ from mlx_audio.sts.models.lfm_audio.processor import ChatState, LFM2AudioProcess
 from vaice import config, lifecycle
 from vaice.audio import to_mono_float
 from vaice.conversation import Message, Turn
-from vaice.responders.base import AudioFrame
+from vaice.responders.base import AudioFrame, spoken_part
 
 log = logging.getLogger(__name__)
 
@@ -121,25 +121,6 @@ class _Worker:
         _stop_tasks(self._tasks)
 
 
-def _spoken_part(text: str, frames: int, handed_out: int) -> str:
-    """The words of `text` that the first `handed_out` of `frames` audio frames cover (approximate).
-
-    Interleaved generation emits 6 text tokens per 12 audio frames (~1 s), about twice speaking
-    speed, so the text is often complete after the first second of audio. Taking the text
-    generated so far would record a whole reply that was cut off early; split it by the share of
-    audio handed out instead.
-    """
-    if not frames:  # text-only reply: nothing was said
-        return ""
-    if handed_out >= frames:
-        return text
-    words = text.split()
-    # truncate, don't round: the same conservative estimate as Turn.close(), which floors and keeps
-    # at least one word because some audio played — words the user had no time to hear stay uncounted
-    keep = max(1, int(len(words) * handed_out / frames)) if handed_out else 0
-    return " ".join(words[:keep])
-
-
 class NativeResponder:
     """Runs every MLX call on one dedicated thread.
 
@@ -171,12 +152,11 @@ class NativeResponder:
             for _ in responder.respond((16000, np.zeros((1, 8000), dtype=np.int16)), [], turn):
                 pass
         except BaseException:
-            worker.stop()  # don't leave a live worker behind (auto mode falls back to cascade)
+            worker.stop()  # don't leave a live worker behind after a failed load
             raise
         if not turn.transcribed.wait(WARMUP_ASR_WAIT):  # the ASR warm-up; generation itself was consumed above
             # The worker may be stuck inside the ASR call: abandon it rather than hang startup here
-            # (auto mode falls back to cascade; the daemon thread dies with the process if the call
-            # never returns).
+            # (the daemon thread dies with the process if the call never returns).
             worker.stop()
             raise RuntimeError(f"native warm-up transcription did not finish in {WARMUP_ASR_WAIT}s")
         return responder
@@ -228,9 +208,9 @@ class NativeResponder:
                     raise item
                 frame, n_frames = item
                 handed_out += n_frames
-                turn.set_assistant_text(_spoken_part(*progress[0], handed_out))
+                turn.set_assistant_text(spoken_part(*progress[0], handed_out))
                 yield frame
-            turn.set_assistant_text(_spoken_part(*progress[0], handed_out))  # all of it, now that it's all out
+            turn.set_assistant_text(spoken_part(*progress[0], handed_out))  # all of it, now that it's all out
         finally:
             cancelled.set()  # consumer stopped early (e.g. user interrupted): free the worker
 

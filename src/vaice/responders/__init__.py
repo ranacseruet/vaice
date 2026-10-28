@@ -6,16 +6,17 @@ from vaice.responders.base import AudioFrame, Responder
 
 log = logging.getLogger(__name__)
 
-BACKENDS = ("auto", "cascade", "native")
+BACKENDS = ("auto", "llamacpp", "native")
+# Old names that still work, wherever a backend is named (--backend, VAICE_BACKEND)
+BACKEND_ALIASES = {"cascade": "llamacpp"}
+BACKEND_CHOICES = (*BACKENDS, *BACKEND_ALIASES)
 
 
-def _build_cascade() -> Responder:
-    from vaice import llm, tts
-    from vaice.responders.cascade import CascadeResponder
+def _build_llamacpp(*, strict: bool) -> Responder:
+    from vaice.responders.llamacpp import LlamaCppResponder, check_server
 
-    llm.check_server()
-    tts.warm_up()  # at startup, so the first reply doesn't pay for loading the model and its text pipeline
-    return CascadeResponder()
+    check_server(strict=strict)
+    return LlamaCppResponder()
 
 
 def _build_native() -> Responder:
@@ -27,23 +28,25 @@ def _build_native() -> Responder:
 
 
 def create_responder(backend: str = config.BACKEND) -> Responder:
-    """`auto` prefers the native speech-to-speech model and falls back to the cascade."""
+    """`auto` prefers llama-server's own speech and falls back to the native speech-to-speech model."""
+    backend = BACKEND_ALIASES.get(backend, backend)
     if backend not in BACKENDS:
-        raise ValueError(f"unknown backend {backend!r}; expected one of {BACKENDS}")
-    if backend in ("auto", "native"):
-        try:
-            return _build_native()
-        except Exception as exc:
-            if backend == "native":
-                raise
-            # Traceback included: this also catches bugs and mlx-audio API changes, not just "can't load here"
-            log.warning(
-                "native speech backend unavailable (%s: %s); falling back to cascade",
-                type(exc).__name__,
-                exc,
-                exc_info=True,
-            )
-    return _build_cascade()
+        raise ValueError(f"unknown backend {backend!r}; expected one of {BACKEND_CHOICES}")
+    if backend == "native":
+        return _build_native()
+    if backend == "llamacpp":
+        return _build_llamacpp(strict=False)
+    try:
+        return _build_llamacpp(strict=True)
+    except Exception as exc:
+        # Traceback included: this also catches bugs and API changes, not just "no server here"
+        log.warning(
+            "llama.cpp backend unavailable (%s: %s); falling back to native",
+            type(exc).__name__,
+            exc,
+            exc_info=True,
+        )
+    return _build_native()
 
 
 __all__ = ["AudioFrame", "Responder", "create_responder"]

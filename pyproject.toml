@@ -1,16 +1,16 @@
 [project]
 name = "vaice"
 version = "0.1.0"
-description = "Voice demo: talk to a local model and hear streamed spoken replies (speech-to-speech model, or Gemma + Kokoro)"
+description = "Voice demo: talk to a local model and hear streamed spoken replies (LFM3-Audio on llama.cpp, or an MLX speech-to-speech model)"
 readme = "README.md"
-requires-python = ">=3.10,<3.13"  # spaCy (via misaki[en]) has no wheels for 3.13+ yet
+requires-python = ">=3.10,<3.13"  # the range CI tests; deps also resolve on 3.13/3.14 (checked with uv), not run there
 dependencies = [
     "fastrtc[vad]",
     "mlx-audio>=0.6.1",  # first version tested with the lfm_audio speech-to-speech model
-    "misaki[en]",
-    "soundfile",
     "numpy",
+    "scipy>=1.10",  # resamples the mic audio to the llama.cpp model's input rate (audio.py)
     "requests",
+    "websockets>=15.0",  # llama-server's /v1/realtime (sync client with recv(timeout) and keep-alive options)
 ]
 
 [project.optional-dependencies]
