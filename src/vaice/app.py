@@ -2,7 +2,6 @@
 import argparse
 import json
 import logging
-import os
 import time
 from functools import partial
 
@@ -132,12 +131,6 @@ def build_stream(responder: Responder, conversation: Conversation) -> Stream:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="vaice", description="Talk to a local llama-server audio model.")
-    if "VAICE_BACKEND" in os.environ:
-        parser.error(
-            "VAICE_BACKEND is no longer supported; vaice always uses llama-server. "
-            "Remove it, start llama-server with an audio-output model, and set VAICE_LLAMACPP_URL "
-            "if the server is not at http://localhost:8001."
-        )
     return parser.parse_args(argv)
 
 

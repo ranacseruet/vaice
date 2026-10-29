@@ -3,7 +3,21 @@ name = "vaice"
 version = "0.1.0"
 description = "Voice demo: talk to a local llama-server audio model and hear streamed spoken replies"
 readme = "README.md"
+license = { file = "LICENSE" }
 requires-python = ">=3.10,<3.13"  # the range CI tests; deps also resolve on 3.13/3.14 (checked with uv), not run there
+keywords = ["voice", "speech-to-speech", "llama-cpp", "webrtc", "fastrtc", "gradio", "lfm3-audio"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Multimedia :: Sound/Audio :: Speech",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 dependencies = [
     # interruptible.py and tests/test_interruptible.py are built against fastrtc 0.0.34's internals,
     # so the range admits only patch releases of that line; anything newer goes through a tested
@@ -23,7 +37,13 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest", "ruff"]
+dev = ["pytest", "pytest-cov", "ruff"]
+
+[project.urls]
+Homepage = "https://github.com/ranacseruet/vaice"
+Repository = "https://github.com/ranacseruet/vaice"
+Issues = "https://github.com/ranacseruet/vaice/issues"
+Changelog = "https://github.com/ranacseruet/vaice/blob/main/CHANGELOG.md"
 
 [project.scripts]
 vaice = "vaice.app:main"
@@ -37,6 +57,7 @@ packages = ["src/vaice"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = "--cov=vaice --cov-report=term-missing"
 
 [tool.ruff]
 line-length = 120  # the house style: code and comments on one line up to ~120 columns

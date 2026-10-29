@@ -19,7 +19,7 @@ from vaice.responders.base import AudioFrame, spoken_part
 log = logging.getLogger(__name__)
 
 # Tells an interleaved-mode model (LFM3-Audio) to write its text alongside the speech; a fixed constant, so
-# a VAICE_LLAMACPP_PROMPT (or the older VAICE_LLM_PROMPT) only has to say how to answer
+# VAICE_LLAMACPP_PROMPT only has to say how to answer
 MODE_INSTRUCTION = "Respond with interleaved text and audio."
 MAX_OUTPUT_TOKENS = 512  # counts text tokens and audio frames together
 # How often a waiting thread checks whether the reply was abandoned or the app is stopping

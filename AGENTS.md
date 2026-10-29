@@ -11,6 +11,7 @@ This file provides guidance to coding agents (Claude Code, Codex, Cursor, …) w
 ```bash
 uv sync --extra dev                              # setup: .venv from the committed uv.lock (py 3.12 from .python-version)
 .venv/bin/pytest                               # all tests
+.venv/bin/pytest --cov=vaice --cov-report=term-missing  # tests with line coverage
 .venv/bin/pytest tests/test_llamacpp.py -k history      # single test
 .venv/bin/vaice                                   # run; UI at http://127.0.0.1:7860
 ```
@@ -24,7 +25,7 @@ Ruff is configured (`pyproject.toml`: line length 120, lint rules in `[tool.ruff
 - **`LlamaCppResponder`** (`responders/llamacpp.py`): per reply, a fresh `/v1/realtime` session on a daemon thread of its own (`_converse`): `session.update` (instructions = mode line + prompt + the earlier turns as `User:`/`Assistant:` text, `output_modalities` text+audio, `max_output_tokens` 512), the whole utterance as one `input_audio_buffer.append` (mic audio resampled to the session's input rate), `response.create`; `response.output_audio.delta` frames come back through a queue, the text deltas feed `Turn.set_assistant_text` (split by the share of audio, `base.spoken_part`). A second `transcription` session on its own daemon thread (`_transcribe_into`) reports the user's transcript exactly once. Closing the socket cancels the reply on the server.
 - **Stopping:** `lifecycle.py` holds the app's stop signal. `app.py:main()` installs the SIGINT handler before checking the server, so Ctrl+C sets the flag and gradio closes the server; the llamacpp session threads are daemons, so a server that never answers or never completes the websocket upgrade cannot keep the process alive. The generator only polls a queue, so it notices the stop signal within `POLL_SECONDS` even while `connect()` hangs.
 
-Config is env-driven in `config.py` (`VAICE_*`). `--backend` and `VAICE_BACKEND` are removed; startup rejects a set `VAICE_BACKEND` with migration guidance.
+Config is env-driven in `config.py` (`VAICE_*`).
 
 ## Gotchas (each has bitten this repo)
 

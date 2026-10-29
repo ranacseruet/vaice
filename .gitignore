@@ -2,5 +2,15 @@
 __pycache__/
 *.egg-info/
 .pytest_cache/
-tasks/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+dist/
+build/
+.DS_Store
 .env
+tasks/
+.claude/
+graft/
+.ignore

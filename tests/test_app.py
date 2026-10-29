@@ -203,28 +203,12 @@ def test_two_questions_through_the_app_and_the_llamacpp_backend(tmp_path, realti
     assert conversation._turns[1].complete
 
 
-def test_backend_selection_is_removed_from_the_cli(monkeypatch):
-    monkeypatch.delenv("VAICE_BACKEND", raising=False)
+def test_cli_takes_no_positional_or_flag_arguments(capsys):
     assert vars(parse_args([])) == {}
-
-
-def test_removed_backend_flag_is_a_normal_usage_error(monkeypatch, capsys):
-    monkeypatch.delenv("VAICE_BACKEND", raising=False)
     with pytest.raises(SystemExit) as exc:
-        parse_args(["--backend", "native"])
+        parse_args(["--unknown"])
     assert exc.value.code == 2
-    assert "unrecognized arguments: --backend native" in capsys.readouterr().err
-
-
-@pytest.mark.parametrize("value", ["native", "llamacpp", "", "stale-value"])
-def test_obsolete_backend_environment_variable_fails_with_migration_guidance(monkeypatch, capsys, value):
-    monkeypatch.setenv("VAICE_BACKEND", value)
-    with pytest.raises(SystemExit) as exc:
-        parse_args([])
-    assert exc.value.code == 2
-    message = capsys.readouterr().err
-    assert "VAICE_BACKEND is no longer supported" in message
-    assert "llama-server" in message
+    assert "unrecognized arguments: --unknown" in capsys.readouterr().err
 
 
 def test_ui_has_the_transcript_a_reset_button_and_loads_the_stored_conversation():
