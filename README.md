@@ -111,7 +111,11 @@ gone.
   ahead of their audio, so the text is also split by the share of audio received so far. Expect it to be
   off by a few words. The chunk that was being generated when you interrupted is dropped instead of played;
   fastrtc would queue it after clearing its
-  playback queue ([#2](https://github.com/ranacseruet/vaice/issues/2)).
+  playback queue ([#2](https://github.com/ranacseruet/vaice/issues/2)). And if the reply happens to
+  end in the very moment you interrupt, fastrtc's end-of-reply reset would wipe your question with
+  it; vaice restores it, so the question still gets its reply
+  ([#13](https://github.com/ranacseruet/vaice/issues/13)) — a **New conversation** click, or an even
+  newer utterance you have started saying, always wins over that restore.
 - **Trimming:** each prompt includes at most the last `VAICE_HISTORY_TURNS` exchanges. The oldest
   are dropped in blocks of half that, not one at a time, so the start of the prompt stays the same
   for several turns. Each reply uses a fresh session, so the server does not reuse a prefix today.
@@ -187,7 +191,8 @@ the startup check of llama-server, transcripts, history
 trimming and persistence (including a disk that can't be written), failed replies (before, during
 and after the reply, a failure that can't be recorded, and one no one could show in the UI),
 barge-in recording (driven with
-fastrtc's thread-per-resume pattern), the stale-chunk drop and the reset-button stop (the real
+fastrtc's thread-per-resume pattern), the stale-chunk drop, the lost-utterance restore (the real
+`ReplyOnPause`, interrupted mid-`next()` from another thread) and the reset-button stop (the real
 `ReplyOnPause`, interrupted mid-`next()` from another thread), the per-connection `copy()` (its
 arguments go by keyword, so a reordered fastrtc signature fails the test), server startup checks,
 the removed CLI/environment setting errors, the idle polling throttle (the handler must not spin
@@ -202,7 +207,8 @@ steps above.
 ```
 src/vaice/
   app.py            CLI + Gradio/WebRTC UI; wraps a Responder, logs time to first audio, transcript + reset
-  interruptible.py  ReplyOnPause that drops the chunk generated while the user interrupts (fastrtc 0.0.34 race);
+  interruptible.py  ReplyOnPause that drops the chunk generated while the user interrupts and keeps the
+                    interrupting utterance when the reply ends mid-interrupt (fastrtc 0.0.34 races);
                     silences the playing reply for "New conversation"; throttles fastrtc's idle polling;
                     copies itself per connection
   lifecycle.py      the stop signal: Ctrl+C asks the app and its responders to give up
@@ -248,6 +254,6 @@ tests/
 - Gradio 6.0 flips `gr.Chatbot(allow_tags)` to `True`, which would render whatever the model
   writes as HTML. `app.py` sets it to `False` explicitly, so the transcript is always plain text.
 - fastrtc copies the handler for every connection, and its own `ReplyOnPause.copy()` builds a
-  plain `ReplyOnPause`, which would lose the stale-chunk fix. `interruptible.py` overrides
+  plain `ReplyOnPause`, which would lose the barge-in fixes. `interruptible.py` overrides
   `copy()` and passes every argument **by keyword**, so a fastrtc release that adds, drops or
   reorders a parameter fails loudly there instead of silently handing the handler the wrong value.

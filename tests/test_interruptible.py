@@ -103,6 +103,30 @@ def rig_interrupted_mid_chunk(handler_class):
     return rig, in_flight.join()
 
 
+def rig_interrupted_as_the_reply_ends(handler_class):
+    """Issue #13 harness: chunk 1 was emitted and the last next() — the one that will exhaust the
+    generator — is in flight when the user speaks and pauses.
+    Returns the rig, what the in-flight emit() returned, and the audio each reply call received."""
+    entered, release = threading.Event(), threading.Event()
+    heard = []
+
+    def reply(audio):
+        heard.append(audio)
+        yield chunk(1.0)
+        entered.set()  # the model is generating its final chunk: releasing ends the generator
+        assert release.wait(10)
+
+    rig = Rig(handler_class, reply)
+    rig.user_speaks_then_pauses()
+    assert rig.start_emit().join()[1][0] == 1.0
+
+    in_flight = rig.start_emit()
+    assert entered.wait(10)
+    rig.user_speaks_then_pauses()  # the barge-in lands while that next() is in flight
+    release.set()
+    return rig, in_flight.join(), heard
+
+
 def test_fastrtc_close_fails_on_a_running_generator_and_the_chunk_it_returns_is_not_dropped():
     # The bug (#2) in plain fastrtc: this is what the fix below has to work around
     rig, late_chunk = rig_interrupted_mid_chunk(ReplyOnPause)
@@ -144,6 +168,203 @@ def test_the_interrupting_question_gets_its_own_reply_untouched():
     new_reply = rig.start_emit().join()
 
     assert new_reply[1][0] == 1.0  # first chunk of the new reply, not dropped
+
+
+def test_fastrtc_loses_the_interrupting_utterance_when_the_reply_ends_mid_next():
+    # The bug (#13) in plain fastrtc: the exhausted generator's StopIteration makes emit() call
+    # reset(), which wipes the barge-in pause receive() had just detected — so nothing answers it
+    rig, late, _ = rig_interrupted_as_the_reply_ends(ReplyOnPause)
+
+    assert late is None
+    assert not rig.handler.event.is_set()  # reset() cleared the pause ...
+    assert rig.handler.state.stream is None  # ... and the interrupting audio went with the old state
+    assert rig.start_emit().join() is None  # the interrupting question never gets a reply
+
+
+def test_the_interrupting_utterance_survives_a_reply_that_ends_mid_next():
+    rig, late, heard = rig_interrupted_as_the_reply_ends(InterruptSafeReplyOnPause)
+
+    assert late is None  # the ending reply hands out nothing more
+    assert rig.handler.event.is_set()  # the barge-in pause was restored, not wiped by reset()
+    assert rig.handler.state.stream is not None  # the interrupting audio is kept for the new reply
+    assert rig.queue_clears == 2  # receive() cleared the queue at both pauses
+
+    new_reply = rig.start_emit().join()
+
+    assert new_reply[1][0] == 1.0  # the interrupting question gets its own reply
+    assert len(heard) == 2  # fn was called again, for the interrupting utterance
+    assert heard[1][1].shape[-1] > 0  # its audio reached the reply: the accumulated stream, not an empty buffer
+
+
+def test_a_newer_pause_that_arrived_during_the_reset_is_never_replaced_by_the_old_one():
+    # The `not event.is_set()` guard: when receive() detects a newer pause between the ending
+    # reply's own reset() and the wrapper's check, the newer utterance must win — emulated by
+    # running the newer utterance's receive() right behind the reset on the emit thread
+    entered, release = threading.Event(), threading.Event()
+
+    def reply(_audio):
+        yield chunk(1.0)
+        entered.set()  # the in-flight next() will end the generator once released
+        assert release.wait(10)
+
+    rig = Rig(InterruptSafeReplyOnPause, reply)
+    rig.user_speaks_then_pauses()
+    assert rig.start_emit().join()[1][0] == 1.0
+
+    in_flight = rig.start_emit()
+    assert entered.wait(10)
+    rig.user_speaks_then_pauses()  # the #13 barge-in: a pause on the reply's state
+
+    newer = []
+    reset = rig.handler.reset
+
+    def reset_then_a_newer_pause():  # instance attribute: super().emit() calls self.reset()
+        reset()  # the ending reply's reset: event cleared, fresh state
+        newer.append(rig.handler.state)
+        rig.user_speaks_then_pauses()  # a new utterance detected before the wrapper's check
+
+    rig.handler.reset = reset_then_a_newer_pause
+    release.set()
+
+    assert in_flight.join() is None
+    assert rig.handler.state is newer[0]  # the newer utterance's state survived, not the older pause
+    assert rig.handler.event.is_set()
+    assert rig.start_emit().join()[1][0] == 1.0  # and the newer utterance gets the reply
+
+
+def test_the_new_conversation_button_during_the_last_next_is_never_undone_by_the_restore():
+    # PR #37 review P1: the button resets the handler and clears the conversation; that explicit
+    # reset must not be mistaken for the end-of-reply cleanup, or the pre-click question would be
+    # answered as the new conversation's first turn
+    entered, release = threading.Event(), threading.Event()
+
+    def reply(_audio):
+        yield chunk(1.0)
+        entered.set()  # the in-flight next() will end the generator once released
+        assert release.wait(10)
+
+    rig = Rig(InterruptSafeReplyOnPause, reply)
+    rig.user_speaks_then_pauses()
+    assert rig.start_emit().join()[1][0] == 1.0
+
+    in_flight = rig.start_emit()
+    assert entered.wait(10)
+    rig.user_speaks_then_pauses()  # the #13 barge-in pause lands on the reply's state
+    stop_playing_reply(rig.handler)  # the click, on a Gradio thread, while the last next() runs
+    release.set()
+
+    assert in_flight.join() is None
+    assert not rig.handler.event.is_set()  # the end-of-reply cleanup did not re-arm the pause
+    assert rig.handler.state.stream is None  # the clicked-away utterance stays gone
+    assert rig.start_emit().join() is None  # nothing answers it: the next reply waits for speech
+
+
+def test_a_newer_utterance_still_being_collected_is_never_replaced_by_the_restore():
+    # PR #37 review P2: after the reset, receive() can be mid-utterance (audio collected, no pause
+    # yet, so the event is still unset) before the check runs; the newer audio must win. The hook
+    # runs that frame right behind the reset on the emit thread, as the interleaving's worst case;
+    # the lock in receive() is what keeps the real concurrency frame-atomic.
+    entered, release = threading.Event(), threading.Event()
+
+    def reply(_audio):
+        yield chunk(1.0)
+        entered.set()  # the in-flight next() will end the generator once released
+        assert release.wait(10)
+
+    rig = Rig(InterruptSafeReplyOnPause, reply)
+    rig.user_speaks_then_pauses()
+    assert rig.start_emit().join()[1][0] == 1.0
+
+    in_flight = rig.start_emit()
+    assert entered.wait(10)
+    rig.user_speaks_then_pauses()  # the #13 barge-in pause lands on the reply's state
+
+    newer = []
+    reset = rig.handler.reset
+
+    def reset_then_speech():  # instance attribute: super().emit() calls self.reset()
+        reset()  # the ending reply's reset: event cleared, fresh state
+        newer.append(rig.handler.state)
+        rig.vad.speech = 1.0  # a speech frame of a new utterance: collected, no pause yet
+        run_on_thread(lambda: rig.handler.receive(ONE_SECOND), "fastrtc-receive")
+
+    rig.handler.reset = reset_then_speech
+    release.set()
+
+    assert in_flight.join() is None
+    assert rig.handler.state is newer[0]  # the newer partial audio survived, not the old pause
+    assert newer[0].started_talking and newer[0].stream is not None
+    assert not rig.handler.event.is_set()  # and nothing fired early
+
+    rig.vad.speech = 0.0  # the newer utterance pauses normally ...
+    run_on_thread(lambda: rig.handler.receive(ONE_SECOND), "fastrtc-receive")
+    assert rig.start_emit().join()[1][0] == 1.0  # ... and gets its reply
+
+
+def test_audio_arriving_right_after_the_reset_wins_too():
+    # The sub-threshold half of the same protection: a frame shorter than the VAD chunk duration
+    # only accumulates into AppState.buffer (no started_talking, no stream) — still newer audio
+    entered, release = threading.Event(), threading.Event()
+
+    def reply(_audio):
+        yield chunk(1.0)
+        entered.set()
+        assert release.wait(10)
+
+    rig = Rig(InterruptSafeReplyOnPause, reply)
+    rig.user_speaks_then_pauses()
+    assert rig.start_emit().join()[1][0] == 1.0
+
+    in_flight = rig.start_emit()
+    assert entered.wait(10)
+    rig.user_speaks_then_pauses()
+
+    newer = []
+    reset = rig.handler.reset
+
+    def reset_then_a_short_frame():  # instance attribute: super().emit() calls self.reset()
+        reset()
+        newer.append(rig.handler.state)
+        short = (48000, np.zeros((1, 4800), dtype=np.int16))  # 0.1 s < audio_chunk_duration
+        run_on_thread(lambda: rig.handler.receive(short), "fastrtc-receive")
+
+    rig.handler.reset = reset_then_a_short_frame
+    release.set()
+
+    assert in_flight.join() is None
+    assert rig.handler.state is newer[0]  # the collected buffer survived, not the old pause
+    assert newer[0].buffer is not None and newer[0].stream is None
+    assert not rig.handler.event.is_set()
+
+
+def test_a_reply_that_ends_on_its_own_keeps_the_next_reply_for_the_next_utterance():
+    # The #13 restore must not fire without a barge-in: a naturally ending reply leaves no pause
+    rig = Rig(InterruptSafeReplyOnPause, lambda _audio: iter([chunk(1.0)]))
+    rig.user_speaks_then_pauses()
+    assert rig.start_emit().join()[1][0] == 1.0
+
+    assert rig.start_emit().join() is None  # the generator runs out: reset(), nothing to restore
+
+    assert not rig.handler.event.is_set()
+    assert rig.start_emit().join() is None  # and the next reply still waits for the next utterance
+
+
+def test_an_exhausted_reply_started_from_the_pause_does_not_put_the_pause_back():
+    # The restore must not re-arm a pause whose own reply already ran out: an fn that answers with
+    # nothing would otherwise be restarted every emit() forever
+    calls = []
+
+    def empty_reply(audio):
+        calls.append(audio)
+        return iter([])  # a generator function would do too; this one answers with nothing
+
+    rig = Rig(InterruptSafeReplyOnPause, empty_reply)
+    rig.user_speaks_then_pauses()
+
+    assert rig.start_emit().join() is None  # super() creates the generator, it ends at once, reset()
+    assert not rig.handler.event.is_set()  # nothing was restored
+    assert rig.start_emit().join() is None
+    assert len(calls) == 1  # fn ran once, not once per emit()
 
 
 def test_chunks_are_not_dropped_when_nobody_interrupts():
