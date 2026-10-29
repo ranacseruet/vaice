@@ -1,4 +1,5 @@
-"""fastrtc's ReplyOnPause, minus the stale chunk that plays after a barge-in."""
+"""fastrtc's ReplyOnPause, minus the two barge-in races of fastrtc 0.0.34: the stale chunk that
+plays after the interrupt, and the interrupting utterance lost when the reply ends mid-interrupt."""
 import logging
 
 from fastrtc import ReplyOnPause
@@ -27,6 +28,12 @@ class InterruptSafeReplyOnPause(ReplyOnPause):
     another generator (or created its own) and finds none, or a different one, was interrupted
     while it ran. It returns None instead of the stale audio, which fastrtc skips. Tiny window
     left: an interrupt landing after that check but before fastrtc queues the chunk still plays it.
+
+    It also keeps the interrupting utterance when the reply ends in the very moment the user
+    interrupts (#13): `super().emit()` calls `reset()` when the generator runs out, which clears the
+    pause event and replaces the state — and a barge-in pause that `receive()` detected during that
+    call dies with them, so the interrupting question never gets a reply. The pause and the audio
+    `receive()` accumulated are restored in that case.
 
     It also throttles the idle polling: fastrtc calls `emit()` in a tight loop while nobody is
     talking, which burns most of a core. The idle `emit()` waits for the pause event instead of
@@ -79,7 +86,25 @@ class InterruptSafeReplyOnPause(ReplyOnPause):
             if not self.event.is_set():
                 return None  # still nobody talking: fastrtc skips a None
         started_with = self.generator
+        state_before = self.state  # the object receive() accumulates the interrupting utterance into
         output = super().emit()
+        # #13: when this call's generator ran out, super() called reset(): the event is cleared and a
+        # fresh AppState replaces the state. If receive() detected the barge-in pause during that call,
+        # the reset wiped the pause and the audio with it, and the question is lost. state_before is
+        # the object receive() updated, so restore both — but only when the generator this call started
+        # with is the one that ran out: if super() had already begun a reply from that pause (it started
+        # no generator), restoring would replay the exhausted one and an empty reply would loop. A reset
+        # from another thread (clean_up, stop_playing_reply) can match these checks in a narrow race; the
+        # worst it does is answer one already-detected utterance after a "New conversation" click.
+        if (
+            started_with is not None
+            and self.state is not state_before  # the state object was replaced: reset() ran
+            and not self.event.is_set()  # no newer pause arrived after that reset
+            and state_before.pause_detected  # receive() had detected the barge-in pause on it
+        ):
+            self.state = state_before
+            self.event.set()
+            log.debug("restored the barge-in pause the ending reply's reset() wiped")
         interrupted = self.generator is None or (started_with is not None and self.generator is not started_with)
         if output is None or not interrupted:
             return output

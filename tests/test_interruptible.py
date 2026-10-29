@@ -103,6 +103,30 @@ def rig_interrupted_mid_chunk(handler_class):
     return rig, in_flight.join()
 
 
+def rig_interrupted_as_the_reply_ends(handler_class):
+    """Issue #13 harness: chunk 1 was emitted and the last next() — the one that will exhaust the
+    generator — is in flight when the user speaks and pauses.
+    Returns the rig, what the in-flight emit() returned, and the audio each reply call received."""
+    entered, release = threading.Event(), threading.Event()
+    heard = []
+
+    def reply(audio):
+        heard.append(audio)
+        yield chunk(1.0)
+        entered.set()  # the model is generating its final chunk: releasing ends the generator
+        assert release.wait(10)
+
+    rig = Rig(handler_class, reply)
+    rig.user_speaks_then_pauses()
+    assert rig.start_emit().join()[1][0] == 1.0
+
+    in_flight = rig.start_emit()
+    assert entered.wait(10)
+    rig.user_speaks_then_pauses()  # the barge-in lands while that next() is in flight
+    release.set()
+    return rig, in_flight.join(), heard
+
+
 def test_fastrtc_close_fails_on_a_running_generator_and_the_chunk_it_returns_is_not_dropped():
     # The bug (#2) in plain fastrtc: this is what the fix below has to work around
     rig, late_chunk = rig_interrupted_mid_chunk(ReplyOnPause)
@@ -144,6 +168,62 @@ def test_the_interrupting_question_gets_its_own_reply_untouched():
     new_reply = rig.start_emit().join()
 
     assert new_reply[1][0] == 1.0  # first chunk of the new reply, not dropped
+
+
+def test_fastrtc_loses_the_interrupting_utterance_when_the_reply_ends_mid_next():
+    # The bug (#13) in plain fastrtc: the exhausted generator's StopIteration makes emit() call
+    # reset(), which wipes the barge-in pause receive() had just detected — so nothing answers it
+    rig, late, _ = rig_interrupted_as_the_reply_ends(ReplyOnPause)
+
+    assert late is None
+    assert not rig.handler.event.is_set()  # reset() cleared the pause ...
+    assert rig.handler.state.stream is None  # ... and the interrupting audio went with the old state
+    assert rig.start_emit().join() is None  # the interrupting question never gets a reply
+
+
+def test_the_interrupting_utterance_survives_a_reply_that_ends_mid_next():
+    rig, late, heard = rig_interrupted_as_the_reply_ends(InterruptSafeReplyOnPause)
+
+    assert late is None  # the ending reply hands out nothing more
+    assert rig.handler.event.is_set()  # the barge-in pause was restored, not wiped by reset()
+    assert rig.handler.state.stream is not None  # the interrupting audio is kept for the new reply
+    assert rig.queue_clears == 2  # receive() cleared the queue at both pauses
+
+    new_reply = rig.start_emit().join()
+
+    assert new_reply[1][0] == 1.0  # the interrupting question gets its own reply
+    assert len(heard) == 2  # fn was called again, for the interrupting utterance
+    assert heard[1][1].shape[-1] > 0  # its audio reached the reply: the accumulated stream, not an empty buffer
+
+
+def test_a_reply_that_ends_on_its_own_keeps_the_next_reply_for_the_next_utterance():
+    # The #13 restore must not fire without a barge-in: a naturally ending reply leaves no pause
+    rig = Rig(InterruptSafeReplyOnPause, lambda _audio: iter([chunk(1.0)]))
+    rig.user_speaks_then_pauses()
+    assert rig.start_emit().join()[1][0] == 1.0
+
+    assert rig.start_emit().join() is None  # the generator runs out: reset(), nothing to restore
+
+    assert not rig.handler.event.is_set()
+    assert rig.start_emit().join() is None  # and the next reply still waits for the next utterance
+
+
+def test_an_exhausted_reply_started_from_the_pause_does_not_put_the_pause_back():
+    # The restore must not re-arm a pause whose own reply already ran out: an fn that answers with
+    # nothing would otherwise be restarted every emit() forever
+    calls = []
+
+    def empty_reply(audio):
+        calls.append(audio)
+        return iter([])  # a generator function would do too; this one answers with nothing
+
+    rig = Rig(InterruptSafeReplyOnPause, empty_reply)
+    rig.user_speaks_then_pauses()
+
+    assert rig.start_emit().join() is None  # super() creates the generator, it ends at once, reset()
+    assert not rig.handler.event.is_set()  # nothing was restored
+    assert rig.start_emit().join() is None
+    assert len(calls) == 1  # fn ran once, not once per emit()
 
 
 def test_chunks_are_not_dropped_when_nobody_interrupts():
