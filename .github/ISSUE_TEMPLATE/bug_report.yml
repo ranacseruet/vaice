@@ -1,0 +1,54 @@
+name: Bug Report
+description: Report a bug or unexpected behavior in vaice
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting an issue! Please fill out the details below so we can reproduce and fix it.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A clear and concise description of the bug.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps-to-reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Exact commands and browser actions to trigger the bug.
+      placeholder: |
+        1. Start llama-server with `...`
+        2. Run `.venv/bin/vaice`
+        3. Open http://127.0.0.1:7860 and click Record
+        4. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Terminal & browser logs
+      description: Paste relevant output from `vaice`, `llama-server`, or the browser console.
+      render: shell
+
+  - type: input
+    id: environment
+    attributes:
+      label: Environment (OS, Python, Browser)
+      placeholder: "macOS 15.1 (Apple Silicon), Python 3.12.7, Chrome 130"
+    validations:
+      required: true
+
+  - type: input
+    id: llama-server
+    attributes:
+      label: llama-server build & model
+      description: Output of `llama-server --version` and the model used (e.g. `b11960`, `LiquidAI/LFM3-Audio-2B-GGUF:Q4_K_M`).
+      placeholder: "b11960, LiquidAI/LFM3-Audio-2B-GGUF:Q4_K_M"
+    validations:
+      required: true
