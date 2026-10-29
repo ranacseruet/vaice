@@ -114,7 +114,8 @@ gone.
   playback queue ([#2](https://github.com/ranacseruet/vaice/issues/2)). And if the reply happens to
   end in the very moment you interrupt, fastrtc's end-of-reply reset would wipe your question with
   it; vaice restores it, so the question still gets its reply
-  ([#13](https://github.com/ranacseruet/vaice/issues/13)).
+  ([#13](https://github.com/ranacseruet/vaice/issues/13)) — a **New conversation** click, or an even
+  newer utterance you have started saying, always wins over that restore.
 - **Trimming:** each prompt includes at most the last `VAICE_HISTORY_TURNS` exchanges. The oldest
   are dropped in blocks of half that, not one at a time, so the start of the prompt stays the same
   for several turns. Each reply uses a fresh session, so the server does not reuse a prefix today.
