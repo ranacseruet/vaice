@@ -1,9 +1,12 @@
 """fastrtc's ReplyOnPause, minus the two barge-in races of fastrtc 0.0.34: the stale chunk that
-plays after the interrupt, and the interrupting utterance lost when the reply ends mid-interrupt."""
+plays after the interrupt, and the interrupting utterance lost when the reply ends mid-interrupt,
+with tuned VAD options to reject brief room noise and pre-roll preservation to prevent clipped opening words."""
 import logging
 import threading
 
+import numpy as np
 from fastrtc import ReplyOnPause
+from fastrtc.pause_detection.silero import SileroVadOptions
 from fastrtc.utils import split_output
 
 log = logging.getLogger(__name__)
@@ -14,6 +17,20 @@ log = logging.getLogger(__name__)
 # (37 measured).
 # The wait ends as soon as the pause is detected, so it costs no latency.
 IDLE_WAIT_SECONDS = 0.02
+
+# fastrtc's default SileroVadOptions uses min_silence_duration_ms=2000 and speech_pad_ms=400 inside
+# 600 ms chunks (AlgoOptions.audio_chunk_duration=0.6), so Silero never closes a triggered segment
+# inside a chunk and counts trailing silence as speech — inflating a 180 ms noise into 600 ms of
+# speech. Closing segments after 150 ms of silence with 30 ms padding and a 0.6 probability
+# threshold rejects brief noises while keeping normal speech detection intact.
+DEFAULT_VAD_OPTIONS = SileroVadOptions(
+    threshold=0.6,
+    min_silence_duration_ms=150,
+    speech_pad_ms=30,
+)
+# Tail of the last pre-speech chunk kept and prepended when `started_talking` flips to True, so an
+# utterance that begins in the last ~250 ms of a 600 ms VAD chunk does not lose its opening words.
+PREROLL_SECONDS = 0.3
 
 
 class InterruptSafeReplyOnPause(ReplyOnPause):
@@ -41,6 +58,10 @@ class InterruptSafeReplyOnPause(ReplyOnPause):
     can happen and its barge-in is lost as in plain fastrtc; `app.py` catches errors inside the
     generator, so replies normally end by running out.
 
+    It also defaults to tuned VAD options (`DEFAULT_VAD_OPTIONS`) so brief room noises are not
+    inflated into 600 ms speech segments, and keeps a 0.3 s pre-roll tail from the preceding
+    pre-speech chunk to avoid clipping words spoken near chunk boundaries.
+
     It also throttles the idle polling: fastrtc calls `emit()` in a tight loop while nobody is
     talking, which burns most of a core. The idle `emit()` waits for the pause event instead of
     returning at once (the wait ends as soon as the pause is detected, so no latency is added).
@@ -48,6 +69,8 @@ class InterruptSafeReplyOnPause(ReplyOnPause):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        if self.model_options is None:
+            self.model_options = DEFAULT_VAD_OPTIONS
         if not hasattr(self, "generator"):  # the attribute the fix relies on; a fastrtc upgrade may drop it
             raise RuntimeError(
                 "fastrtc's ReplyOnPause has no `generator` attribute: InterruptSafeReplyOnPause needs updating"
@@ -84,7 +107,24 @@ class InterruptSafeReplyOnPause(ReplyOnPause):
         # reads or replaces is never a half-processed frame. Holding the lock across the VAD work
         # costs emit() at most one frame of waiting, after its idle wait and reply are done.
         with self._state_lock:
+            state = self.state
+            was_talking = state.started_talking
+            buf_before = state.buffer
             super().receive(frame)
+            if not was_talking and not (state.responding and not self.can_interrupt):
+                if state.started_talking:
+                    preroll = getattr(state, "_preroll", None)
+                    if preroll is not None and state.stream is not None:
+                        state.stream = np.concatenate((preroll, state.stream))
+                        state._preroll = None
+                elif state.buffer is None:
+                    # determine_pause() just evaluated and discarded a full pre-speech chunk;
+                    # keep its tail so speech starting near the chunk boundary isn't clipped.
+                    rate, array = frame
+                    array = np.squeeze(array)
+                    chunk = array if buf_before is None else np.concatenate((buf_before, array))
+                    keep = int((state.sampling_rate or rate) * PREROLL_SECONDS)
+                    state._preroll = chunk[-keep:] if keep > 0 else None
 
     def copy(self):
         """fastrtc copies the handler for each connection, and ReplyOnPause.copy() builds a plain ReplyOnPause.

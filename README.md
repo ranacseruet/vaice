@@ -101,14 +101,14 @@ At startup, `vaice` checks `llama-server`:
 
 - **New conversation:** Clicking **New conversation** (or the chatbot's trash icon) clears the stored history and immediately silences any reply playing or queued. Any utterance you were halfway through saying when clicking it is discarded; what you say after clicking starts a fresh conversation with no prior turns in the prompt.
 - **Live transcript updates:** The chatbot view is checked once a second and re-rendered only when it changes, so a user transcript that finishes *after* the spoken reply ends still replaces the `"…"` placeholder automatically.
-- **What the model sees:** Earlier turns are sent as plain text (`User: …` / `Assistant: …` lines in the session `instructions`), while the current question is sent as audio.
-  - Because `llama-server`'s `/v1/realtime` endpoint rejects `conversation.item.create` with the `assistant` role, each reply opens a fresh session with the conversation history embedded in `instructions`. This keeps `Conversation` (`conversation.py`) the single owner of history windowing, barge-in cuts, and resets.
+- **What the model sees:** Earlier turns are formatted as native ChatML `<|im_start|>user` / `<|im_start|>assistant` turns inside the session `instructions` (which `llama-server` tokenizes with `parse_special=true`), while the current question is sent as audio.
+  - Because `llama-server`'s `/v1/realtime` endpoint rejects `conversation.item.create` with the `assistant` role, each reply opens a fresh session with the conversation history embedded in `instructions`. Emitting real ChatML turn delimiters instead of a flat `User:` / `Assistant:` transcript inside the system block prevents 2B models from confusing speaker roles or treating prior replies as few-shot instructions to repeat, while keeping `Conversation` (`conversation.py`) the single owner of history windowing, barge-in cuts, and resets.
   - A second `/v1/realtime` session of type `transcription` runs in parallel on the same audio to produce the user transcript (with language auto-detection).
   - A turn whose transcript has not arrived yet is left out of the prompt rather than shown as `(inaudible)`, so the model never sees a dangling answer to an unreadable question. An empty completed transcript is recorded as `(inaudible)`.
   - Small speech-to-speech models use the last few turns well but may forget details from much earlier in a long conversation.
-- **Barge-in (interrupting a reply):** If you speak over a reply, playback stops when you finish your interrupting question, and history keeps only the estimated portion of the reply that actually played, marked `(interrupted)`:
+- **Barge-in (interrupting a reply) & VAD tuning:** If you speak over a reply, playback stops when you finish your interrupting question, and history keeps only the estimated portion of the reply that actually played, marked `(interrupted)`:
   - `fastrtc` queues audio chunks ahead of real-time playback, and LFM models emit text roughly ~2x ahead of audio. `vaice` splits the generated text by the share of audio handed out, and on barge-in further trims it to the wall-clock duration that could have played since the first audio chunk (keeping at least one word if any audio played).
-  - `InterruptSafeReplyOnPause` (`interruptible.py`) fixes two `fastrtc` 0.0.34 barge-in races: it drops the stale audio chunk that was mid-generation when the interrupt happened, and it restores the interrupting utterance if the previous reply happened to finish at the exact moment of the barge-in.
+  - `InterruptSafeReplyOnPause` (`interruptible.py`) fixes two `fastrtc` 0.0.34 barge-in races (dropping the stale audio chunk that was mid-generation when the interrupt happened, and restoring the interrupting utterance if the previous reply happened to finish at the exact moment of the barge-in), defaults to tuned `SileroVadOptions` (`threshold=0.6`, `min_silence_duration_ms=150`, `speech_pad_ms=30`) so brief room noises inside 600 ms chunks aren't inflated into speech, and preserves a 0.3 s pre-roll buffer from the preceding chunk so opening words aren't clipped at chunk boundaries.
 - **History trimming:** Prompts include at most `VAICE_HISTORY_TURNS` exchanges. Oldest turns are dropped in blocks of `window // 2` rather than one by one.
 - **Fault tolerance:**
   - A corrupt `conversation.json` is moved aside to `conversation.json.corrupt` with a warning, and `vaice` starts with an empty conversation.
@@ -166,7 +166,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for contributor guidelines and how the fa
 ```
 src/vaice/
   app.py            CLI + Gradio/WebRTC UI; wraps a Responder, logs time to first audio, transcript + reset
-  interruptible.py  ReplyOnPause subclass fixing fastrtc 0.0.34 barge-in races, reset silencing, and idle CPU polling
+  interruptible.py  ReplyOnPause subclass fixing fastrtc 0.0.34 barge-in races, VAD tuning, pre-roll buffer, reset silencing, and idle CPU polling
   lifecycle.py      Stop signal handler: Ctrl+C asks the app and its responders to abandon in-flight calls
   config.py         Environment-driven settings (.env.example lists them with defaults)
   conversation.py   Turn / Conversation: history windowing, barge-in trimming, atomic JSON persistence, error notes
