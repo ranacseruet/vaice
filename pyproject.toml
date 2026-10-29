@@ -5,7 +5,17 @@ description = "Voice demo: talk to a local llama-server audio model and hear str
 readme = "README.md"
 requires-python = ">=3.10,<3.13"  # the range CI tests; deps also resolve on 3.13/3.14 (checked with uv), not run there
 dependencies = [
-    "fastrtc[vad]",
+    # interruptible.py and tests/test_interruptible.py are built against fastrtc 0.0.34's internals,
+    # so the range admits only patch releases of that line; anything newer goes through a tested
+    # uv.lock update (README "Dependency updates").
+    "fastrtc[vad]>=0.0.34,<0.1",
+    # onnxruntime comes in via fastrtc[vad]; from 1.24 it declares `>=3.10` but only ships cp311+
+    # wheels, so Python 3.10 needs an explicit bound on the last cp310 release to stay installable
+    # (uv resolves the lock across all supported Pythons at once and would otherwise pick 1.24.x).
+    "onnxruntime<1.24; python_version < '3.11'",
+    # app.py imports gradio directly; fastrtc 0.0.34 caps it at <6.0 and Gradio 6.0 flips
+    # gr.Chatbot(allow_tags) to True, so stay on the tested 5.x line.
+    "gradio>=5.50,<6",
     "numpy",
     "scipy>=1.10",  # resamples the mic audio to the llama.cpp model's input rate (audio.py)
     "requests",

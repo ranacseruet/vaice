@@ -9,7 +9,7 @@ This file provides guidance to coding agents (Claude Code, Codex, Cursor, …) w
 ## Commands
 
 ```bash
-uv venv .venv && uv pip install -e ".[dev]"   # setup
+uv sync --extra dev                              # setup: .venv from the committed uv.lock (py 3.12 from .python-version)
 .venv/bin/pytest                               # all tests
 .venv/bin/pytest tests/test_llamacpp.py -k history      # single test
 .venv/bin/vaice                                   # run; UI at http://127.0.0.1:7860

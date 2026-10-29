@@ -48,9 +48,40 @@ browser mic ─WebRTC─▶ fastrtc (VAD: detects you stopped talking)
 ## Setup
 
 ```bash
-uv venv .venv            # picks Python 3.12 from .python-version
-uv pip install -e ".[dev]"
+uv sync --extra dev      # creates .venv from uv.lock: the exact versions CI tests
 ```
+
+`uv sync` installs from the committed `uv.lock`, so every setup gets the same dependency
+versions (`.python-version` picks Python 3.12; add `--python 3.10` for another supported
+version). A plain `uv pip install -e ".[dev]"` or `pip install -e ".[dev]"` also works, but
+it resolves fresh from the ranges in `pyproject.toml` — the lockfile pins only `uv sync`
+installs of this repository, not downstream installs of the published package.
+
+## Dependency updates
+
+Nothing bumps itself: refresh the lock deliberately, test the new set, and commit the lock.
+
+```bash
+uv lock --upgrade-package fastrtc   # or --upgrade to refresh everything
+uv sync --extra dev
+.venv/bin/pytest && .venv/bin/ruff check src tests
+```
+
+Then push the regenerated `uv.lock` on a branch: CI re-verifies the whole locked set on
+Python 3.10 and 3.12. Non-locked installs (`pip`, `uv pip`) ignore `uv.lock` and follow the
+ranges in `pyproject.toml`, which is why parts of the set are bounded there. Known
+compatibility limits:
+
+- **fastrtc** — `interruptible.py` and `tests/test_interruptible.py` are built against
+  fastrtc 0.0.34's `ReplyOnPause` internals, so `pyproject.toml` admits only patch releases
+  of that line (`<0.1`); a newer minor or major needs a tested update of both the code and
+  the range.
+- **gradio** — declared directly because `app.py` imports it; held below 6.0 because
+  fastrtc 0.0.34 requires `gradio<6.0` and Gradio 6.0 flips `gr.Chatbot(allow_tags)` to
+  `True` (which `app.py` also guards against explicitly).
+- **onnxruntime** (transitive, via `fastrtc[vad]`) — held below 1.24 for Python 3.10 with a
+  marker dependency: from 1.24 it declares `>=3.10` support but only ships cp311+ wheels, so
+  3.10 installations must use the 1.23 line; 3.11/3.12 take any release.
 
 ## Run
 
@@ -180,8 +211,8 @@ has no effect. The voice is the model's own.
 .venv/bin/ruff check src tests
 ```
 
-CI (`.github/workflows/ci.yml`) runs Ruff and pytest on Python 3.10 and 3.12 on macOS for every push
-to `main` and every pull request.
+CI (`.github/workflows/ci.yml`) installs the locked dependencies (`uv sync --locked`) and runs
+Ruff and pytest on Python 3.10 and 3.12 on macOS for every push to `main` and every pull request.
 
 Unit tests use fakes for the models: the llamacpp backend against a fake `/v1/realtime` server
 (`tests/fake_realtime.py`: the session setup and what goes into the instructions, the 48 kHz → 16 kHz
