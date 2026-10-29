@@ -155,7 +155,10 @@ def main() -> None:
         log.info("conversation history in %s (%d turns loaded)", config.CONVERSATION_FILE, len(conversation))
 
         stream = build_stream(responder, conversation)
-        stream.ui.launch(server_port=config.PORT)
+        # gradio's index.html always links /manifest.json, and launch() re-derives pwa from
+        # its own kwarg (None -> Spaces-only), so without pwa=True the route 404s and the
+        # browser logs a manifest fetch error on every load.
+        stream.ui.launch(server_port=config.PORT, pwa=True)
     except KeyboardInterrupt:
         # Ctrl+C while the model was loading: nothing to close, just leave
         log.info("stopped")
