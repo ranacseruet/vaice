@@ -612,3 +612,100 @@ def test_the_idle_emit_rate_is_bounded():
         calls += 1
 
     assert calls <= 30  # 0.2 s at 20 ms per call is 10 calls; without the wait it is thousands
+
+
+def test_the_handler_defaults_to_tuned_vad_options_and_keeps_explicit_ones():
+    rig = Rig(InterruptSafeReplyOnPause, lambda _audio: iter([]))
+    assert rig.handler.model_options == interruptible.DEFAULT_VAD_OPTIONS
+    assert rig.handler.model_options.threshold == 0.6
+    assert rig.handler.model_options.min_silence_duration_ms == 150
+    assert rig.handler.model_options.speech_pad_ms == 30
+    assert rig.handler.copy().model_options == interruptible.DEFAULT_VAD_OPTIONS
+
+    custom = interruptible.SileroVadOptions(threshold=0.8)
+    handler = InterruptSafeReplyOnPause(lambda _audio: iter([]), model=FakeVad(), model_options=custom)
+    assert handler.model_options is custom
+    assert handler.copy().model_options is custom
+
+
+def test_a_brief_noise_burst_inside_a_chunk_is_rejected_by_the_tuned_vad_options():
+    """fastrtc's default min_silence_duration_ms=2000 inside a 600 ms chunk never closes a triggered
+    segment before the end of the chunk, counting trailing silence as speech; DEFAULT_VAD_OPTIONS
+    closes after 150 ms of silence so a 192 ms noise burst (3 x 64 ms windows < 250 ms min speech)
+    is rejected while a 320 ms speech segment (5 x 64 ms windows) still passes."""
+    from fastrtc.pause_detection.silero import SileroVADModel, SileroVadOptions
+
+    class StubSilero(SileroVADModel):
+        def __init__(self, active_windows: int):
+            self._active = active_windows
+            self._idx = 0
+
+        def __call__(self, x, state, sr: int):
+            prob = 0.85 if self._idx < self._active else 0.05
+            self._idx += 1
+            return np.array([[prob]], dtype=np.float32), state
+
+    chunk_600ms = np.zeros(int(16000 * 0.6), dtype=np.float32)
+
+    # 3 windows = 192 ms of sound followed by 408 ms of silence
+    assert StubSilero(3).get_speech_timestamps(chunk_600ms, SileroVadOptions()) == [{"start": 0, "end": 9600}]
+    assert StubSilero(3).get_speech_timestamps(chunk_600ms, interruptible.DEFAULT_VAD_OPTIONS) == []
+
+    # 5 windows = 320 ms of sound (> 250 ms min_speech_duration_ms) still triggers speech
+    speeches = StubSilero(5).get_speech_timestamps(chunk_600ms, interruptible.DEFAULT_VAD_OPTIONS)
+    assert len(speeches) == 1 and speeches[0]["end"] - speeches[0]["start"] > int(16000 * 0.2)
+
+
+def test_the_preroll_from_the_preceding_chunk_is_prepended_when_speech_starts():
+    heard = []
+
+    def reply(audio):
+        heard.append(audio)
+        yield chunk(1.0)
+
+    rig = Rig(InterruptSafeReplyOnPause, reply)
+
+    # Pre-speech chunk (accumulated across two half-second frames): VAD says no speech, chunk is discarded
+    half_a = (48000, np.full((1, 24000), 10, dtype=np.int16))
+    half_b = (48000, np.full((1, 24000), 100, dtype=np.int16))
+    rig.vad.speech = 0.0
+    run_on_thread(lambda: rig.handler.receive(half_a), "fastrtc-receive")
+    run_on_thread(lambda: rig.handler.receive(half_b), "fastrtc-receive")
+
+    # Speech chunk: started_talking flips from False to True
+    speech = (48000, np.full((1, 48000), 200, dtype=np.int16))
+    rig.vad.speech = 1.0
+    run_on_thread(lambda: rig.handler.receive(speech), "fastrtc-receive")
+
+    # Pause chunk: speech ends
+    rig.vad.speech = 0.0
+    run_on_thread(lambda: rig.handler.receive(ONE_SECOND), "fastrtc-receive")
+
+    assert rig.start_emit().join()[1][0] == 1.0
+    assert len(heard) == 1
+    samples = heard[0][1].squeeze()
+    preroll_len = int(48000 * interruptible.PREROLL_SECONDS)
+    np.testing.assert_array_equal(samples[:preroll_len], 100)
+    np.testing.assert_array_equal(samples[preroll_len : preroll_len + 48000], 200)
+
+
+def test_reset_clears_any_saved_preroll_so_it_never_leaks_into_a_new_conversation():
+    heard = []
+
+    def reply(audio):
+        heard.append(audio)
+        yield chunk(1.0)
+
+    rig = Rig(InterruptSafeReplyOnPause, reply)
+    rig.vad.speech = 0.0
+    run_on_thread(lambda: rig.handler.receive((48000, np.full((1, 48000), 100, dtype=np.int16))), "fastrtc-receive")
+    assert getattr(rig.handler.state, "_preroll", None) is not None
+
+    stop_playing_reply(rig.handler)
+    assert getattr(rig.handler.state, "_preroll", None) is None
+
+    rig.user_speaks_then_pauses()
+    assert rig.start_emit().join()[1][0] == 1.0
+    # 2 x ONE_SECOND (speech + pause), with no 100s prepended from before the reset
+    assert heard[0][1].shape[-1] == 2 * 48000
+    assert not np.any(heard[0][1] == 100)

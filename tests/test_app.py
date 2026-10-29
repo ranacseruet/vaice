@@ -198,7 +198,8 @@ def test_two_questions_through_the_app_and_the_llamacpp_backend(tmp_path, realti
     ask(2)
     second = [c for c in server.connections if c.session and c.session.get("type") != "transcription"][1]
     assert second.session["instructions"].endswith(
-        "The conversation so far:\nUser: What is the capital of France?\nAssistant: It is Paris."
+        "<|im_end|>\n<|im_start|>user\nWhat is the capital of France?"
+        "<|im_end|>\n<|im_start|>assistant\nIt is Paris."
     )
     assert conversation._turns[1].complete
 

@@ -222,18 +222,30 @@ def _transcribe_into(url: str, timeout: float, audio: AudioFrame, turn: Turn) ->
         turn.set_user_text(text)
 
 
+_CONTROL_TOKENS = ("<|im_start|>", "<|im_end|>", "@@USER@@", "@@REPLY@@")
+
+
+def _clean_turn_text(said: str) -> str:
+    for token in _CONTROL_TOKENS:
+        said = said.replace(token, "")
+    return " ".join(said.split())
+
+
 def _instructions(prompt: str, history: Sequence[Message]) -> str:
-    """The system prompt, with the earlier turns as text.
+    """The system prompt, with the earlier turns as ChatML user/assistant turns.
 
     A realtime session cannot be handed earlier assistant turns (conversation.item.create rejects
-    the assistant role), so each reply gets a fresh session and the history goes in as text. That
-    also leaves `Conversation` the one owner of history: windowing, barge-in cuts and "New
-    conversation" all apply.
+    the assistant role), so each reply gets a fresh session. llama-server wraps `instructions` in
+    `<|im_start|>system\\n...<|im_end|>\\n<|im_start|>user\\n` and tokenizes the header with
+    `parse_special=true` (server-realtime.cpp), so closing the system block and emitting each
+    past turn as `<|im_start|>{role}\\n...<|im_end|>` gives the model native ChatML turns instead
+    of a flat transcript inside the system prompt (which makes 2B models confuse roles or repeat
+    earlier replies). `Conversation` stays the one owner of history: windowing, barge-in cuts and
+    "New conversation" all apply.
     """
     text = f"{MODE_INSTRUCTION} {prompt}".strip()
-    if history:
-        lines = (f"{role.capitalize()}: {' '.join(said.split())}" for role, said in history)
-        text += "\n\nThe conversation so far:\n" + "\n".join(lines)
+    for role, said in history:
+        text += f"<|im_end|>\n<|im_start|>{role}\n{_clean_turn_text(said)}"
     return text
 
 
