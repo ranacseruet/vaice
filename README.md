@@ -1,5 +1,9 @@
 # vaice
 
+[![CI](https://github.com/ranacseruet/vaice/actions/workflows/ci.yml/badge.svg)](https://github.com/ranacseruet/vaice/actions/workflows/ci.yml)
+[![Python 3.10–3.12](https://img.shields.io/badge/python-3.10%E2%80%933.12-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 Talk to a local model and hear it answer; the spoken reply streams back as it is generated.
 The conversation carries over between questions and is kept as text history.
 
@@ -20,18 +24,17 @@ browser mic ─WebRTC─▶ fastrtc (VAD: detects you stopped talking)
 
 ## Quickstart (From Scratch in 3 Steps)
 
-### 1. Build and start `llama-server` with an audio model
+### 1. Install and start `llama-server` with an audio model
 
-`vaice` requires llama.cpp `llama-server` **b11960 or newer** (v0.8.0+) for the `/v1/realtime` WebSocket.
-At the time of writing, Homebrew's `llama.cpp` (0.7.0) is too old, so build `llama-server` from source:
+`vaice` requires [llama.cpp](https://github.com/ggml-org/llama.cpp) `llama-server` **b11960 or newer** (v0.8.0+) for the `/v1/realtime` WebSocket. Install it via Homebrew (macOS/Linux):
 
 ```bash
-git clone https://github.com/ggml-org/llama.cpp && cd llama.cpp
-cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j --target llama-server
-build/bin/llama-server -hf LiquidAI/LFM3-Audio-2B-GGUF:Q4_K_M --port 8001
+brew install llama.cpp
+llama-server -hf LiquidAI/LFM3-Audio-2B-GGUF:Q4_K_M --port 8001
 ```
 
-`llama-server` downloads `LiquidAI/LFM3-Audio-2B-GGUF` automatically on first run via `-hf` and listens on `http://localhost:8001`.
+> **How `-hf` works:** `-hf` (`--hf-repo`) is a built-in `llama-server` flag — you do **not** need the `huggingface-cli` / `hf` command-line tool installed. On first run, `llama-server` downloads the GGUF model weights and audio projector directly from Hugging Face into its local cache (`~/Library/Caches/llama.cpp` on macOS or `~/.cache/llama.cpp` on Linux) and starts listening on `http://localhost:8001`.
+> *(If you prefer to build `llama-server` from source or download a pre-built release binary, see the [llama.cpp installation guide](https://github.com/ggml-org/llama.cpp#usage).)*
 
 ### 2. Install and run `vaice`
 
@@ -115,7 +118,7 @@ At startup, `vaice` checks `llama-server`:
 ## Troubleshooting
 
 - **`llama-server` has no `/v1/realtime` endpoint or returns 404 on WebSocket connect:**
-  Your `llama.cpp` build is older than `b11960` (for example, Homebrew's `0.7.0` release). Build `llama-server` from a current `llama.cpp` checkout as shown in [Quickstart](#1-build-and-start-llama-server-with-an-audio-model).
+  Your `llama.cpp` installation is older than `b11960` (v0.8.0). Upgrade it (`brew upgrade llama.cpp` or install a newer release from [ggml-org/llama.cpp](https://github.com/ggml-org/llama.cpp)).
 - **`RuntimeError: the model on llama-server ... does not output audio`:**
   The model loaded in `llama-server` is text-only or audio-input-only. Start `llama-server` with an audio-output model such as `LiquidAI/LFM3-Audio-2B-GGUF:Q4_K_M`.
 - **The assistant interrupts itself or hears its own voice:**
