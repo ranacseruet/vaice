@@ -535,8 +535,8 @@ def test_main_installs_the_stop_handler_and_asks_the_app_to_stop_when_the_server
         class ui:  # a stand-in for the gradio app
 
             @staticmethod
-            def launch(server_port):
-                launched.append(server_port)
+            def launch(server_port, pwa):
+                launched.append((server_port, pwa))
 
     monkeypatch.setattr(app, "parse_args", lambda: argparse.Namespace())
     monkeypatch.setattr(app, "check_server", lambda: startup.append("check"))
@@ -549,7 +549,7 @@ def test_main_installs_the_stop_handler_and_asks_the_app_to_stop_when_the_server
 
         assert signal.getsignal(signal.SIGINT) is not previous  # Ctrl+C is handled
         assert startup == ["check", "construct"]
-        assert launched == [app.config.PORT]
+        assert launched == [(app.config.PORT, True)]  # pwa on, or the browser 404s on /manifest.json
         assert lifecycle.stopping.is_set()  # the server is gone: the responders may give up
     finally:
         signal.signal(signal.SIGINT, previous)
