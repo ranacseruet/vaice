@@ -196,6 +196,42 @@ def test_the_interrupting_utterance_survives_a_reply_that_ends_mid_next():
     assert heard[1][1].shape[-1] > 0  # its audio reached the reply: the accumulated stream, not an empty buffer
 
 
+def test_a_newer_pause_that_arrived_during_the_reset_is_never_replaced_by_the_old_one():
+    # The `not event.is_set()` guard: when receive() detects a newer pause between the ending
+    # reply's own reset() and the wrapper's check, the newer utterance must win — emulated by
+    # running the newer utterance's receive() right behind the reset on the emit thread
+    entered, release = threading.Event(), threading.Event()
+
+    def reply(_audio):
+        yield chunk(1.0)
+        entered.set()  # the in-flight next() will end the generator once released
+        assert release.wait(10)
+
+    rig = Rig(InterruptSafeReplyOnPause, reply)
+    rig.user_speaks_then_pauses()
+    assert rig.start_emit().join()[1][0] == 1.0
+
+    in_flight = rig.start_emit()
+    assert entered.wait(10)
+    rig.user_speaks_then_pauses()  # the #13 barge-in: a pause on the reply's state
+
+    newer = []
+    reset = rig.handler.reset
+
+    def reset_then_a_newer_pause():  # instance attribute: super().emit() calls self.reset()
+        reset()  # the ending reply's reset: event cleared, fresh state
+        newer.append(rig.handler.state)
+        rig.user_speaks_then_pauses()  # a new utterance detected before the wrapper's check
+
+    rig.handler.reset = reset_then_a_newer_pause
+    release.set()
+
+    assert in_flight.join() is None
+    assert rig.handler.state is newer[0]  # the newer utterance's state survived, not the older pause
+    assert rig.handler.event.is_set()
+    assert rig.start_emit().join()[1][0] == 1.0  # and the newer utterance gets the reply
+
+
 def test_a_reply_that_ends_on_its_own_keeps_the_next_reply_for_the_next_utterance():
     # The #13 restore must not fire without a barge-in: a naturally ending reply leaves no pause
     rig = Rig(InterruptSafeReplyOnPause, lambda _audio: iter([chunk(1.0)]))

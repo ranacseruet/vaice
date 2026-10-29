@@ -33,7 +33,9 @@ class InterruptSafeReplyOnPause(ReplyOnPause):
     interrupts (#13): `super().emit()` calls `reset()` when the generator runs out, which clears the
     pause event and replaces the state — and a barge-in pause that `receive()` detected during that
     call dies with them, so the interrupting question never gets a reply. The pause and the audio
-    `receive()` accumulated are restored in that case.
+    `receive()` accumulated are restored in that case. A reply that *errors* re-raises before this
+    can happen and its barge-in is lost as in plain fastrtc; `app.py` catches errors inside the
+    generator, so replies normally end by running out.
 
     It also throttles the idle polling: fastrtc calls `emit()` in a tight loop while nobody is
     talking, which burns most of a core. The idle `emit()` waits for the pause event instead of
@@ -91,11 +93,14 @@ class InterruptSafeReplyOnPause(ReplyOnPause):
         # #13: when this call's generator ran out, super() called reset(): the event is cleared and a
         # fresh AppState replaces the state. If receive() detected the barge-in pause during that call,
         # the reset wiped the pause and the audio with it, and the question is lost. state_before is
-        # the object receive() updated, so restore both — but only when the generator this call started
-        # with is the one that ran out: if super() had already begun a reply from that pause (it started
-        # no generator), restoring would replay the exhausted one and an empty reply would loop. A reset
-        # from another thread (clean_up, stop_playing_reply) can match these checks in a narrow race; the
-        # worst it does is answer one already-detected utterance after a "New conversation" click.
+        # the object receive() updated, so restore both — but only when this emit began with the reply's
+        # generator attached: if super() began a reply from that pause instead (it found none attached),
+        # restoring would replay the exhausted generator, and an empty reply would loop forever. A
+        # newer pause detected after the reset is spared (its event is set); a new utterance still being
+        # collected in that microsecond window can still lose its partial audio. A reset from another
+        # thread (clean_up, stop_playing_reply) can match these checks in the same narrow race: the
+        # worst it does is one wasted answer to an already-detected utterance — on a torn-down
+        # connection, or after a "New conversation" click.
         if (
             started_with is not None
             and self.state is not state_before  # the state object was replaced: reset() ran
