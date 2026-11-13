@@ -3,6 +3,13 @@ import os
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from dotenv import load_dotenv
+
+# A .env in the working directory (where `vaice` is launched from) fills in unset variables at
+# import; variables already in the environment (exported, or from `set -a; source .env`) win, and
+# built-in defaults come last.
+load_dotenv(dotenv_path=Path.cwd() / ".env")
+
 
 def _env(name: str, *, default: str) -> str:
     raw = os.getenv(name)

@@ -73,13 +73,13 @@ For each reply, the terminal logs `[llamacpp] time to first audio: N.NNs` and `[
 
 ## Configuration
 
-All settings are optional and configured via environment variables. To keep them in a file, copy `.env.example` to `.env` (gitignored), uncomment what you want to change, and start with:
+All settings are optional and configured via environment variables. To keep them in a file, copy `.env.example` to `.env` (gitignored), uncomment what you want to change, and start `vaice` from that directory — it loads `.env` from the working directory at startup:
 
 ```bash
-set -a; source .env; set +a; .venv/bin/vaice
+.venv/bin/vaice
 ```
 
-(`vaice` does not read `.env` itself.)
+Precedence: variables already in the environment (e.g. `set -a; source .env; set +a; .venv/bin/vaice`, or `VAICE_FOO=1 .venv/bin/vaice`) win over the `.env` file, which wins over the built-in defaults.
 
 | Variable | Default | Meaning |
 |---|---|---|
