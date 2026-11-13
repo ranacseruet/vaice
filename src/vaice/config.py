@@ -46,6 +46,11 @@ LLAMACPP_PROMPT = _env(
 )
 LLAMACPP_TIMEOUT = _number("VAICE_LLAMACPP_TIMEOUT", default="120", kind=float)
 
+# Reply cap sent as the realtime session's max_output_tokens; text tokens and audio frames count
+# together (the LFM3-Audio codec emits 12 tokens per 80 ms of speech). The model card's own
+# voice-chat example uses 1024; llama-server's session default would be "inf".
+LLAMACPP_MAX_OUTPUT_TOKENS = _number("VAICE_LLAMACPP_MAX_OUTPUT_TOKENS", default="1024", kind=int)
+
 PORT = _number("VAICE_PORT", default="7860", kind=int)
 
 # The conversation is kept here between runs; the last HISTORY_TURNS exchanges go into each prompt

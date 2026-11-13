@@ -21,7 +21,6 @@ log = logging.getLogger(__name__)
 # Tells an interleaved-mode model (LFM3-Audio) to write its text alongside the speech; a fixed constant, so
 # VAICE_LLAMACPP_PROMPT only has to say how to answer
 MODE_INSTRUCTION = "Respond with interleaved text and audio."
-MAX_OUTPUT_TOKENS = 512  # counts text tokens and audio frames together
 # How often a waiting thread checks whether the reply was abandoned or the app is stopping
 POLL_SECONDS = 0.25
 # The close handshake of a socket whose server is busy or gone must not hold a thread for long
@@ -125,6 +124,7 @@ def _converse(
     out: queue.Queue,
     cancelled: threading.Event,
     progress: list[tuple[str, int]],
+    max_output_tokens: int,
 ) -> None:
     """Daemon thread: one realtime session for one reply. Puts (rate, samples) frames, then _DONE, on `out`
     (or the exception that ended it before _DONE) and keeps progress[0] = (reply text, samples received).
@@ -147,7 +147,7 @@ def _converse(
                 {
                     "instructions": instructions,
                     "output_modalities": ["text", "audio"],
-                    "max_output_tokens": MAX_OUTPUT_TOKENS,
+                    "max_output_tokens": max_output_tokens,
                 }
             )
             session.send({"type": "input_audio_buffer.append", "audio": _b64(to_pcm16(audio, rate_in))})
@@ -166,7 +166,7 @@ def _converse(
                         progress[0] = ("".join(text), samples)  # before the frame is handed over
                         out.put((rate_out, frame))
                 elif kind == "response.done":
-                    _check_done(event, samples)
+                    _check_done(event, samples, max_output_tokens)
                     break
     except _Stopped:
         pass
@@ -176,15 +176,15 @@ def _converse(
         out.put(_DONE)
 
 
-def _check_done(event: dict, samples: int) -> None:
+def _check_done(event: dict, samples: int, max_output_tokens: int) -> None:
     response = event.get("response") or {}
     status = response.get("status")
     if status != "completed":  # "cancelled": we never ask for it, so someone else stopped the reply
         raise RuntimeError(f"llama-server ended the reply with status {status!r}")
     # A reply that hits max_output_tokens still reports "completed"; the usage is what gives it away
     tokens = (response.get("usage") or {}).get("output_tokens")
-    if isinstance(tokens, int) and tokens >= MAX_OUTPUT_TOKENS:
-        log.warning("llamacpp reply hit the %d-token limit and was cut off", MAX_OUTPUT_TOKENS)
+    if isinstance(tokens, int) and tokens >= max_output_tokens:
+        log.warning("llamacpp reply hit the %d-token limit and was cut off", max_output_tokens)
     if not samples:
         log.warning("llama-server's reply had no audio (is the model one with audio output?)")
 
@@ -264,10 +264,13 @@ class LlamaCppResponder:
         url: str = config.LLAMACPP_URL,
         prompt: str = config.LLAMACPP_PROMPT,
         timeout: float = config.LLAMACPP_TIMEOUT,
+        max_output_tokens: int = config.LLAMACPP_MAX_OUTPUT_TOKENS,
     ):
         self._url = url
         self._prompt = prompt
         self._timeout = timeout
+        # Text tokens and audio frames count together; the model card's own voice-chat example uses 1024
+        self._max_output_tokens = max_output_tokens
 
     def respond(self, audio: AudioFrame, history: Sequence[Message], turn: Turn) -> Iterator[AudioFrame]:
         # First, so that nothing the reply does can keep the question from being transcribed
@@ -282,7 +285,8 @@ class LlamaCppResponder:
         progress = [("", 0)]  # (reply text, audio samples) received so far; replaced whole by the session thread
         threading.Thread(
             target=_converse,
-            args=(self._url, self._timeout, _instructions(self._prompt, history), audio, chunks, cancelled, progress),
+            args=(self._url, self._timeout, _instructions(self._prompt, history), audio, chunks, cancelled, progress,
+                  self._max_output_tokens),
             name="vaice-llamacpp",
             daemon=True,
         ).start()

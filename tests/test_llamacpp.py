@@ -11,10 +11,10 @@ import pytest
 import requests
 from fake_realtime import next_on_fresh_thread, pcm
 
-from vaice import lifecycle
+from vaice import config, lifecycle
 from vaice.conversation import Turn
 from vaice.responders import llamacpp
-from vaice.responders.llamacpp import MAX_OUTPUT_TOKENS, MODE_INSTRUCTION, LlamaCppResponder, check_server
+from vaice.responders.llamacpp import MODE_INSTRUCTION, LlamaCppResponder, check_server
 
 TONE = (8000 * np.sin(2 * np.pi * 440 * np.arange(4800) / 48000)).astype(np.int16)
 AUDIO = (48000, np.stack([TONE, np.zeros_like(TONE)]))  # 0.1 s of stereo browser audio
@@ -88,8 +88,15 @@ def test_the_session_is_configured_before_any_audio(realtime):
     assert conn.session == {
         "instructions": f"{MODE_INSTRUCTION} Be brief.",
         "output_modalities": ["text", "audio"],
-        "max_output_tokens": MAX_OUTPUT_TOKENS,
+        "max_output_tokens": config.LLAMACPP_MAX_OUTPUT_TOKENS,
     }
+
+
+def test_a_custom_reply_cap_is_sent_as_max_output_tokens(realtime):
+    server = realtime()
+    drive(LlamaCppResponder(server.url, "", max_output_tokens=77))
+
+    assert server.conversation().session["max_output_tokens"] == 77
 
 
 def test_earlier_turns_go_into_the_instructions_as_text(realtime):
@@ -191,14 +198,14 @@ def test_a_reply_without_audio_is_a_warning_and_records_no_text(realtime, caplog
 
 
 def test_a_reply_cut_off_by_the_token_limit_is_logged(realtime, caplog):
-    server = realtime(reply=[("audio", pcm(1)), ("done", "completed", MAX_OUTPUT_TOKENS)])
+    server = realtime(reply=[("audio", pcm(1)), ("done", "completed", config.LLAMACPP_MAX_OUTPUT_TOKENS)])
     with caplog.at_level(logging.WARNING, logger="vaice.responders.llamacpp"):
         drive(LlamaCppResponder(server.url, ""))
-    assert f"{MAX_OUTPUT_TOKENS}-token limit" in caplog.text
+    assert f"{config.LLAMACPP_MAX_OUTPUT_TOKENS}-token limit" in caplog.text
 
 
 def test_a_normal_reply_logs_no_truncation_warning(realtime, caplog):
-    server = realtime(reply=[("audio", pcm(1)), ("done", "completed", MAX_OUTPUT_TOKENS - 1)])
+    server = realtime(reply=[("audio", pcm(1)), ("done", "completed", config.LLAMACPP_MAX_OUTPUT_TOKENS - 1)])
     with caplog.at_level(logging.WARNING, logger="vaice.responders.llamacpp"):
         drive(LlamaCppResponder(server.url, ""))
     assert "limit" not in caplog.text

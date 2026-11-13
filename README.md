@@ -34,6 +34,8 @@ llama-server -hf LiquidAI/LFM3-Audio-2B-GGUF:Q4_K_M --temp 0 --port 8001
 ```
 
 > **Sampling:** the LFM3-Audio model card recommends **greedy decoding (temperature 0) for text output** — hence `--temp 0` above. The `/v1/realtime` API has no temperature field, so reply text is sampled with the server's own setting; at the default 0.8 a 2B audio model drifts off-topic and loses the conversation thread (`vaice` warns about this at startup). Speech sampling is separate and comes from the GGUF (audio temperature 1.0, top_k 128, repetition penalty 1.1), so no audio flags are needed.
+> **Language & voice:** voice chat is English-only for now; ASR and TTS cover 18 languages. To pin the reply language and voice, start the server with `--tts-lang en --tts-voice female` (llama.cpp renders a "Speak in English." system-prompt line from these). Leave the *transcription* language alone — the default auto-detect is measurably better than pinning it. On llama.cpp builds newer than v0.8.0, `session.update` can also set `audio.output.language`/`audio.output.voice` per session.
+> **Context:** the model supports 32K tokens. If you pass `-c/--ctx-size` explicitly, use at least 8192 — a realtime conversation that overflows its slot fails with "the conversation does not fit in the context".
 > **How `-hf` works:** `-hf` (`--hf-repo`) is a built-in `llama-server` flag — you do **not** need the `huggingface-cli` / `hf` command-line tool installed. On first run, `llama-server` downloads the GGUF model weights and audio projector directly from Hugging Face into its local cache (`~/Library/Caches/llama.cpp` on macOS or `~/.cache/llama.cpp` on Linux) and starts listening on `http://localhost:8001`.
 > *(If you prefer to build `llama-server` from source or download a pre-built release binary, see the [llama.cpp installation guide](https://github.com/ggml-org/llama.cpp#usage).)*
 
@@ -87,6 +89,7 @@ set -a; source .env; set +a; .venv/bin/vaice
 | `VAICE_LLAMACPP_URL` | `http://localhost:8001` | `llama-server` URL; only scheme, host and port are used (`/health`, `/v1/models` and `ws://…/v1/realtime` hang off it) |
 | `VAICE_LLAMACPP_PROMPT` | `Reply naturally and concisely in 1 to 2 spoken sentences.` | Reply instructions; `vaice` prepends `Respond with interleaved text and audio.` |
 | `VAICE_LLAMACPP_TIMEOUT` | `120` | Seconds to open a connection or the longest silence from `llama-server` before a reply fails |
+| `VAICE_LLAMACPP_MAX_OUTPUT_TOKENS` | `1024` | Reply cap sent as the realtime session's `max_output_tokens`; text tokens and audio frames count together. Raise it for longer spoken replies |
 
 ## How It Works & Conversation History
 
@@ -94,7 +97,7 @@ set -a; source .env; set +a; .venv/bin/vaice
 At startup, `vaice` checks `llama-server`:
 - An unreachable or still-loading server (HTTP 503) logs a warning and starts the UI anyway, so the server can finish loading before your first question.
 - A reachable server whose model does not advertise audio output is rejected immediately with an actionable error.
-- Replies are capped at 512 tokens (text and audio frames together); truncation is logged as a warning.
+- Replies are capped at `VAICE_LLAMACPP_MAX_OUTPUT_TOKENS` (default 1024 — the model card's own voice-chat example uses 1024; text and audio frames count together, and the LFM3-Audio codec emits 12 tokens per 80 ms of speech); truncation is logged as a warning.
 - **Ctrl+C** stops the app cleanly: any reply in flight is abandoned (`the app is stopping; the reply is abandoned`) and the process exits within ~1 s when idle or ~5–6 s when a browser is connected mid-reply, even if the server never answers. Finished turns remain on disk.
 
 ### Multi-Turn Conversation & Barge-In
@@ -119,7 +122,7 @@ At startup, `vaice` checks `llama-server`:
 ## Troubleshooting
 
 - **Replies are off-topic, ignore the question, or lose the conversation thread:**
-  Start `llama-server` with `--temp 0`. The `/v1/realtime` API has no temperature field, so reply text is sampled with the server's own setting (default 0.8), and the LFM3-Audio model card recommends greedy decoding (temperature 0) for text output — `vaice` warns about this at startup. If the replies are still weak, try a better quantization: `Q4_K_M` (the quickstart default) or `Q8_0` instead of `Q4_0`. You can also lower `VAICE_HISTORY_TURNS` (e.g. `4`) — small models follow a short history better than a long one.
+  Start `llama-server` with `--temp 0`. The `/v1/realtime` API has no temperature field, so reply text is sampled with the server's own setting (default 0.8), and the LFM3-Audio model card recommends greedy decoding (temperature 0) for text output — `vaice` warns about this at startup. If the replies are still weak, try a better quantization: `Q4_K_M` (the quickstart default) is the balance; `Q8_0` matches the unquantized model step-for-step in side-by-side runs, while 4-bit backbones measurably drift. You can also lower `VAICE_HISTORY_TURNS` (e.g. `4`) — small models follow a short history better than a long one.
 - **`llama-server` has no `/v1/realtime` endpoint or returns 404 on WebSocket connect:**
   Your `llama.cpp` installation is older than `b11960` (v0.8.0). Upgrade it (`brew upgrade llama.cpp` or install a newer release from [ggml-org/llama.cpp](https://github.com/ggml-org/llama.cpp)).
 - **`RuntimeError: the model on llama-server ... does not output audio`:**
