@@ -86,6 +86,10 @@ set -a; source .env; set +a; .venv/bin/vaice
 | `VAICE_PORT` | `7860` | UI port |
 | `VAICE_DATA_DIR` | `~/.vaice` | Directory where `conversation.json` is stored |
 | `VAICE_HISTORY_TURNS` | `10` | Past exchanges included in each prompt (`0` = none); older ones are dropped in blocks |
+| `VAICE_VAD_THRESHOLD` | `0.6` | Silero VAD speech probability threshold — what counts as speech, and so what can interrupt a playing reply. Raise (e.g. `0.7`) if room noise or speaker feedback cuts replies short |
+| `VAICE_VAD_MIN_SILENCE_MS` | `150` | Silence that must follow speech before an utterance counts as ended — delays the reply start and barge-ins alike |
+| `VAICE_VAD_SPEECH_PAD_MS` | `30` | Padding added around detected speech |
+| `VAICE_CAN_INTERRUPT` | `1` | Set `0` to disable barge-in: a reply always runs to the end |
 | `VAICE_LLAMACPP_URL` | `http://localhost:8001` | `llama-server` URL; only scheme, host and port are used (`/health`, `/v1/models` and `ws://…/v1/realtime` hang off it) |
 | `VAICE_LLAMACPP_PROMPT` | `Reply naturally and concisely in 1 to 2 spoken sentences.` | Reply instructions; `vaice` prepends `Respond with interleaved text and audio.` |
 | `VAICE_LLAMACPP_TIMEOUT` | `120` | Seconds to open a connection or the longest silence from `llama-server` before a reply fails |
@@ -112,7 +116,7 @@ At startup, `vaice` checks `llama-server`:
   - Small speech-to-speech models use the last few turns well but may forget details from much earlier in a long conversation.
 - **Barge-in (interrupting a reply) & VAD tuning:** If you speak over a reply, playback stops when you finish your interrupting question, and history keeps only the estimated portion of the reply that actually played, marked `(interrupted)`:
   - `fastrtc` queues audio chunks ahead of real-time playback, and LFM models emit text roughly ~2x ahead of audio. `vaice` splits the generated text by the share of audio handed out, and on barge-in further trims it to the wall-clock duration that could have played since the first audio chunk (keeping at least one word if any audio played).
-  - `InterruptSafeReplyOnPause` (`interruptible.py`) fixes two `fastrtc` 0.0.34 barge-in races (dropping the stale audio chunk that was mid-generation when the interrupt happened, and restoring the interrupting utterance if the previous reply happened to finish at the exact moment of the barge-in), defaults to tuned `SileroVadOptions` (`threshold=0.6`, `min_silence_duration_ms=150`, `speech_pad_ms=30`) so brief room noises inside 600 ms chunks aren't inflated into speech, and preserves a 0.3 s pre-roll buffer from the preceding chunk so opening words aren't clipped at chunk boundaries.
+  - `InterruptSafeReplyOnPause` (`interruptible.py`) fixes two `fastrtc` 0.0.34 barge-in races (dropping the stale audio chunk that was mid-generation when the interrupt happened, and restoring the interrupting utterance if the previous reply happened to finish at the exact moment of the barge-in), defaults to tuned `SileroVadOptions` (`threshold=0.6`, `min_silence_duration_ms=150`, `speech_pad_ms=30` — all env-tunable via `VAICE_VAD_THRESHOLD`, `VAICE_VAD_MIN_SILENCE_MS`, `VAICE_VAD_SPEECH_PAD_MS`; see the table above) so brief room noises inside 600 ms chunks aren't inflated into speech, and preserves a 0.3 s pre-roll buffer from the preceding chunk so opening words aren't clipped at chunk boundaries. `VAICE_CAN_INTERRUPT=0` disables barge-in entirely.
 - **History trimming:** Prompts include at most `VAICE_HISTORY_TURNS` exchanges. Oldest turns are dropped in blocks of `window // 2` rather than one by one.
 - **Fault tolerance:**
   - A corrupt `conversation.json` is moved aside to `conversation.json.corrupt` with a warning, and `vaice` starts with an empty conversation.
