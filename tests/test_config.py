@@ -78,6 +78,19 @@ def test_flag_default_and_override(monkeypatch):
         assert config._flag("VAICE_CAN_INTERRUPT", default=True) is True
 
 
+def test_a_dotenv_in_the_working_directory_fills_unset_variables(monkeypatch, tmp_path):
+    (tmp_path / ".env").write_text("VAICE_PORT=7999\nVAICE_VAD_THRESHOLD=0.75\n")
+    monkeypatch.delenv("VAICE_PORT", raising=False)
+    monkeypatch.setenv("VAICE_VAD_THRESHOLD", "0.65")  # the real environment wins over .env
+    monkeypatch.chdir(tmp_path)
+    try:
+        reloaded = importlib.reload(config)
+        assert (reloaded.PORT, reloaded.VAD_THRESHOLD) == (7999, 0.65)
+    finally:
+        monkeypatch.undo()
+        importlib.reload(config)
+
+
 def test_the_settings_are_read_from_the_environment_at_import(monkeypatch):
     monkeypatch.setenv("VAICE_LLAMACPP_URL", "http://box:9000/v1")
     monkeypatch.setenv("VAICE_LLAMACPP_PROMPT", "custom prompt")

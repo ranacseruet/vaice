@@ -34,6 +34,7 @@ dependencies = [
     "scipy>=1.10",  # resamples the mic audio to the llama.cpp model's input rate (audio.py)
     "requests",
     "websockets>=15.0",  # llama-server's /v1/realtime (sync client with recv(timeout) and keep-alive options)
+    "python-dotenv",  # config.py loads a .env from the working directory at import (real env wins)
 ]
 
 [project.optional-dependencies]
