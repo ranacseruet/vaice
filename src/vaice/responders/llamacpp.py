@@ -316,6 +316,31 @@ class LlamaCppResponder:
             cancelled.set()  # the session thread closes the socket, which cancels the reply on the server
 
 
+def _warn_text_temperature(url: str) -> None:
+    """Warn when llama-server samples reply text at a temperature above 0.
+
+    The realtime API has no temperature field (`session.update` and `response.create` take only
+    instructions, modalities, tools and max_output_tokens), so text tokens are sampled with the
+    server's own sampling params, set only at launch. The LFM3-Audio model card recommends greedy
+    decoding for text (`--temp 0`); at the default 0.8 a 2B audio model drifts off-topic and loses
+    the conversation thread. The audio sampling params are separate (they come from the GGUF), so
+    the speech sounds fine while the content is not. Non-fatal: a props problem must not break
+    startup (a router-style /props has no params at all).
+    """
+    try:
+        r = requests.get(f"{url}/props", timeout=CHECK_TIMEOUT)
+        settings = r.json().get("default_generation_settings") or {}
+        temp = (settings.get("params") or {}).get("temperature")
+    except (requests.RequestException, ValueError, AttributeError):
+        return
+    if isinstance(temp, (int, float)) and temp > 0:
+        log.warning(
+            "llama-server samples reply text at temperature %g; the LFM3-Audio model card recommends "
+            "greedy decoding for text (start llama-server with --temp 0). Higher temperatures make a "
+            "2B audio model drift off-topic and lose the conversation thread", temp,
+        )
+
+
 def check_server(url: str = config.LLAMACPP_URL) -> None:
     """Check at startup that llama-server is up and serves an audio-output model.
 
@@ -355,3 +380,4 @@ def check_server(url: str = config.LLAMACPP_URL) -> None:
             f"the model on llama-server at {url} ({', '.join(names) or 'none listed'}) does not output audio; "
             "the llamacpp backend needs an audio-output model such as LiquidAI/LFM3-Audio-2B-GGUF"
         )
+    _warn_text_temperature(url)

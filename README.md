@@ -30,9 +30,10 @@ browser mic ─WebRTC─▶ fastrtc (VAD: detects you stopped talking)
 
 ```bash
 brew install llama.cpp
-llama-server -hf LiquidAI/LFM3-Audio-2B-GGUF:Q4_K_M --port 8001
+llama-server -hf LiquidAI/LFM3-Audio-2B-GGUF:Q4_K_M --temp 0 --port 8001
 ```
 
+> **Sampling:** the LFM3-Audio model card recommends **greedy decoding (temperature 0) for text output** — hence `--temp 0` above. The `/v1/realtime` API has no temperature field, so reply text is sampled with the server's own setting; at the default 0.8 a 2B audio model drifts off-topic and loses the conversation thread (`vaice` warns about this at startup). Speech sampling is separate and comes from the GGUF (audio temperature 1.0, top_k 128, repetition penalty 1.1), so no audio flags are needed.
 > **How `-hf` works:** `-hf` (`--hf-repo`) is a built-in `llama-server` flag — you do **not** need the `huggingface-cli` / `hf` command-line tool installed. On first run, `llama-server` downloads the GGUF model weights and audio projector directly from Hugging Face into its local cache (`~/Library/Caches/llama.cpp` on macOS or `~/.cache/llama.cpp` on Linux) and starts listening on `http://localhost:8001`.
 > *(If you prefer to build `llama-server` from source or download a pre-built release binary, see the [llama.cpp installation guide](https://github.com/ggml-org/llama.cpp#usage).)*
 
@@ -63,7 +64,7 @@ For each reply, the terminal logs `[llamacpp] time to first audio: N.NNs` and `[
 - **Python 3.10–3.12** (tested in CI on macOS; dependencies also resolve on 3.13 and 3.14, but runtime behavior is not validated there).
 - **[uv](https://docs.astral.sh/uv/)** for reproducible dependency management (`uv sync` installs the exact versions from `uv.lock`).
 - **llama.cpp `llama-server` b11960+** running a model with audio output.
-  - **Only llama.cpp `llama-server` is supported and tested.** `vaice` speaks its `/v1/realtime` WebSocket protocol and checks `/health` and `/v1/models` at startup to verify that the loaded model advertises audio output (`output_modalities` includes `"audio"`). Other servers (Ollama, LM Studio, oMLX, …) will not work.
+  - **Only llama.cpp `llama-server` is supported and tested.** `vaice` speaks its `/v1/realtime` WebSocket protocol and checks `/health` and `/v1/models` at startup to verify that the loaded model advertises audio output (`output_modalities` includes `"audio"`). It also reads `/props` and warns when the server's text sampling temperature is above 0 (the LFM3-Audio model card recommends `--temp 0`). Other servers (Ollama, LM Studio, oMLX, …) will not work.
   - Point `VAICE_LLAMACPP_URL` at a different host or port if `llama-server` isn't on `:8001`.
   - Current upstream `llama.cpp` documentation also describes `/v1/realtime` conversation support for LFM3-Omni and the `--reasoning off` server option. `vaice`'s integration has been exercised with LFM3-Audio; Omni behavior is not verified end to end here. On `llama.cpp` builds that provide the option, add `--reasoning off` to the server command if your selected model's chat template supports disabling reasoning. See the [llama.cpp server documentation](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md).
   - CI runs on macOS; Linux and Windows audio behavior has not been validated.
@@ -117,6 +118,8 @@ At startup, `vaice` checks `llama-server`:
 
 ## Troubleshooting
 
+- **Replies are off-topic, ignore the question, or lose the conversation thread:**
+  Start `llama-server` with `--temp 0`. The `/v1/realtime` API has no temperature field, so reply text is sampled with the server's own setting (default 0.8), and the LFM3-Audio model card recommends greedy decoding (temperature 0) for text output — `vaice` warns about this at startup. If the replies are still weak, try a better quantization: `Q4_K_M` (the quickstart default) or `Q8_0` instead of `Q4_0`. You can also lower `VAICE_HISTORY_TURNS` (e.g. `4`) — small models follow a short history better than a long one.
 - **`llama-server` has no `/v1/realtime` endpoint or returns 404 on WebSocket connect:**
   Your `llama.cpp` installation is older than `b11960` (v0.8.0). Upgrade it (`brew upgrade llama.cpp` or install a newer release from [ggml-org/llama.cpp](https://github.com/ggml-org/llama.cpp)).
 - **`RuntimeError: the model on llama-server ... does not output audio`:**

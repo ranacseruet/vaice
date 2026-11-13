@@ -451,23 +451,63 @@ def models(*modalities):
     return {"data": [{"id": "LFM3", "architecture": {"output_modalities": list(modalities)}}]}
 
 
-def serve_checks(monkeypatch, health, listing=None):
+def serve_checks(monkeypatch, health, listing=None, props=None):
     asked = []
 
     def get(url, timeout):
         asked.append(url)
         if isinstance(health, Exception):
             raise health
-        return health if url.endswith("/health") else listing
+        if url.endswith("/health"):
+            return health
+        if url.endswith("/props"):
+            if isinstance(props, Exception):
+                raise props
+            return props if props is not None else Reply(body={})
+        return listing
 
     monkeypatch.setattr(llamacpp.requests, "get", get)
     return asked
+
+
+def props_with(temperature=None):
+    params = {} if temperature is None else {"temperature": temperature}
+    return Reply(body={"default_generation_settings": {"params": params}})
 
 
 def test_a_server_with_an_audio_model_passes(monkeypatch):
     asked = serve_checks(monkeypatch, Reply(), Reply(body=models("text", "audio")))
     check_server("http://h:1")
     assert asked[:2] == ["http://h:1/health", "http://h:1/v1/models"]
+
+
+def test_a_text_temperature_above_zero_is_a_warning(monkeypatch, caplog):
+    serve_checks(monkeypatch, Reply(), Reply(body=models("text", "audio")), props_with(0.8))
+    with caplog.at_level(logging.WARNING, logger="vaice.responders.llamacpp"):
+        check_server("http://h:1")
+    assert "temperature 0.8" in caplog.text
+    assert "--temp 0" in caplog.text
+
+
+def test_a_greedy_server_gets_no_temperature_warning(monkeypatch, caplog):
+    serve_checks(monkeypatch, Reply(), Reply(body=models("text", "audio")), props_with(0))
+    with caplog.at_level(logging.WARNING, logger="vaice.responders.llamacpp"):
+        check_server("http://h:1")
+    assert "temperature" not in caplog.text
+
+
+def test_a_props_response_without_params_gets_no_temperature_warning(monkeypatch, caplog):
+    serve_checks(monkeypatch, Reply(), Reply(body=models("text", "audio")), props_with(None))
+    with caplog.at_level(logging.WARNING, logger="vaice.responders.llamacpp"):
+        check_server("http://h:1")
+    assert "temperature" not in caplog.text
+
+
+def test_a_failing_props_check_is_not_fatal(monkeypatch, caplog):
+    serve_checks(monkeypatch, Reply(), Reply(body=models("text", "audio")),
+                 props=requests.ConnectionError("refused"))
+    check_server("http://h:1")  # must not raise
+    assert "temperature" not in caplog.text
 
 
 def test_a_model_that_cannot_speak_is_an_error_naming_it(monkeypatch):
