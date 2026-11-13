@@ -9,6 +9,8 @@ from fastrtc import ReplyOnPause
 from fastrtc.pause_detection.silero import SileroVadOptions
 from fastrtc.utils import split_output
 
+from vaice import config
+
 log = logging.getLogger(__name__)
 
 # How long an idle emit() waits for the pause event. fastrtc calls emit() in a tight loop while
@@ -22,11 +24,12 @@ IDLE_WAIT_SECONDS = 0.02
 # 600 ms chunks (AlgoOptions.audio_chunk_duration=0.6), so Silero never closes a triggered segment
 # inside a chunk and counts trailing silence as speech — inflating a 180 ms noise into 600 ms of
 # speech. Closing segments after 150 ms of silence with 30 ms padding and a 0.6 probability
-# threshold rejects brief noises while keeping normal speech detection intact.
+# threshold rejects brief noises while keeping normal speech detection intact. All three are
+# env-tunable (VAICE_VAD_THRESHOLD, VAICE_VAD_MIN_SILENCE_MS, VAICE_VAD_SPEECH_PAD_MS).
 DEFAULT_VAD_OPTIONS = SileroVadOptions(
-    threshold=0.6,
-    min_silence_duration_ms=150,
-    speech_pad_ms=30,
+    threshold=config.VAD_THRESHOLD,
+    min_silence_duration_ms=config.VAD_MIN_SILENCE_MS,
+    speech_pad_ms=config.VAD_SPEECH_PAD_MS,
 )
 # Tail of the last pre-speech chunk kept and prepended when `started_talking` flips to True, so an
 # utterance that begins in the last ~250 ms of a 600 ms VAD chunk does not lose its opening words.

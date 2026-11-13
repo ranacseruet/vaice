@@ -19,6 +19,17 @@ def _number(name: str, *, default: str, kind: type[int] | type[float]) -> int | 
         raise SystemExit(f"vaice: {name} must be a number ({kind.__name__}), got {raw!r}") from None
 
 
+def _flag(name: str, *, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    if raw.lower() in ("1", "true", "yes", "on"):
+        return True
+    if raw.lower() in ("0", "false", "no", "off"):
+        return False
+    raise SystemExit(f"vaice: {name} must be a boolean (1/true/yes/on or 0/false/no/off), got {raw!r}")
+
+
 def server_base(url: str) -> str:
     """scheme://host:port of `url`: any path suffix is dropped. Raises ValueError if there is no host."""
     parts = urlsplit(url if "://" in url else f"http://{url}")
@@ -57,3 +68,18 @@ PORT = _number("VAICE_PORT", default="7860", kind=int)
 DATA_DIR = Path(os.getenv("VAICE_DATA_DIR", "~/.vaice")).expanduser()
 CONVERSATION_FILE = DATA_DIR / "conversation.json"
 HISTORY_TURNS = _number("VAICE_HISTORY_TURNS", default="10", kind=int)
+
+# fastrtc's Silero VAD: what counts as speech, and when an utterance ends. A barge-in fires when
+# the interrupting sound ends, so the threshold decides what can interrupt a playing reply —
+# raise it if room noise or speaker feedback cuts replies short. The min-silence gap delays both
+# the reply start and interrupts; the speech pad pads detected speech on both sides.
+VAD_THRESHOLD = _number("VAICE_VAD_THRESHOLD", default="0.6", kind=float)
+VAD_MIN_SILENCE_MS = _number("VAICE_VAD_MIN_SILENCE_MS", default="150", kind=int)
+VAD_SPEECH_PAD_MS = _number("VAICE_VAD_SPEECH_PAD_MS", default="30", kind=int)
+if not 0 < VAD_THRESHOLD < 1:
+    raise SystemExit(f"vaice: VAICE_VAD_THRESHOLD must be between 0 and 1 (exclusive), got {VAD_THRESHOLD}")
+if VAD_MIN_SILENCE_MS < 0 or VAD_SPEECH_PAD_MS < 0:
+    raise SystemExit("vaice: VAICE_VAD_MIN_SILENCE_MS and VAICE_VAD_SPEECH_PAD_MS must be >= 0")
+
+# Whether speech can interrupt a playing reply at all. Off = a reply always runs to the end.
+CAN_INTERRUPT = _flag("VAICE_CAN_INTERRUPT", default=True)

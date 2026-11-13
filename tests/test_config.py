@@ -61,10 +61,29 @@ def test_a_bad_server_url_names_the_variable(monkeypatch):
         config._server_url("VAICE_LLAMACPP_URL", default="http://localhost:8001")
 
 
+def test_a_bad_flag_is_a_clean_error_not_a_traceback(monkeypatch):
+    monkeypatch.setenv("VAICE_CAN_INTERRUPT", "maybe")
+    with pytest.raises(SystemExit, match="VAICE_CAN_INTERRUPT must be a boolean"):
+        config._flag("VAICE_CAN_INTERRUPT", default=True)
+
+
+def test_flag_default_and_override(monkeypatch):
+    monkeypatch.delenv("VAICE_CAN_INTERRUPT", raising=False)
+    assert config._flag("VAICE_CAN_INTERRUPT", default=True) is True
+    for raw in ("0", "false", "No", "off"):
+        monkeypatch.setenv("VAICE_CAN_INTERRUPT", raw)
+        assert config._flag("VAICE_CAN_INTERRUPT", default=True) is False
+    for raw in ("1", "true", "YES", "on"):
+        monkeypatch.setenv("VAICE_CAN_INTERRUPT", raw)
+        assert config._flag("VAICE_CAN_INTERRUPT", default=True) is True
+
+
 def test_the_settings_are_read_from_the_environment_at_import(monkeypatch):
     monkeypatch.setenv("VAICE_LLAMACPP_URL", "http://box:9000/v1")
     monkeypatch.setenv("VAICE_LLAMACPP_PROMPT", "custom prompt")
     monkeypatch.setenv("VAICE_LLAMACPP_TIMEOUT", "7")
+    monkeypatch.setenv("VAICE_VAD_THRESHOLD", "0.8")
+    monkeypatch.setenv("VAICE_CAN_INTERRUPT", "0")
     try:
         reloaded = importlib.reload(config)
         assert (reloaded.LLAMACPP_URL, reloaded.LLAMACPP_PROMPT, reloaded.LLAMACPP_TIMEOUT) == (
@@ -72,6 +91,17 @@ def test_the_settings_are_read_from_the_environment_at_import(monkeypatch):
             "custom prompt",
             7.0,
         )
+        assert (reloaded.VAD_THRESHOLD, reloaded.CAN_INTERRUPT) == (0.8, False)
+    finally:
+        monkeypatch.undo()
+        importlib.reload(config)
+
+
+def test_an_out_of_range_vad_threshold_is_a_clean_error(monkeypatch):
+    monkeypatch.setenv("VAICE_VAD_THRESHOLD", "5")
+    try:
+        with pytest.raises(SystemExit, match="VAICE_VAD_THRESHOLD must be between 0 and 1"):
+            importlib.reload(config)
     finally:
         monkeypatch.undo()
         importlib.reload(config)

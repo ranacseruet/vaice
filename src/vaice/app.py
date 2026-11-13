@@ -102,7 +102,7 @@ def make_handler(responder: Responder, conversation: Conversation):
 def build_stream(responder: Responder, conversation: Conversation) -> Stream:
     chatbot = gr.Chatbot(type="messages", label="Conversation", height=CHATBOT_HEIGHT, allow_tags=False)
     stream = Stream(
-        handler=InterruptSafeReplyOnPause(make_handler(responder, conversation)),
+        handler=InterruptSafeReplyOnPause(make_handler(responder, conversation), can_interrupt=config.CAN_INTERRUPT),
         modality="audio",
         mode="send-receive",
         additional_outputs=[chatbot],

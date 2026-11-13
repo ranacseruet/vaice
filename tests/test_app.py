@@ -1,4 +1,5 @@
 import argparse
+import importlib
 import itertools
 import logging
 import signal
@@ -9,7 +10,7 @@ import pytest
 from fake_realtime import pcm
 from fastrtc import AdditionalOutputs
 
-from vaice import app, lifecycle
+from vaice import app, config, lifecycle
 from vaice import conversation as conv
 from vaice.app import CHATBOT_HEIGHT, UI_TITLE, VIEW_REFRESH_SECONDS, build_stream, make_handler, parse_args
 from vaice.conversation import Conversation
@@ -305,6 +306,20 @@ def test_the_stream_drops_the_chunk_a_barge_in_leaves_in_flight():
 
     assert isinstance(stream.event_handler, InterruptSafeReplyOnPause)
     assert isinstance(stream.event_handler.copy(), InterruptSafeReplyOnPause)  # fastrtc copies it per connection
+
+
+def test_the_stream_wires_can_interrupt_from_the_config(monkeypatch):
+    stream = build_stream(FakeResponder(), Conversation())
+    assert stream.event_handler.can_interrupt is config.CAN_INTERRUPT  # default: on
+
+    monkeypatch.setenv("VAICE_CAN_INTERRUPT", "0")
+    importlib.reload(config)
+    try:
+        stream = build_stream(FakeResponder(), Conversation())
+        assert stream.event_handler.can_interrupt is False
+    finally:
+        monkeypatch.undo()
+        importlib.reload(config)
 
 
 def test_the_reset_button_silences_a_playing_reply(tmp_path):
