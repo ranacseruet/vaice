@@ -141,6 +141,7 @@ model improvises a shell command, which is one more reason to keep that tool out
 At startup, `vaice` checks `llama-server`:
 - An unreachable or still-loading server (HTTP 503) logs a warning and starts the UI anyway, so the server can finish loading before your first question.
 - A reachable server whose model does not advertise audio output is rejected immediately with an actionable error.
+- A reachable server whose HTTP endpoints answer but which does not route the `/v1/realtime` WebSocket (an older llama.cpp, a proxy in front of it) is rejected at startup too: the check opens the realtime endpoint once and fails with an actionable message, instead of the first question dying after a long stall. A momentary connection failure only warns — the server may just be busy.
 - Replies are capped at `VAICE_LLAMACPP_MAX_OUTPUT_TOKENS` (default 1024 — the model card's own voice-chat example uses 1024; text and audio frames count together, and the LFM3-Audio codec emits 12 tokens per 80 ms of speech); truncation is logged as a warning.
 - **Ctrl+C** stops the app cleanly: any reply in flight is abandoned (`the app is stopping; the reply is abandoned`) and the process exits within ~1 s when idle or ~5–6 s when a browser is connected mid-reply, even if the server never answers. Finished turns remain on disk.
 

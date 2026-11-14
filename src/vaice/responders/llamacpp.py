@@ -8,7 +8,7 @@ import time
 from collections.abc import Callable, Iterator, Sequence
 
 import requests
-from websockets.exceptions import ConnectionClosed, WebSocketException
+from websockets.exceptions import ConnectionClosed, InvalidStatus, WebSocketException
 from websockets.sync.client import ClientConnection, connect
 
 from vaice import config, lifecycle
@@ -520,4 +520,29 @@ def check_server(url: str = config.LLAMACPP_URL) -> None:
             f"the model on llama-server at {url} ({', '.join(names) or 'none listed'}) does not output audio; "
             "the llamacpp backend needs an audio-output model such as LiquidAI/LFM3-Audio-2B-GGUF"
         )
+    _probe_realtime(url, unavailable)
     _warn_text_temperature(url)
+
+
+def _probe_realtime(url: str, unavailable: Callable[[str], None]) -> None:
+    """Open the /v1/realtime WebSocket once, so a server without the endpoint fails at startup.
+
+    The HTTP checks can all pass on a server that does not route /v1/realtime (an older
+    llama.cpp, a proxy in front of it); without this probe that surfaces only at the first
+    question, as a cannot-open error after a full open-timeout stall. A rejected handshake is
+    permanent (no wait fixes a missing endpoint) and raises; a connection-level failure is
+    transient (the server may be momentarily busy) and only warns, like the health check.
+    """
+    ws_url = f"{url.replace('http', 'ws', 1)}/v1/realtime"  # http→ws, https→wss
+    try:
+        connection = connect(ws_url, open_timeout=CHECK_TIMEOUT, close_timeout=CLOSE_TIMEOUT, max_size=None)
+    except InvalidStatus as exc:
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+        raise RuntimeError(
+            f"llama-server at {url} does not serve {ws_url} (handshake returned {status}); "
+            "the llamacpp backend needs a server with the realtime endpoint"
+        ) from exc
+    except (WebSocketException, OSError, TimeoutError) as exc:
+        unavailable(f"the realtime endpoint at {ws_url} did not accept a connection ({type(exc).__name__}: {exc})")
+        return
+    connection.close()
