@@ -148,17 +148,17 @@ def main() -> None:
     try:
         check_server()
         tools: list[dict] = []
-        if config.LLAMACPP_TOOLS is not None:
+        if config.LLAMACPP_TOOLS:
             try:
-                tools = fetch_tools(config.LLAMACPP_URL, config.LLAMACPP_TOOLS)
+                tools = fetch_tools(config.LLAMACPP_URL)
             except requests.RequestException as exc:
                 log.warning("tools requested, but llama-server's /tools is unavailable (%s); continuing without", exc)
             if tools:
                 log.info("tools enabled: %s", ", ".join(str(tool.get("name")) for tool in tools))
             else:
                 log.warning(
-                    "tools requested (VAICE_LLAMACPP_TOOLS), but llama-server exposes none; start it with --tools "
-                    "(see README)"
+                    "tools requested (VAICE_LLAMACPP_TOOLS), but llama-server advertises none; start it with "
+                    "--tools (see README)"
                 )
         responder = LlamaCppResponder(tools=tools or None)
         log.info("using llama-server at %s", config.LLAMACPP_URL)

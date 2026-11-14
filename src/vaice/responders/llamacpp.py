@@ -279,22 +279,19 @@ def _check_done(event: dict, samples: int, max_output_tokens: int) -> None:
         log.warning("llama-server's reply had no audio (is the model one with audio output?)")
 
 
-def fetch_tools(url: str, names: list[str], timeout: float = CHECK_TIMEOUT) -> list[dict]:
-    """The built-in tools of llama-server, in the Responses API format `session.update` expects.
+def fetch_tools(url: str, timeout: float = CHECK_TIMEOUT) -> list[dict]:
+    """Every tool `llama-server` advertises, in the Responses API format `session.update` expects.
 
     `GET {url}/tools` returns the chat-completions nesting (`definition.function.name`,
     `.description`, `.parameters`), and the realtime endpoint needs the flat form
-    `{"type": "function", **definition["function"]}`. When `names` is non-empty, only the named
-    tools are kept, in the server's order; otherwise every tool is kept. Connection problems raise
-    `requests.RequestException` — the caller decides what to do about an unavailable server.
+    `{"type": "function", **definition["function"]}`. The set is the server operator's decision
+    (`--tools`): what is advertised here is also what `POST /tools` executes, so vaice does not
+    filter it. Connection problems raise `requests.RequestException` — the caller decides what to
+    do about an unavailable server.
     """
     r = requests.get(f"{url}/tools", timeout=timeout)
     r.raise_for_status()
-    tools = [{"type": "function", **entry["definition"]["function"]} for entry in r.json()]
-    if names:
-        want = set(names)
-        tools = [tool for tool in tools if tool.get("name") in want]
-    return tools
+    return [{"type": "function", **entry["definition"]["function"]} for entry in r.json()]
 
 
 def execute_tool(url: str, timeout: float) -> Callable[[str, str], str]:
@@ -378,18 +375,6 @@ def _instructions(prompt: str, history: Sequence[Message]) -> str:
     return text
 
 
-def _guard_executor(executor: Callable[[str, str], str], allowed: set[str]) -> Callable[[str, str], str]:
-    """Only the advertised tools execute: the model sometimes calls one that was not offered
-    (seen live), and a tool the user excluded must not reach the server."""
-
-    def guarded(name: str, arguments: str) -> str:
-        if name not in allowed:
-            return f"tool {name} is not available"
-        return executor(name, arguments)
-
-    return guarded
-
-
 class LlamaCppResponder:
     """Streams the reply of an audio-output model on llama-server (LFM3-Audio) over /v1/realtime.
 
@@ -415,13 +400,12 @@ class LlamaCppResponder:
         # Text tokens and audio frames count together; the model card's own voice-chat example uses 1024
         self._max_output_tokens = max_output_tokens
         # The server's built-in tools (fetch_tools), declared in session.update and executed through
-        # the server's /tools endpoint; None = no tools, the session.update of before. The executor
-        # only runs the advertised names: a call for an excluded tool is refused, not executed.
+        # the server's /tools endpoint; None = no tools, the session.update of before. The server
+        # decides which tools those are (--tools) and refuses to execute anything it did not
+        # advertise, so the executor passes every call through.
         self._tools = tools or None
         if self._tools and executor is None:
             executor = execute_tool(url, timeout)
-        if self._tools and executor is not None:
-            executor = _guard_executor(executor, {str(tool.get("name")) for tool in self._tools})
         self._executor = executor
 
     def respond(self, audio: AudioFrame, history: Sequence[Message], turn: Turn) -> Iterator[AudioFrame]:
