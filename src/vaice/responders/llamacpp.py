@@ -378,6 +378,19 @@ def _instructions(prompt: str, history: Sequence[Message]) -> str:
     return text
 
 
+def _report_tools(turn: Turn, log: list[dict], reported: int) -> int:
+    """Hand the session thread's new tool events to the turn; returns the advanced cursor.
+
+    The cursor advances by one per event consumed, not to `len(log)`: an event the session thread
+    appends while a previous one is being recorded (recording it saves the conversation) must not
+    be skipped.
+    """
+    while reported < len(log):
+        turn.add_tool_event(**log[reported])
+        reported += 1
+    return reported
+
+
 def _guard_executor(executor: Callable[[str, str], str], allowed: set[str]) -> Callable[[str, str], str]:
     """Only the advertised tools execute: the model sometimes calls one that was not offered
     (seen live), and a tool the user excluded must not reach the server."""
@@ -445,13 +458,6 @@ class LlamaCppResponder:
         ).start()
         handed_out = 0
         reported_tools = 0
-
-        def report_tools() -> None:
-            nonlocal reported_tools
-            for event in tools_log[reported_tools:]:
-                turn.add_tool_event(**event)
-            reported_tools = len(tools_log)
-
         try:
             while True:
                 try:
@@ -463,7 +469,7 @@ class LlamaCppResponder:
                         return
                     if turn.closed.is_set():  # barge-in, or the conversation was reset
                         return
-                    report_tools()
+                    reported_tools = _report_tools(turn, tools_log, reported_tools)
                     continue
                 if item is _DONE:
                     break
@@ -473,14 +479,16 @@ class LlamaCppResponder:
                     return
                 handed_out += len(item[1])
                 turn.set_assistant_text(spoken_part(*progress[0], handed_out))
-                report_tools()
+                reported_tools = _report_tools(turn, tools_log, reported_tools)
                 yield item
             if lifecycle.stopping.is_set():  # the session thread may have noticed first, and stopped for the app
                 log.warning(ABANDONED)
                 return
-            report_tools()  # calls that landed with the last chunk
             turn.set_assistant_text(spoken_part(*progress[0], handed_out))  # all of it, now that it's all out
         finally:
+            # A tool call that executed before a failure (or before a barge-in cut the reply) still
+            # happened: report it, whatever ended the generator
+            _report_tools(turn, tools_log, reported_tools)
             cancelled.set()  # the session thread closes the socket, which cancels the reply on the server
 
 
