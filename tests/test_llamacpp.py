@@ -241,6 +241,7 @@ def test_a_tool_call_is_executed_and_its_result_spoken(realtime):
                           "conversation.item.create", "response.create"]
     assert turn.assistant_text == "Let me check. It is noon."  # the tags are gone, the rounds joined
     assert [len(samples) for _, samples in frames] == [2]  # only the spoken answer has audio
+    assert turn.tool_events == [{"name": "get_info", "arguments": "{}", "output": "os: Darwin"}]
 
 
 def test_a_tool_call_beyond_the_round_cap_ends_the_reply(realtime, caplog):
@@ -253,6 +254,7 @@ def test_a_tool_call_beyond_the_round_cap_ends_the_reply(realtime, caplog):
         assert drive(tool_responder(server, lambda name, args: calls.append(name) or "ok"), turn=turn) == []
 
     assert calls == ["get_info", "get_info"]  # the third call is past MAX_TOOL_ROUNDS and never runs
+    assert [event["name"] for event in turn.tool_events] == ["get_info", "get_info"]
     conn = server.conversation()
     outputs = [e for e in conn.events
                if e["type"] == "conversation.item.create" and e.get("item", {}).get("type") == "function_call_output"]
@@ -274,6 +276,7 @@ def test_a_failing_executor_is_spoken_not_raised(realtime):
                  if e["type"] == "conversation.item.create" and e.get("item", {}).get("type") == "function_call_output"]
     assert output == "tool get_info failed: boom"
     assert turn.assistant_text == "I could not check."
+    assert turn.tool_events == [{"name": "get_info", "arguments": "{}", "output": "tool get_info failed: boom"}]
     assert len(frames) == 1
 
 
@@ -314,6 +317,8 @@ def test_a_call_for_an_unadvertised_tool_is_refused_not_executed(realtime):
                  if e["type"] == "conversation.item.create" and e.get("item", {}).get("type") == "function_call_output"]
     assert output == "tool read_file is not available"
     assert turn.assistant_text == "I could not read that."
+    assert turn.tool_events == [{"name": "read_file", "arguments": '{"path": "secrets"}',
+                                 "output": "tool read_file is not available"}]
     assert len(frames) == 1
 
 

@@ -36,17 +36,17 @@ def _error_text(exc: Exception) -> str:
 
 
 def refresh_view(conversation: Conversation, known: str) -> tuple:
-    """The timer's tick: the chatbot's new view when the conversation changed, silence when not.
+    """The timer's tick: the chatbot's and tool panel's new views when the conversation changed.
 
     The reply can finish before its parallel transcription session reports the transcript, so
     without this the "…" would sit in the chatbot until the next exchange or a page reload. Views
     are compared as JSON so an unchanged transcript is never re-rendered.
     """
-    view = conversation.messages_for_ui()
+    view = (conversation.messages_for_ui(), conversation.tool_activity_for_ui())
     rendered = json.dumps(view, ensure_ascii=False)
     if rendered == known:
-        return gr.skip(), known  # gr.skip(): leave the chatbot alone
-    return view, rendered
+        return gr.skip(), gr.skip(), known  # gr.skip(): leave the components alone
+    return view[0], view[1], rendered
 
 
 def make_handler(responder: Responder, conversation: Conversation):
@@ -92,10 +92,10 @@ def make_handler(responder: Responder, conversation: Conversation):
             except Exception:
                 log.exception("[%s] could not show the failure in the chatbot", responder.name)
                 return
-            yield AdditionalOutputs(messages)  # show the error, keep the connection
+            yield AdditionalOutputs(messages)  # show the error, keep the connection; the timer fills the tool panel
             return
         turn.transcribed.wait(UI_TRANSCRIPT_WAIT)
-        yield AdditionalOutputs(conversation.messages_for_ui())
+        yield AdditionalOutputs(conversation.messages_for_ui())  # the timer fills the tool panel within a second
 
     return reply
 
@@ -113,20 +113,25 @@ def build_stream(responder: Responder, conversation: Conversation) -> Stream:
     with stream.ui:
         stream.ui.load(conversation.messages_for_ui, outputs=chatbot)  # show the stored conversation on every page load
         new_conversation = gr.Button("New conversation")
+        # Tool calls and their results, kept out of the conversation: collapsed by default, and the
+        # 1 s timer (below) fills it when a tool round lands
+        with gr.Accordion("Tool activity", open=False):
+            tool_panel = gr.Markdown()
 
-        def reset() -> list:
+        def reset() -> tuple[list, str]:
             for handler in list(getattr(stream, "handlers", {}).values()):  # per-connection handler copies
                 stop_playing_reply(handler)  # silence a reply in flight; its turn is detached below
             conversation.reset()
-            return []
+            return [], ""
 
-        new_conversation.click(reset, outputs=chatbot)
+        new_conversation.click(reset, outputs=[chatbot, tool_panel])
         chatbot.clear(reset)  # the chatbot's own trash icon would otherwise only clear the view
 
         # refresh_view's backstop: catches conversation changes no reply update covered (a late
-        # transcript, a barge-in's trimmed text); seen holds the view it last rendered
+        # transcript, a barge-in's trimmed text, a tool round); seen holds the views it last rendered
         seen = gr.State("")
-        gr.Timer(VIEW_REFRESH_SECONDS).tick(partial(refresh_view, conversation), inputs=[seen], outputs=[chatbot, seen])
+        gr.Timer(VIEW_REFRESH_SECONDS).tick(
+            partial(refresh_view, conversation), inputs=[seen], outputs=[chatbot, tool_panel, seen])
     return stream
 
 

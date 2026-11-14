@@ -180,6 +180,7 @@ def _converse(
     max_output_tokens: int,
     tools: list[dict] | None = None,
     executor: Callable[[str, str], str] | None = None,
+    tools_log: list[dict] | None = None,
 ) -> None:
     """Daemon thread: one realtime session for one reply. Puts (rate, samples) frames, then _DONE, on `out`
     (or the exception that ended it before _DONE) and keeps progress[0] = (reply text, samples received).
@@ -251,6 +252,8 @@ def _converse(
                         if stop():
                             raise _Stopped
                         output = _speech_friendly(executor(call.name, call.arguments))
+                        if tools_log is not None:  # reported to the turn for the UI's tool panel
+                            tools_log.append({"name": call.name, "arguments": call.arguments, "output": output})
                         session.send({"type": "conversation.item.create", "item": {
                             "type": "function_call_output", "call_id": call.call_id, "output": output}})
                     calls = []
@@ -432,14 +435,23 @@ class LlamaCppResponder:
         chunks: queue.Queue = queue.Queue()
         cancelled = threading.Event()
         progress = [("", 0)]  # (reply text, audio samples) received so far; replaced whole by the session thread
+        tools_log: list[dict] = []  # tool calls made so far; drained into the turn by this generator
         threading.Thread(
             target=_converse,
             args=(self._url, self._timeout, _instructions(self._prompt, history), audio, chunks, cancelled, progress,
-                  self._max_output_tokens, self._tools, self._executor),
+                  self._max_output_tokens, self._tools, self._executor, tools_log),
             name="vaice-llamacpp",
             daemon=True,
         ).start()
         handed_out = 0
+        reported_tools = 0
+
+        def report_tools() -> None:
+            nonlocal reported_tools
+            for event in tools_log[reported_tools:]:
+                turn.add_tool_event(**event)
+            reported_tools = len(tools_log)
+
         try:
             while True:
                 try:
@@ -451,6 +463,7 @@ class LlamaCppResponder:
                         return
                     if turn.closed.is_set():  # barge-in, or the conversation was reset
                         return
+                    report_tools()
                     continue
                 if item is _DONE:
                     break
@@ -460,10 +473,12 @@ class LlamaCppResponder:
                     return
                 handed_out += len(item[1])
                 turn.set_assistant_text(spoken_part(*progress[0], handed_out))
+                report_tools()
                 yield item
             if lifecycle.stopping.is_set():  # the session thread may have noticed first, and stopped for the app
                 log.warning(ABANDONED)
                 return
+            report_tools()  # calls that landed with the last chunk
             turn.set_assistant_text(spoken_part(*progress[0], handed_out))  # all of it, now that it's all out
         finally:
             cancelled.set()  # the session thread closes the socket, which cancels the reply on the server

@@ -220,18 +220,17 @@ def test_ui_has_the_transcript_a_reset_button_and_loads_the_stored_conversation(
 
     (chatbot,) = [c for c in config["components"] if c["type"] == "chatbot"]
     (button,) = [c for c in config["components"] if c["type"] == "button"]
-    assert chatbot["props"]["type"] == "messages"
-    assert button["props"]["value"] == "New conversation"
-    triggers = {
-        (d["targets"][0][1], tuple(d["outputs"]))
-        for d in config["dependencies"]
-        if d["targets"][0][1] in ("load", "click")
-    }
-    assert triggers == {("load", (chatbot["id"],)), ("click", (chatbot["id"],))}
+    (accordion,) = [c for c in config["components"] if c["type"] == "accordion"]
+    assert accordion["props"]["label"] == "Tool activity"
+    assert accordion["props"]["open"] is False
+    (click_outputs,) = [tuple(d["outputs"]) for d in config["dependencies"] if d["targets"][0][1] == "click"]
+    assert len(click_outputs) == 2 and chatbot["id"] in click_outputs  # chatbot + tool panel
+    (load_output,) = [tuple(d["outputs"]) for d in config["dependencies"] if d["targets"][0][1] == "load"]
+    assert load_output == (chatbot["id"],)  # a page load fills only the chatbot; the timer fills the panel
+    (click,) = [d for d in config["dependencies"] if d["targets"][0] == (button["id"], "click")]
 
     conversation.start_turn().set_user_text("hello")
-    (click,) = [d for d in config["dependencies"] if d["targets"][0] == (button["id"], "click")]
-    assert stream.ui.fns[click["id"]].fn() == []
+    assert stream.ui.fns[click["id"]].fn() == ([], "")  # the reset clears the chatbot and the tool panel
     assert conversation.messages_for_ui() == []
 
     # the chatbot's trash icon clears the stored conversation too, not just the view
@@ -252,9 +251,11 @@ def test_the_page_identifies_the_llama_server_service():
     config = stream.ui.get_config_file()
 
     title = one_component(config["components"], "html", "the heading")
-    subtitle = one_component(config["components"], "markdown", "the service subtitle")
+    # two markdown components exist now (the tool panel is the other one); the subtitle is fastrtc's
+    subtitles = [c for c in config["components"] if c["type"] == "markdown"
+                 and "llama-server" in str(c["props"].get("value", ""))]
+    assert len(subtitles) == 1
     assert UI_TITLE in title["props"]["value"]
-    assert "llama-server" in subtitle["props"]["value"]
 
 
 def test_the_chatbot_is_taller_and_does_not_render_html_tags():
@@ -277,15 +278,36 @@ def test_a_late_transcript_reaches_the_chatbot_after_the_reply_ran_out():
     (tick,) = [d for d in config["dependencies"] if d["targets"][0] == (ours[0]["id"], "tick")]
     tick_fn = stream.ui.fns[tick["id"]].fn
 
-    view, seen = tick_fn("")  # the State starts blank, so the first tick shows the empty view once
-    assert view == []
+    view, tools, seen = tick_fn("")  # the State starts blank, so the first tick shows the empty view once
+    assert view == [] and tools == ""
     turn = conversation.start_turn()
-    view, seen = tick_fn(seen)  # the question was heard; its transcript has not arrived yet
+    view, tools, seen = tick_fn(seen)  # the question was heard; its transcript has not arrived yet
     assert view == [{"role": "user", "content": "…"}]
     turn.set_user_text("and after the reply?")  # the transcript lands late, past the final update
-    view, seen = tick_fn(seen)
+    view, tools, seen = tick_fn(seen)
     assert view[-1] == {"role": "user", "content": "and after the reply?"}  # the stuck "…" is replaced
     assert tick_fn(seen)[0] == {"__type__": "update"}  # unchanged again: silent
+
+
+def test_a_tool_round_fills_the_collapsed_tool_panel():
+    conversation = Conversation()
+    stream = build_stream(FakeResponder(), conversation)
+    config = stream.ui.get_config_file()
+    ours = [c for c in config["components"] if c["type"] == "timer" and c["props"]["value"] == VIEW_REFRESH_SECONDS]
+    (tick,) = [d for d in config["dependencies"] if d["targets"][0] == (ours[0]["id"], "tick")]
+    tick_fn = stream.ui.fns[tick["id"]].fn
+
+    _, _, seen = tick_fn("")
+    turn = conversation.start_turn()
+    turn.set_user_text("what is this machine?")
+    turn.add_tool_event("get_info", "{}", "os: Darwin")
+    turn.set_assistant_text("It is a Mac.")
+    turn.finish()
+
+    view, tools, seen = tick_fn(seen)
+    assert view[-1] == {"role": "assistant", "content": "It is a Mac."}
+    assert "**get_info** `{}`" in tools and "os: Darwin" in tools
+    assert tick_fn(seen)[0] == {"__type__": "update"}  # unchanged: silent
 
 
 def test_what_you_say_after_new_conversation_is_the_next_turn():

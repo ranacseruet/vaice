@@ -107,11 +107,15 @@ never enable `exec_shell_command` or `write_file` for a voice demo):
 llama-server -hf LiquidAI/LFM3-Audio-2B-GGUF:Q4_K_M --temp 0 --tools get_info,read_file
 ```
 
-then start `vaice` with `VAICE_LLAMACPP_TOOLS=builtin` (or a subset, e.g.
-`VAICE_LLAMACPP_TOOLS=get_info,read_file`). The definitions come from the server's `GET /tools`, are
+then start `vaice` with `VAICE_LLAMACPP_TOOLS=builtin` (every tool the server exposes) or a subset,
+e.g. `VAICE_LLAMACPP_TOOLS=get_info,read_file` (recommended: a named read-only subset — with
+`builtin`, every tool the server exposes is advertised, including `exec_shell_command` when the
+server enables it). The definitions come from the server's `GET /tools`, are
 declared in each realtime `session.update` (with `tool_choice: "required"`), and a spoken question
 like *"What operating system is this?"* makes the model emit a function call; `vaice` executes it
 through the server's `POST /tools` and feeds the result back, and the model speaks the answer.
+A call for a tool outside the configured set is refused (spoken "tool X is not available"), never
+executed.
 
 LFM3-Audio notes from live testing: **tell the model to use the tools** — with the default prompt
 ("Reply naturally and concisely…") the model announces a check and then stops without calling in
@@ -126,6 +130,12 @@ JSON becomes short `key: value` pairs, values are truncated at 40 characters and
 at 120 — enough for the model's first spoken sentence to answer the question, little enough that
 the dictation it appends stays short. Cleaner answers need a model that follows instructions.
 The transcript may also show the raw result and stray tags around a tool round; the audio is clean.
+
+Tool calls and their results are kept **out of the conversation**: the chatbot shows only what was
+said, and each call lands in the collapsed *Tool activity* panel under it (name, arguments, result;
+the last 10 across the conversation). There is no weather tool in llama-server — a question it
+cannot answer with the configured tools is refused (or, with `exec_shell_command` enabled, the
+model improvises a shell command, which is one more reason to keep that tool out).
 
 ### Startup & Shutdown
 At startup, `vaice` checks `llama-server`:
