@@ -236,7 +236,7 @@ def test_a_tool_call_is_executed_and_its_result_spoken(realtime):
     assert conn.session["tool_choice"] == "required"
     outputs = [e["item"] for e in conn.events
                if e["type"] == "conversation.item.create" and e.get("item", {}).get("type") == "function_call_output"]
-    assert outputs == [{"type": "function_call_output", "call_id": "call_9", "output": '{"os": "Darwin"}'}]
+    assert outputs == [{"type": "function_call_output", "call_id": "call_9", "output": "os: Darwin"}]
     assert conn.types == ["session.update", "input_audio_buffer.append", "response.create",
                           "conversation.item.create", "response.create"]
     assert turn.assistant_text == "Let me check. It is noon."  # the tags are gone, the rounds joined
@@ -315,6 +315,15 @@ def test_a_call_for_an_unadvertised_tool_is_refused_not_executed(realtime):
     assert output == "tool read_file is not available"
     assert turn.assistant_text == "I could not read that."
     assert len(frames) == 1
+
+
+def test_a_tool_result_is_compacted_to_what_the_model_can_speak():
+    long_uname = "Darwin mac.lan 25.6.0 " + "x" * 200
+    assert llamacpp._speech_friendly('{"os": "' + long_uname + '", "cwd": "/Users/me/vaice"}') == (
+        "os: " + long_uname[:llamacpp.TOOL_VALUE_CHARS] + "...; cwd: /Users/me/vaice")
+    assert llamacpp._speech_friendly('["a", 2, {"k": "v"}]') == "a; 2; {\"k\": \"v\"}"
+    assert llamacpp._speech_friendly("plain short result") == "plain short result"
+    assert llamacpp._speech_friendly("y" * 1000) == "y" * llamacpp.TOOL_OUTPUT_CHARS + "..."
 
 
 def test_the_default_executor_posts_the_tool_to_the_server(monkeypatch):
