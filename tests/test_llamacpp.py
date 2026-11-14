@@ -335,7 +335,8 @@ def test_a_tool_result_is_compacted_to_what_the_model_can_speak():
 def test_a_tool_call_is_reported_even_when_the_reply_fails_after_it(realtime):
     server = realtime(reply=[[("call", "item_1", "get_info", "call_1", "{}"), ("done",), ("close",)]])
     turn = Turn()
-    with pytest.raises(ConnectionClosedOK):
+    # where the hangup is noticed (the send of the result, or the next receive) decides the exception
+    with pytest.raises((ConnectionClosedOK, RuntimeError)):
         drive(tool_responder(server, lambda name, args: "ok"), turn=turn)
 
     assert [event["name"] for event in turn.tool_events] == ["get_info"]  # the call did happen
