@@ -94,8 +94,32 @@ Precedence: variables already in the environment (e.g. `set -a; source .env; set
 | `VAICE_LLAMACPP_PROMPT` | `Reply naturally and concisely in 1 to 2 spoken sentences.` | Reply instructions; `vaice` prepends `Respond with interleaved text and audio.` |
 | `VAICE_LLAMACPP_TIMEOUT` | `120` | Seconds to open a connection or the longest silence from `llama-server` before a reply fails |
 | `VAICE_LLAMACPP_MAX_OUTPUT_TOKENS` | `1024` | Reply cap sent as the realtime session's `max_output_tokens`; text tokens and audio frames count together. Raise it for longer spoken replies |
+| `VAICE_LLAMACPP_TOOLS` | *(unset)* | Voice access to llama-server's built-in tools (see *Tools* below). Unset = off; `builtin` = every tool the server exposes; a comma-separated list = only those tools |
 
 ## How It Works & Conversation History
+
+### Tools
+`vaice` can speak the answers of llama-server's **built-in tools** through the voice path. Enable the
+tools on the server (read-only subset recommended — they run with the server's own permissions, so
+never enable `exec_shell_command` or `write_file` for a voice demo):
+
+```bash
+llama-server -hf LiquidAI/LFM3-Audio-2B-GGUF:Q4_K_M --temp 0 --tools get_info,read_file
+```
+
+then start `vaice` with `VAICE_LLAMACPP_TOOLS=builtin` (or a subset, e.g.
+`VAICE_LLAMACPP_TOOLS=get_info,read_file`). The definitions come from the server's `GET /tools`, are
+declared in each realtime `session.update` (with `tool_choice: "required"`), and a spoken question
+like *"What operating system is this?"* makes the model emit a function call; `vaice` executes it
+through the server's `POST /tools` and feeds the result back, and the model speaks the answer.
+
+LFM3-Audio notes from live testing: **tell the model to use the tools** — with the default prompt
+("Reply naturally and concisely…") the model announces a check and then stops without calling in
+most runs; a prompt like `Use the available tools to answer questions about this system.` made it
+call and speak the real answer in 4 of 4 runs (vs 1 of 6 with the default). Keep the tool subset
+small (one or two; with `tool_choice: "auto"` it never calls, and with three or more tools it tends
+to answer from its head and get it wrong). The transcript may show the raw tool result and stray
+tags around a tool round, and a tool answer can run long; the audio is clean.
 
 ### Startup & Shutdown
 At startup, `vaice` checks `llama-server`:
