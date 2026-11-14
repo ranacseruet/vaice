@@ -540,7 +540,7 @@ def test_main_installs_the_stop_handler_and_asks_the_app_to_stop_when_the_server
 
     monkeypatch.setattr(app, "parse_args", lambda: argparse.Namespace())
     monkeypatch.setattr(app, "check_server", lambda: startup.append("check"))
-    monkeypatch.setattr(app, "LlamaCppResponder", lambda: startup.append("construct") or FakeResponder())
+    monkeypatch.setattr(app, "LlamaCppResponder", lambda **_: startup.append("construct") or FakeResponder())
     monkeypatch.setattr(app, "build_stream", lambda responder, conversation: FakeStream())
     monkeypatch.setattr(app.config, "CONVERSATION_FILE", tmp_path / "conversation.json")
 

@@ -1,5 +1,6 @@
 """Settings, overridable through environment variables."""
 import os
+import re
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -68,6 +69,31 @@ LLAMACPP_TIMEOUT = _number("VAICE_LLAMACPP_TIMEOUT", default="120", kind=float)
 # together (the LFM3-Audio codec emits 12 tokens per 80 ms of speech). The model card's own
 # voice-chat example uses 1024; llama-server's session default would be "inf".
 LLAMACPP_MAX_OUTPUT_TOKENS = _number("VAICE_LLAMACPP_MAX_OUTPUT_TOKENS", default="1024", kind=int)
+
+
+# The tools `llama-server` makes available to the model in `session.update`: `None` (unset) = no
+# tools, `[]` ("builtin") = every tool the server exposes, and a comma-separated list of names =
+# only those. `fetch_tools` flattens the server's definitions into the format the realtime
+# endpoint needs (see `responders/llamacpp.py`); a subset keeps the model from calling tools the
+# user did not intend it to.
+TOOL_NAME_PATTERN = r"[a-z_][a-z0-9_]*"  # llama-server tool names are lowercase, so they match this
+
+
+def _tools(name: str) -> list[str] | None:
+    raw = os.getenv(name)
+    if raw is None:
+        return None
+    if raw.strip() == "builtin":
+        return []
+    names = [part.strip() for part in raw.split(",")]
+    for part in names:
+        if not part or not re.fullmatch(TOOL_NAME_PATTERN, part):
+            raise SystemExit(f"vaice: {name} must be 'builtin' or a comma-separated list of tool names "
+                             f"matching {TOOL_NAME_PATTERN!r}, got {raw!r}")
+    return names
+
+
+LLAMACPP_TOOLS = _tools("VAICE_LLAMACPP_TOOLS")
 
 PORT = _number("VAICE_PORT", default="7860", kind=int)
 

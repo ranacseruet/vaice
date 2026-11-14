@@ -204,6 +204,144 @@ def test_a_reply_cut_off_by_the_token_limit_is_logged(realtime, caplog):
     assert f"{config.LLAMACPP_MAX_OUTPUT_TOKENS}-token limit" in caplog.text
 
 
+# -- tools
+
+
+TIME_TOOL = {"type": "function", "name": "get_info", "description": "Runtime info.", "parameters": {"type": "object"}}
+
+
+def tool_responder(server, executor):
+    return LlamaCppResponder(server.url, "", tools=[TIME_TOOL], executor=executor)
+
+
+def test_a_tool_call_is_executed_and_its_result_spoken(realtime):
+    server = realtime(
+        reply=[
+            [("text", "Let me check."), ("call", "item_1", "get_info", "call_9", "{}"), ("done",)],
+            [("text", "<answer>It is noon.</answer>"), ("audio", pcm(1, 2)), ("done",)],
+        ],
+    )
+    calls = []
+
+    def executor(name, arguments):
+        calls.append((name, arguments))
+        return '{"os": "Darwin"}'
+
+    turn = Turn()
+    frames = drive(tool_responder(server, executor), turn=turn)
+
+    assert calls == [("get_info", "{}")]
+    conn = server.conversation()
+    assert conn.session["tools"] == [TIME_TOOL]
+    assert conn.session["tool_choice"] == "required"
+    outputs = [e["item"] for e in conn.events
+               if e["type"] == "conversation.item.create" and e.get("item", {}).get("type") == "function_call_output"]
+    assert outputs == [{"type": "function_call_output", "call_id": "call_9", "output": '{"os": "Darwin"}'}]
+    assert conn.types == ["session.update", "input_audio_buffer.append", "response.create",
+                          "conversation.item.create", "response.create"]
+    assert turn.assistant_text == "Let me check. It is noon."  # the tags are gone, the rounds joined
+    assert [len(samples) for _, samples in frames] == [2]  # only the spoken answer has audio
+
+
+def test_a_tool_call_beyond_the_round_cap_ends_the_reply(realtime, caplog):
+    server = realtime(
+        reply=[[("call", f"item_{n}", "get_info", f"call_{n}", "{}"), ("done",)] for n in (1, 2, 3)],
+    )
+    calls = []
+    turn = Turn()
+    with caplog.at_level(logging.INFO, logger="vaice.responders.llamacpp"):
+        assert drive(tool_responder(server, lambda name, args: calls.append(name) or "ok"), turn=turn) == []
+
+    assert calls == ["get_info", "get_info"]  # the third call is past MAX_TOOL_ROUNDS and never runs
+    conn = server.conversation()
+    outputs = [e for e in conn.events
+               if e["type"] == "conversation.item.create" and e.get("item", {}).get("type") == "function_call_output"]
+    assert len(outputs) == 2
+
+
+def test_a_failing_executor_is_spoken_not_raised(realtime):
+    server = realtime(
+        reply=[
+            [("call", "item_1", "get_info", "call_9", "{}"), ("done",)],
+            [("text", "I could not check."), ("audio", pcm(1)), ("done",)],
+        ],
+    )
+    turn = Turn()
+    frames = drive(tool_responder(server, lambda name, args: f"tool {name} failed: boom"), turn=turn)
+
+    conn = server.conversation()
+    (output,) = [e["item"]["output"] for e in conn.events
+                 if e["type"] == "conversation.item.create" and e.get("item", {}).get("type") == "function_call_output"]
+    assert output == "tool get_info failed: boom"
+    assert turn.assistant_text == "I could not check."
+    assert len(frames) == 1
+
+
+def test_a_tool_round_stopped_mid_way_skips_the_rest_and_hangs_up(realtime):
+    server = realtime(reply=[[("call", "item_1", "get_info", "call_1", "{}"),
+                              ("call", "item_2", "get_info", "call_2", "{}"), ("done",)]])
+
+    def executor(name, arguments):
+        lifecycle.request_stop()  # the app is stopping while the results are being fed back
+        return "ok"
+
+    turn = Turn()
+    assert drive(tool_responder(server, executor), turn=turn) == []
+
+    conn = server.conversation()
+    outputs = [e["item"]["call_id"] for e in conn.events
+               if e["type"] == "conversation.item.create" and e.get("item", {}).get("type") == "function_call_output"]
+    assert outputs == ["call_1"]  # the second call noticed the stop and never ran
+    assert conn.closed.wait(3)
+    wait_for_threads_to_end()
+
+
+def test_the_default_executor_posts_the_tool_to_the_server(monkeypatch):
+    posted = []
+
+    def post(url, json=None, timeout=None):
+        posted.append((url, json, timeout))
+        return Reply(body='{"os": "Darwin"}')
+
+    monkeypatch.setattr(llamacpp.requests, "post", post)
+    execute = llamacpp.execute_tool("http://h:1", 7.0)
+    assert execute("get_info", "{}") == '{"os": "Darwin"}'
+    assert posted == [("http://h:1/tools", {"tool": "get_info", "arguments": "{}"}, 7.0)]
+
+    monkeypatch.setattr(llamacpp.requests, "post", lambda *a, **k: (_ for _ in ()).throw(requests.ConnectionError("x")))
+    assert llamacpp.execute_tool("http://h:1", 7.0)("get_info", "{}") == "tool get_info failed: x"
+
+    def bad(url, json=None, timeout=None):
+        return Reply(status=500, body="boom")
+
+    monkeypatch.setattr(llamacpp.requests, "post", bad)
+    assert "HTTP 500" in llamacpp.execute_tool("http://h:1", 7.0)("get_info", "{}")
+
+
+def test_fetch_tools_flattens_and_filters(monkeypatch):
+    listing = [
+        {"tool": "read_file", "definition": {"type": "function", "function": {
+            "name": "read_file", "description": "Reads.", "parameters": {"type": "object"}}}},
+        {"tool": "get_info", "definition": {"type": "function", "function": {
+            "name": "get_info", "description": "Info.", "parameters": {"type": "object"}}}},
+    ]
+    monkeypatch.setattr(llamacpp.requests, "get", lambda url, timeout: Reply(body=listing))
+
+    assert llamacpp.fetch_tools("http://h:1", []) == [
+        {"type": "function", "name": "read_file", "description": "Reads.", "parameters": {"type": "object"}},
+        {"type": "function", "name": "get_info", "description": "Info.", "parameters": {"type": "object"}},
+    ]
+    assert llamacpp.fetch_tools("http://h:1", ["get_info"]) == [
+        {"type": "function", "name": "get_info", "description": "Info.", "parameters": {"type": "object"}},
+    ]
+    assert llamacpp.fetch_tools("http://h:1", ["missing"]) == []
+
+    monkeypatch.setattr(llamacpp.requests, "get", lambda url, timeout: (_ for _ in ()).throw(
+        requests.ConnectionError("refused")))
+    with pytest.raises(requests.ConnectionError):
+        llamacpp.fetch_tools("http://h:1", [])
+
+
 def test_a_normal_reply_logs_no_truncation_warning(realtime, caplog):
     server = realtime(reply=[("audio", pcm(1)), ("done", "completed", config.LLAMACPP_MAX_OUTPUT_TOKENS - 1)])
     with caplog.at_level(logging.WARNING, logger="vaice.responders.llamacpp"):

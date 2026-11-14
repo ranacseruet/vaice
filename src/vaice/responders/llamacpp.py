@@ -26,6 +26,10 @@ POLL_SECONDS = 0.25
 # The close handshake of a socket whose server is busy or gone must not hold a thread for long
 CLOSE_TIMEOUT = 1.0
 CHECK_TIMEOUT = 2  # seconds for the startup HTTP checks
+# The maximum number of tool rounds a reply may make after its first response. A tool round is one
+# response that asked for tools, their execution, and the response that speaks the results; the cap
+# keeps a tool-calling loop from running away with the session (and the mic).
+MAX_TOOL_ROUNDS = 2
 
 ABANDONED = "the app is stopping; the reply is abandoned"
 _DONE = object()
@@ -116,6 +120,23 @@ class _Stopped(Exception):  # control flow inside a session thread, not an error
     """The thread was told to stop while it waited for the server."""
 
 
+class _ToolCall:
+    """A function_call item the model asked for, filled in by the argument deltas."""
+
+    def __init__(self, item_id: str, name: str, call_id: str):
+        self.item_id = item_id
+        self.name = name
+        self.call_id = call_id
+        self.arguments = ""
+
+
+def _strip_tool_tags(delta: str) -> str:
+    """Tool rounds leak the tool-call answer tags into the text deltas; the audio does not."""
+    for tag in ("<answer>", "</answer>"):
+        delta = delta.replace(tag, "")
+    return delta
+
+
 def _converse(
     url: str,
     timeout: float,
@@ -125,6 +146,8 @@ def _converse(
     cancelled: threading.Event,
     progress: list[tuple[str, int]],
     max_output_tokens: int,
+    tools: list[dict] | None = None,
+    executor: Callable[[str, str], str] | None = None,
 ) -> None:
     """Daemon thread: one realtime session for one reply. Puts (rate, samples) frames, then _DONE, on `out`
     (or the exception that ended it before _DONE) and keeps progress[0] = (reply text, samples received).
@@ -143,31 +166,63 @@ def _converse(
         with _open(url, timeout) as ws:
             session = _Session(ws, timeout, stop)
             rate_in, rate_out = session.rates()
-            session.update(
-                {
-                    "instructions": instructions,
-                    "output_modalities": ["text", "audio"],
-                    "max_output_tokens": max_output_tokens,
-                }
-            )
+            update = {
+                "instructions": instructions,
+                "output_modalities": ["text", "audio"],
+                "max_output_tokens": max_output_tokens,
+            }
+            if tools:
+                # "required" is what makes the model follow a tool request through (with "auto" it
+                # announces the check and stops); ordinary questions still answer without a call
+                update["tools"] = tools
+                update["tool_choice"] = "required"
+            session.update(update)
             session.send({"type": "input_audio_buffer.append", "audio": _b64(to_pcm16(audio, rate_in))})
             session.send({"type": "response.create"})
             text: list[str] = []
             samples = 0
+            response_samples = 0
+            calls: list[_ToolCall] = []
+            rounds = 0
             while (event := session.receive()) is not None:
                 kind = event.get("type")
-                if kind == "response.output_text.delta":
-                    text.append(event.get("delta", ""))
+                if kind == "response.output_item.added":
+                    item = event.get("item") or {}
+                    if item.get("type") == "function_call":
+                        calls.append(_ToolCall(str(item.get("id", "")), str(item.get("name", "")),
+                                               str(item.get("call_id", ""))))
+                elif kind == "response.function_call_arguments.delta":
+                    for call in calls:
+                        if call.item_id == event.get("item_id"):
+                            call.arguments += event.get("delta", "")
+                elif kind == "response.output_text.delta":
+                    text.append(_strip_tool_tags(event.get("delta", "")))
                     progress[0] = ("".join(text), samples)
                 elif kind == "response.output_audio.delta":
                     frame = from_pcm16(base64.b64decode(event.get("delta", "")))
                     if len(frame):
                         samples += len(frame)
+                        response_samples += len(frame)
                         progress[0] = ("".join(text), samples)  # before the frame is handed over
                         out.put((rate_out, frame))
                 elif kind == "response.done":
-                    _check_done(event, samples, max_output_tokens)
-                    break
+                    _check_done(event, response_samples, max_output_tokens)
+                    response_samples = 0
+                    if not calls or executor is None or rounds >= MAX_TOOL_ROUNDS:
+                        break
+                    # the model asked for tools: run them, feed the results back, and let it speak them
+                    rounds += 1
+                    if text and not "".join(text).endswith(" "):
+                        text.append(" ")  # keep the announcement and the spoken answer apart
+                    for call in calls:
+                        log.info("llamacpp tool call %s(%s)", call.name, call.arguments)
+                        if stop():
+                            raise _Stopped
+                        output = executor(call.name, call.arguments)
+                        session.send({"type": "conversation.item.create", "item": {
+                            "type": "function_call_output", "call_id": call.call_id, "output": output}})
+                    calls = []
+                    session.send({"type": "response.create"})
     except _Stopped:
         pass
     except BaseException as exc:  # noqa: BLE001 - re-raised in the consumer, which must see any failure
@@ -187,6 +242,45 @@ def _check_done(event: dict, samples: int, max_output_tokens: int) -> None:
         log.warning("llamacpp reply hit the %d-token limit and was cut off", max_output_tokens)
     if not samples:
         log.warning("llama-server's reply had no audio (is the model one with audio output?)")
+
+
+def fetch_tools(url: str, names: list[str], timeout: float = CHECK_TIMEOUT) -> list[dict]:
+    """The built-in tools of llama-server, in the Responses API format `session.update` expects.
+
+    `GET {url}/tools` returns the chat-completions nesting (`definition.function.name`,
+    `.description`, `.parameters`), and the realtime endpoint needs the flat form
+    `{"type": "function", **definition["function"]}`. When `names` is non-empty, only the named
+    tools are kept, in the server's order; otherwise every tool is kept. Connection problems raise
+    `requests.RequestException` — the caller decides what to do about an unavailable server.
+    """
+    r = requests.get(f"{url}/tools", timeout=timeout)
+    r.raise_for_status()
+    tools = [{"type": "function", **entry["definition"]["function"]} for entry in r.json()]
+    if names:
+        want = set(names)
+        tools = [tool for tool in tools if tool.get("name") in want]
+    return tools
+
+
+def execute_tool(url: str, timeout: float) -> Callable[[str, str], str]:
+    """What a `function_call` is worth: `POST {url}/tools` with `{"tool": name, "arguments": json}`.
+
+    The result goes back as the function_call_output, so the model can speak it. A failure must be
+    spoken too, not raised: this runs on the session thread, and the result (not the traceback) is
+    what the model sees and what `app.py` shows in the UI. A closure over `url` and `timeout`,
+    mirroring how `_open` builds the websocket.
+    """
+
+    def call(name: str, arguments: str) -> str:
+        try:
+            r = requests.post(f"{url}/tools", json={"tool": name, "arguments": arguments}, timeout=timeout)
+        except requests.RequestException as exc:
+            return f"tool {name} failed: {exc}"
+        if not r.ok:
+            return f"tool {name} failed: HTTP {r.status_code}: {r.text[:200]}"
+        return str(r.text)
+
+    return call
 
 
 def _b64(pcm: bytes) -> str:
@@ -265,12 +359,18 @@ class LlamaCppResponder:
         prompt: str = config.LLAMACPP_PROMPT,
         timeout: float = config.LLAMACPP_TIMEOUT,
         max_output_tokens: int = config.LLAMACPP_MAX_OUTPUT_TOKENS,
+        tools: list[dict] | None = None,
+        executor: Callable[[str, str], str] | None = None,
     ):
         self._url = url
         self._prompt = prompt
         self._timeout = timeout
         # Text tokens and audio frames count together; the model card's own voice-chat example uses 1024
         self._max_output_tokens = max_output_tokens
+        # The server's built-in tools (fetch_tools), declared in session.update and executed through
+        # the server's /tools endpoint; None = no tools, the session.update of before
+        self._tools = tools or None
+        self._executor = executor if executor is not None else (execute_tool(url, timeout) if self._tools else None)
 
     def respond(self, audio: AudioFrame, history: Sequence[Message], turn: Turn) -> Iterator[AudioFrame]:
         # First, so that nothing the reply does can keep the question from being transcribed
@@ -286,7 +386,7 @@ class LlamaCppResponder:
         threading.Thread(
             target=_converse,
             args=(self._url, self._timeout, _instructions(self._prompt, history), audio, chunks, cancelled, progress,
-                  self._max_output_tokens),
+                  self._max_output_tokens, self._tools, self._executor),
             name="vaice-llamacpp",
             daemon=True,
         ).start()

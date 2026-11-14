@@ -7,6 +7,7 @@ from functools import partial
 
 import gradio as gr
 import numpy as np
+import requests
 from fastrtc import AdditionalOutputs, Stream
 
 from vaice import config
@@ -14,7 +15,7 @@ from vaice.conversation import Conversation, Turn
 from vaice.interruptible import InterruptSafeReplyOnPause, stop_playing_reply
 from vaice.lifecycle import install_stop_handler, request_stop
 from vaice.responders.base import Responder
-from vaice.responders.llamacpp import LlamaCppResponder, check_server
+from vaice.responders.llamacpp import LlamaCppResponder, check_server, fetch_tools
 
 log = logging.getLogger(__name__)
 
@@ -141,7 +142,20 @@ def main() -> None:
     install_stop_handler()  # Ctrl+C: the responders give up, gradio closes the server
     try:
         check_server()
-        responder = LlamaCppResponder()
+        tools: list[dict] = []
+        if config.LLAMACPP_TOOLS is not None:
+            try:
+                tools = fetch_tools(config.LLAMACPP_URL, config.LLAMACPP_TOOLS)
+            except requests.RequestException as exc:
+                log.warning("tools requested, but llama-server's /tools is unavailable (%s); continuing without", exc)
+            if tools:
+                log.info("tools enabled: %s", ", ".join(str(tool.get("name")) for tool in tools))
+            else:
+                log.warning(
+                    "tools requested (VAICE_LLAMACPP_TOOLS), but llama-server exposes none; start it with --tools "
+                    "(see README)"
+                )
+        responder = LlamaCppResponder(tools=tools or None)
         log.info("using llama-server at %s", config.LLAMACPP_URL)
 
         conversation = Conversation(config.CONVERSATION_FILE, window=config.HISTORY_TURNS)

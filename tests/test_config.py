@@ -67,6 +67,28 @@ def test_a_bad_flag_is_a_clean_error_not_a_traceback(monkeypatch):
         config._flag("VAICE_CAN_INTERRUPT", default=True)
 
 
+def test_tools_are_off_when_the_variable_is_unset(monkeypatch):
+    monkeypatch.delenv("VAICE_LLAMACPP_TOOLS", raising=False)
+    assert config._tools("VAICE_LLAMACPP_TOOLS") is None
+
+
+def test_tools_builtin_means_every_tool_the_server_exposes(monkeypatch):
+    monkeypatch.setenv("VAICE_LLAMACPP_TOOLS", "builtin")
+    assert config._tools("VAICE_LLAMACPP_TOOLS") == []
+
+
+def test_a_tool_list_is_parsed_and_trimmed(monkeypatch):
+    monkeypatch.setenv("VAICE_LLAMACPP_TOOLS", "get_info, read_file")
+    assert config._tools("VAICE_LLAMACPP_TOOLS") == ["get_info", "read_file"]
+
+
+def test_a_bad_tool_list_is_a_clean_error_not_a_traceback(monkeypatch):
+    for raw in ("get info", "Get_Info", "read_file,,get_info", ""):
+        monkeypatch.setenv("VAICE_LLAMACPP_TOOLS", raw)
+        with pytest.raises(SystemExit, match="VAICE_LLAMACPP_TOOLS"):
+            config._tools("VAICE_LLAMACPP_TOOLS")
+
+
 def test_flag_default_and_override(monkeypatch):
     monkeypatch.delenv("VAICE_CAN_INTERRUPT", raising=False)
     assert config._flag("VAICE_CAN_INTERRUPT", default=True) is True

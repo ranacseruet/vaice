@@ -46,6 +46,8 @@ class FakeRealtime:
 
     ("text", str)           response.output_text.delta
     ("audio", int16 array)  response.output_audio.delta
+    ("call", item_id, name, call_id, arguments)
+                            a function_call item of the response, with its arguments delta
     ("done", status, tokens) response.done (status "completed", tokens 10 unless given)
     ("transcript", str)     the transcription's completed event
     ("error", message)      an error event
@@ -55,13 +57,16 @@ class FakeRealtime:
     """
 
     def __init__(self, reply=None, transcription=None, rates=(16000, 24000)):
-        self.reply = reply if reply is not None else [("text", "Hi."), ("audio", pcm(1, 2)), ("done",)]
+        scripts = reply if reply is not None else [("text", "Hi."), ("audio", pcm(1, 2)), ("done",)]
+        # one script per response.create (a list of scripts) when the reply makes tool calls
+        self.reply_scripts = list(scripts) if scripts and isinstance(scripts[0], list) else [scripts]
         self.transcription = transcription if transcription is not None else [("transcript", "hello there")]
         self.rates = rates
         self.connections: list[Connection] = []
         self._sockets: list = []
         self._server = None
         self._thread = None
+        self._replies_played = 0
 
     # -- lifecycle
 
@@ -129,7 +134,9 @@ class FakeRealtime:
                 elif kind == "input_audio_buffer.append":
                     conn.audio += base64.b64decode(event["audio"])
                 elif kind == "response.create":
-                    self._play(ws, conn, self.reply)
+                    script = self.reply_scripts[min(self._replies_played, len(self.reply_scripts) - 1)]
+                    self._replies_played += 1
+                    self._play(ws, conn, script)
                 elif kind == "input_audio_buffer.commit":
                     self._play(ws, conn, self.transcription)
         except ConnectionClosed:
@@ -144,6 +151,12 @@ class FakeRealtime:
                 ws.send(json.dumps({"type": "response.output_text.delta", "delta": step[1]}))
             elif kind == "audio":
                 ws.send(json.dumps({"type": "response.output_audio.delta", "delta": b64(step[1])}))
+            elif kind == "call":
+                _, item_id, name, call_id, arguments = step
+                ws.send(json.dumps({"type": "response.output_item.added", "item": {
+                    "type": "function_call", "id": item_id, "name": name, "call_id": call_id}}))
+                ws.send(json.dumps({"type": "response.function_call_arguments.delta",
+                                    "item_id": item_id, "delta": arguments}))
             elif kind == "done":
                 status = step[1] if len(step) > 1 else "completed"
                 tokens = step[2] if len(step) > 2 else 10
