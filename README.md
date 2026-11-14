@@ -94,7 +94,7 @@ Precedence: variables already in the environment (e.g. `set -a; source .env; set
 | `VAICE_LLAMACPP_PROMPT` | `Reply naturally and concisely in 1 to 2 spoken sentences.` | Reply instructions; `vaice` prepends `Respond with interleaved text and audio.` |
 | `VAICE_LLAMACPP_TIMEOUT` | `120` | Seconds to open a connection or the longest silence from `llama-server` before a reply fails |
 | `VAICE_LLAMACPP_MAX_OUTPUT_TOKENS` | `1024` | Reply cap sent as the realtime session's `max_output_tokens`; text tokens and audio frames count together. Raise it for longer spoken replies |
-| `VAICE_LLAMACPP_TOOLS` | *(unset)* | Voice access to llama-server's built-in tools (see *Tools* below). Unset = off; `builtin` = every tool the server exposes; a comma-separated list = only those tools |
+| `VAICE_LLAMACPP_TOOLS` | *(unset)* | Voice access to llama-server's built-in tools (see *Tools* below). Unset = off; `builtin` = every tool the server advertises — the set is chosen on the server with `--tools` |
 
 ## How It Works & Conversation History
 
@@ -107,15 +107,15 @@ never enable `exec_shell_command` or `write_file` for a voice demo):
 llama-server -hf LiquidAI/LFM3-Audio-2B-GGUF:Q4_K_M --temp 0 --tools get_info,read_file
 ```
 
-then start `vaice` with `VAICE_LLAMACPP_TOOLS=builtin` (every tool the server exposes) or a subset,
-e.g. `VAICE_LLAMACPP_TOOLS=get_info,read_file` (recommended: a named read-only subset — with
-`builtin`, every tool the server exposes is advertised, including `exec_shell_command` when the
-server enables it). The definitions come from the server's `GET /tools`, are
-declared in each realtime `session.update` (with `tool_choice: "required"`), and a spoken question
-like *"What operating system is this?"* makes the model emit a function call; `vaice` executes it
-through the server's `POST /tools` and feeds the result back, and the model speaks the answer.
-A call for a tool outside the configured set is refused (spoken "tool X is not available"), never
-executed.
+then start `vaice` with `VAICE_LLAMACPP_TOOLS=builtin`. vaice takes **every tool the server
+advertises** — the set of tools is the server operator's decision, made once on the
+`llama-server` command line (`--tools get_info,read_file`), and it is also the gate: the server
+refuses to execute anything it did not advertise. The definitions come from the server's
+`GET /tools`, are declared in each realtime `session.update` (with `tool_choice: "required"`), and
+a spoken question like *"What operating system is this?"* makes the model emit a function call;
+`vaice` executes it through the server's `POST /tools` and feeds the result back, and the model
+speaks the answer. A call for a tool the server did not advertise is refused by the server and
+spoken as a failure.
 
 LFM3-Audio notes from live testing: **tell the model to use the tools** — with the default prompt
 ("Reply naturally and concisely…") the model announces a check and then stops without calling in

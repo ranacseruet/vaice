@@ -300,26 +300,25 @@ def test_a_tool_round_stopped_mid_way_skips_the_rest_and_hangs_up(realtime):
     wait_for_threads_to_end()
 
 
-def test_a_call_for_an_unadvertised_tool_is_refused_not_executed(realtime):
+def test_a_call_for_an_unadvertised_tool_reaches_the_server_which_refuses_it(realtime, monkeypatch):
+    """The server's --tools is the gate: vaice passes every call through, and the server refuses
+    what it did not advertise (404, live-verified)."""
     server = realtime(
         reply=[
             [("call", "item_1", "read_file", "call_9", '{"path": "secrets"}'), ("done",)],
             [("text", "I could not read that."), ("audio", pcm(1)), ("done",)],
         ],
     )
-    executed = []
+    monkeypatch.setattr(llamacpp.requests, "post", lambda *a, **k: Reply(status=404, body="not found"))
     turn = Turn()
-    frames = drive(LlamaCppResponder(server.url, "", tools=[TIME_TOOL],
-                                     executor=lambda name, args: executed.append(name) or "ok"), turn=turn)
+    frames = drive(tool_responder(server, llamacpp.execute_tool("http://h:1", 7.0)), turn=turn)
 
-    assert executed == []  # read_file was never advertised: the model imagined it
     conn = server.conversation()
     (output,) = [e["item"]["output"] for e in conn.events
                  if e["type"] == "conversation.item.create" and e.get("item", {}).get("type") == "function_call_output"]
-    assert output == "tool read_file is not available"
+    assert "HTTP 404" in output
     assert turn.assistant_text == "I could not read that."
-    assert turn.tool_events == [{"name": "read_file", "arguments": '{"path": "secrets"}',
-                                 "output": "tool read_file is not available"}]
+    assert turn.tool_events[0]["name"] == "read_file"  # the attempt is shown in the tool panel too
     assert len(frames) == 1
 
 
@@ -390,7 +389,7 @@ def test_the_default_executor_posts_the_tool_to_the_server(monkeypatch):
     assert "HTTP 500" in llamacpp.execute_tool("http://h:1", 7.0)("get_info", "{}")
 
 
-def test_fetch_tools_flattens_and_filters(monkeypatch):
+def test_fetch_tools_flattens_every_advertised_tool(monkeypatch):
     listing = [
         {"tool": "read_file", "definition": {"type": "function", "function": {
             "name": "read_file", "description": "Reads.", "parameters": {"type": "object"}}}},
@@ -399,19 +398,15 @@ def test_fetch_tools_flattens_and_filters(monkeypatch):
     ]
     monkeypatch.setattr(llamacpp.requests, "get", lambda url, timeout: Reply(body=listing))
 
-    assert llamacpp.fetch_tools("http://h:1", []) == [
+    assert llamacpp.fetch_tools("http://h:1") == [
         {"type": "function", "name": "read_file", "description": "Reads.", "parameters": {"type": "object"}},
         {"type": "function", "name": "get_info", "description": "Info.", "parameters": {"type": "object"}},
     ]
-    assert llamacpp.fetch_tools("http://h:1", ["get_info"]) == [
-        {"type": "function", "name": "get_info", "description": "Info.", "parameters": {"type": "object"}},
-    ]
-    assert llamacpp.fetch_tools("http://h:1", ["missing"]) == []
 
     monkeypatch.setattr(llamacpp.requests, "get", lambda url, timeout: (_ for _ in ()).throw(
         requests.ConnectionError("refused")))
     with pytest.raises(requests.ConnectionError):
-        llamacpp.fetch_tools("http://h:1", [])
+        llamacpp.fetch_tools("http://h:1")
 
 
 def test_a_normal_reply_logs_no_truncation_warning(realtime, caplog):

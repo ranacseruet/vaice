@@ -1,6 +1,5 @@
 """Settings, overridable through environment variables."""
 import os
-import re
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -71,26 +70,18 @@ LLAMACPP_TIMEOUT = _number("VAICE_LLAMACPP_TIMEOUT", default="120", kind=float)
 LLAMACPP_MAX_OUTPUT_TOKENS = _number("VAICE_LLAMACPP_MAX_OUTPUT_TOKENS", default="1024", kind=int)
 
 
-# The tools `llama-server` makes available to the model in `session.update`: `None` (unset) = no
-# tools, `[]` ("builtin") = every tool the server exposes, and a comma-separated list of names =
-# only those. `fetch_tools` flattens the server's definitions into the format the realtime
-# endpoint needs (see `responders/llamacpp.py`); a subset keeps the model from calling tools the
-# user did not intend it to.
-TOOL_NAME_PATTERN = r"[a-z_][a-z0-9_]*"  # llama-server tool names are lowercase, so they match this
-
-
-def _tools(name: str) -> list[str] | None:
+# The tools `llama-server` makes available to the model in `session.update`: off (unset) or on
+# ("builtin" = every tool the server advertises on GET /tools). The set of tools is the server
+# operator's decision (`llama-server --tools ...`), which also gates what POST /tools executes —
+# vaice takes the list as it finds it and does not filter it.
+def _tools(name: str) -> bool | None:
     raw = os.getenv(name)
     if raw is None:
         return None
     if raw.strip() == "builtin":
-        return []
-    names = [part.strip() for part in raw.split(",")]
-    for part in names:
-        if not part or not re.fullmatch(TOOL_NAME_PATTERN, part):
-            raise SystemExit(f"vaice: {name} must be 'builtin' or a comma-separated list of tool names "
-                             f"matching {TOOL_NAME_PATTERN!r}, got {raw!r}")
-    return names
+        return True
+    raise SystemExit(f"vaice: {name} is 'builtin' (tools on) or unset (tools off); to pick the tools, "
+                     f"start llama-server with --tools <names>, got {raw!r}")
 
 
 LLAMACPP_TOOLS = _tools("VAICE_LLAMACPP_TOOLS")
