@@ -663,7 +663,7 @@ def models(*modalities):
     return {"data": [{"id": "LFM3", "architecture": {"output_modalities": list(modalities)}}]}
 
 
-def serve_checks(monkeypatch, health, listing=None, props=None):
+def serve_checks(monkeypatch, health, listing=None, props=None, realtime="ok"):
     asked = []
 
     def get(url, timeout):
@@ -678,8 +678,19 @@ def serve_checks(monkeypatch, health, listing=None, props=None):
             return props if props is not None else Reply(body={})
         return listing
 
+    opened = []
+
+    def connect(ws_url, open_timeout=None, close_timeout=None, max_size=None):
+        opened.append(ws_url)
+        if isinstance(realtime, Exception):
+            raise realtime
+        if realtime == "ok":
+            return type("StubConnection", (), {"close": lambda self: None})()
+        raise AssertionError(f"unexpected realtime stub value: {realtime!r}")
+
     monkeypatch.setattr(llamacpp.requests, "get", get)
-    return asked
+    monkeypatch.setattr(llamacpp, "connect", connect)
+    return asked, opened
 
 
 def props_with(temperature=None):
@@ -688,7 +699,7 @@ def props_with(temperature=None):
 
 
 def test_a_server_with_an_audio_model_passes(monkeypatch):
-    asked = serve_checks(monkeypatch, Reply(), Reply(body=models("text", "audio")))
+    asked, _ = serve_checks(monkeypatch, Reply(), Reply(body=models("text", "audio")))
     check_server("http://h:1")
     assert asked[:2] == ["http://h:1/health", "http://h:1/v1/models"]
 
@@ -761,6 +772,54 @@ def test_an_unhealthy_server_is_a_warning(monkeypatch, caplog):
     with caplog.at_level(logging.WARNING, logger="vaice.responders.llamacpp"):
         assert check_server("http://h:1") is None
     assert "returned 500" in caplog.text
+
+
+def test_a_passing_server_gets_its_realtime_endpoint_probed(monkeypatch):
+    _, opened = serve_checks(monkeypatch, Reply(), Reply(body=models("text", "audio")))
+    check_server("http://h:1")
+    assert opened == ["ws://h:1/v1/realtime"]
+
+
+def test_a_server_without_the_realtime_endpoint_fails_at_startup(monkeypatch):
+    # A 404 handshake is permanent: the HTTP checks all pass, the model speaks,
+    # but no wait would add the endpoint — fail now instead of at the first question.
+    handshake = llamacpp.InvalidStatus(
+        type("Response", (), {"status_code": 404})()
+    )
+    serve_checks(monkeypatch, Reply(), Reply(body=models("text", "audio")), realtime=handshake)
+    with pytest.raises(RuntimeError, match=r"does not serve ws://h:1/v1/realtime.*handshake returned 404"):
+        check_server("http://h:1")
+
+
+def test_a_transient_handshake_status_is_a_warning(monkeypatch, caplog):
+    # A 429/5xx from the server or a proxy is transient: the documented startup
+    # behavior lets a temporarily unavailable server recover before the first
+    # question, and the probe must not make a momentary failure fatal.
+    handshake = llamacpp.InvalidStatus(
+        type("Response", (), {"status_code": 503})()
+    )
+    serve_checks(monkeypatch, Reply(), Reply(body=models("text", "audio")), realtime=handshake)
+    with caplog.at_level(logging.WARNING, logger="vaice.responders.llamacpp"):
+        assert check_server("http://h:1") is None
+    assert "answered with HTTP 503" in caplog.text
+    assert "replies will fail until it is up" in caplog.text
+
+
+def test_a_transient_realtime_connection_failure_is_a_warning(monkeypatch, caplog):
+    serve_checks(monkeypatch, Reply(), Reply(body=models("text", "audio")),
+                 realtime=OSError("connection refused"))
+    with caplog.at_level(logging.WARNING, logger="vaice.responders.llamacpp"):
+        assert check_server("http://h:1") is None
+    assert "did not accept a connection" in caplog.text
+    assert "replies will fail until it is up" in caplog.text
+
+
+def test_the_realtime_probe_runs_after_the_model_check(monkeypatch):
+    # A model that cannot speak must raise before the probe opens a socket at all.
+    _, opened = serve_checks(monkeypatch, Reply(), Reply(body=models("text")))
+    with pytest.raises(RuntimeError, match="does not output audio"):
+        check_server("http://h:1")
+    assert opened == []
 
 
 def test_a_secure_server_url_means_a_wss_socket():
