@@ -180,7 +180,7 @@ def _converse(
     max_output_tokens: int,
     tools: list[dict] | None = None,
     executor: Callable[[str, str], str] | None = None,
-    tools_log: list[dict] | None = None,
+    turn: Turn | None = None,
 ) -> None:
     """Daemon thread: one realtime session for one reply. Puts (rate, samples) frames, then _DONE, on `out`
     (or the exception that ended it before _DONE) and keeps progress[0] = (reply text, samples received).
@@ -252,8 +252,8 @@ def _converse(
                         if stop():
                             raise _Stopped
                         output = _speech_friendly(executor(call.name, call.arguments))
-                        if tools_log is not None:  # reported to the turn for the UI's tool panel
-                            tools_log.append({"name": call.name, "arguments": call.arguments, "output": output})
+                        if turn is not None:  # the UI's tool panel; reported by the thread that ran the call,
+                            turn.add_tool_event(call.name, call.arguments, output)  # so barge-in cannot lose it
                         session.send({"type": "conversation.item.create", "item": {
                             "type": "function_call_output", "call_id": call.call_id, "output": output}})
                     calls = []
@@ -378,19 +378,6 @@ def _instructions(prompt: str, history: Sequence[Message]) -> str:
     return text
 
 
-def _report_tools(turn: Turn, log: list[dict], reported: int) -> int:
-    """Hand the session thread's new tool events to the turn; returns the advanced cursor.
-
-    The cursor advances by one per event consumed, not to `len(log)`: an event the session thread
-    appends while a previous one is being recorded (recording it saves the conversation) must not
-    be skipped.
-    """
-    while reported < len(log):
-        turn.add_tool_event(**log[reported])
-        reported += 1
-    return reported
-
-
 def _guard_executor(executor: Callable[[str, str], str], allowed: set[str]) -> Callable[[str, str], str]:
     """Only the advertised tools execute: the model sometimes calls one that was not offered
     (seen live), and a tool the user excluded must not reach the server."""
@@ -448,16 +435,14 @@ class LlamaCppResponder:
         chunks: queue.Queue = queue.Queue()
         cancelled = threading.Event()
         progress = [("", 0)]  # (reply text, audio samples) received so far; replaced whole by the session thread
-        tools_log: list[dict] = []  # tool calls made so far; drained into the turn by this generator
         threading.Thread(
             target=_converse,
             args=(self._url, self._timeout, _instructions(self._prompt, history), audio, chunks, cancelled, progress,
-                  self._max_output_tokens, self._tools, self._executor, tools_log),
+                  self._max_output_tokens, self._tools, self._executor, turn),
             name="vaice-llamacpp",
             daemon=True,
         ).start()
         handed_out = 0
-        reported_tools = 0
         try:
             while True:
                 try:
@@ -469,7 +454,6 @@ class LlamaCppResponder:
                         return
                     if turn.closed.is_set():  # barge-in, or the conversation was reset
                         return
-                    reported_tools = _report_tools(turn, tools_log, reported_tools)
                     continue
                 if item is _DONE:
                     break
@@ -479,16 +463,12 @@ class LlamaCppResponder:
                     return
                 handed_out += len(item[1])
                 turn.set_assistant_text(spoken_part(*progress[0], handed_out))
-                reported_tools = _report_tools(turn, tools_log, reported_tools)
                 yield item
             if lifecycle.stopping.is_set():  # the session thread may have noticed first, and stopped for the app
                 log.warning(ABANDONED)
                 return
             turn.set_assistant_text(spoken_part(*progress[0], handed_out))  # all of it, now that it's all out
         finally:
-            # A tool call that executed before a failure (or before a barge-in cut the reply) still
-            # happened: report it, whatever ended the generator
-            _report_tools(turn, tools_log, reported_tools)
             cancelled.set()  # the session thread closes the socket, which cancels the reply on the server
 
 
