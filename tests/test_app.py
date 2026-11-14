@@ -576,3 +576,17 @@ def test_main_installs_the_stop_handler_and_asks_the_app_to_stop_when_the_server
     finally:
         signal.signal(signal.SIGINT, previous)
         lifecycle.stopping.clear()
+
+
+def test_export_transcript_writes_the_markdown_under_the_data_dir(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    conversation = Conversation()
+    turn = conversation.start_turn()
+    turn.set_user_text("hello")
+    turn.set_assistant_text("hi there")
+    turn.finish()
+
+    path = app.export_transcript(conversation)
+
+    assert path == str(tmp_path / "exports" / "transcript.md")
+    assert (tmp_path / "exports" / "transcript.md").read_text(encoding="utf-8") == conversation.export_markdown()

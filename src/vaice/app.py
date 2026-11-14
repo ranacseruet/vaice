@@ -49,6 +49,18 @@ def refresh_view(conversation: Conversation, known: str) -> tuple:
     return view[0], view[1], rendered
 
 
+def export_transcript(conversation: Conversation) -> str:
+    """Save the transcript as markdown under the data dir; the UI offers the file as a download.
+
+    One fixed name, overwritten on every export: a single-user demo keeps one current
+    transcript, and a stable path keeps the download wiring simple.
+    """
+    path = config.DATA_DIR / "exports" / "transcript.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(conversation.export_markdown(), encoding="utf-8")
+    return str(path)
+
+
 def make_handler(responder: Responder, conversation: Conversation):
     def reply(audio: tuple[int, np.ndarray]):
         """Called by ReplyOnPause when the speaker stops; streams audio back as it is produced."""
@@ -126,6 +138,11 @@ def build_stream(responder: Responder, conversation: Conversation) -> Stream:
 
         new_conversation.click(reset, outputs=[chatbot, tool_panel])
         chatbot.clear(reset)  # the chatbot's own trash icon would otherwise only clear the view
+
+        # The transcript as a shareable markdown file: written on click, then handed back as
+        # the button's own download
+        export_button = gr.DownloadButton("Export transcript")
+        export_button.click(partial(export_transcript, conversation), outputs=export_button)
 
         # refresh_view's backstop: catches conversation changes no reply update covered (a late
         # transcript, a barge-in's trimmed text, a tool round); seen holds the views it last rendered
