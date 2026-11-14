@@ -166,20 +166,47 @@ def _spoken(turn: Turn) -> str:
     return turn.assistant_text + (INTERRUPTED if turn.interrupted else "")
 
 
-def tool_activity_for_ui(turns: list[Turn], events: int = 10) -> str:
-    """Markdown for the UI's collapsed tool-activity panel: the last `events` calls, oldest first.
+def _tool_entry(event: dict) -> str:
+    """One tool call as the UI's panel shows it: name, compacted arguments, fenced output.
 
-    The tool output was already compacted for the model (see `responders.llamacpp`), so it is short
+    The output was already compacted for the model (see `responders.llamacpp`), so it is short
     enough to show; the arguments are the model's own JSON and can run long, so they are cut.
     """
-    shown: list[str] = []
-    for turn in turns:
-        for event in turn.tool_events:
-            arguments = " ".join(event["arguments"].split())
-            if len(arguments) > 120:
-                arguments = arguments[:120].rstrip() + "..."
-            shown.append(f"**{event['name']}** `{arguments}`\n```\n{event['output']}\n```")
+    arguments = " ".join(event["arguments"].split())
+    if len(arguments) > 120:
+        arguments = arguments[:120].rstrip() + "..."
+    return f"**{event['name']}** `{arguments}`\n```\n{event['output']}\n```"
+
+
+def tool_activity_for_ui(turns: list[Turn], events: int = 10) -> str:
+    """Markdown for the UI's collapsed tool-activity panel: the last `events` calls, oldest first."""
+    shown = [_tool_entry(event) for turn in turns for event in turn.tool_events]
     return "\n\n".join(shown[-events:])
+
+
+def export_markdown(turns: list[Turn]) -> str:
+    """The conversation as a shareable markdown transcript: one block per speaker turn.
+
+    Tool calls ride along as blockquotes in the panel's format (see `tool_activity_for_ui`).
+    Turns record no timestamps, so the export has none either — inventing them would make the
+    transcript claim a precision the records don't have. A turn whose transcript has not
+    arrived yet is marked the way the UI marks it, and a failed reply keeps its reason.
+    """
+    blocks = ["# vaice transcript"]
+    if not turns:
+        blocks.append("(no conversation yet)")
+    for turn in turns:
+        user = "…" if turn.user_text is None else turn.user_text or INAUDIBLE  # … = still transcribing
+        blocks.append(f"**User:** {user}")
+        spoken = _spoken(turn)
+        if turn.error:  # a failed reply: what was heard of it, plus why it stopped
+            spoken = f"{spoken} (error: {turn.error})" if spoken else f"(error: {turn.error})"
+        if spoken:
+            blocks.append(f"**Assistant:** {spoken}")
+        blocks.extend(
+            "\n".join("> " + line for line in _tool_entry(event).splitlines()) for event in turn.tool_events
+        )
+    return "\n\n".join(blocks) + "\n"
 
 
 def to_messages(turns: list[Turn]) -> list[Message]:
@@ -252,6 +279,11 @@ class Conversation:
         """The tool-activity panel's view: every recorded tool call, oldest last."""
         with self._lock:
             return tool_activity_for_ui(self._turns)
+
+    def export_markdown(self) -> str:
+        """The whole conversation as a markdown transcript, ready to save or share."""
+        with self._lock:
+            return export_markdown(self._turns)
 
     def reset(self) -> None:
         """Forget everything. Turns started before this are detached: their later updates go nowhere."""
