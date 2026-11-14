@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- Docs honesty: the echo troubleshooting entry and the "Language & voice" note blamed llama-server's `--tts-lang`/`--tts-voice` for making LFM3-Audio parrot user speech, citing a repro. A controlled re-test on the same build (b12359, `Q8_0 --temp 0`) did not reproduce the parroting — with the flags, with per-session `audio.output.language`/`audio.output.voice`, or with the exact injected prompt line on a flagless server, across clean TTS and noisy mic inputs (`tasks/repro_tts_lang.py`). The flags are no longer presented as a proven echo cause; the advice to omit them stands (English-only voice model, the pin buys nothing). History clearing and `--temp 0` remain the echo fixes.
+
 ## [0.1.0] - 2026-10-29
 
 ### Added
