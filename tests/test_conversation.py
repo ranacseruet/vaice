@@ -248,7 +248,7 @@ def test_every_change_is_saved_with_no_temp_files_left(tmp_path):
     turn.finish()
 
     assert json.loads(path.read_text())["turns"] == [
-        {"user": "q", "assistant": "a", "error": "", "interrupted": False, "complete": True}
+        {"user": "q", "assistant": "a", "tools": [], "error": "", "interrupted": False, "complete": True}
     ]
     assert os.listdir(tmp_path) == ["c.json"]
 
@@ -440,3 +440,47 @@ def test_close_after_the_audio_finished_playing_keeps_everything():
     turn.close(now=19.0)
 
     assert not turn.interrupted and turn.assistant_text == "a b c d e f g h"
+
+
+def test_tool_events_are_recorded_and_persisted():
+    turn = Turn()
+    turn.add_tool_event("get_info", "{}", "os: Darwin")
+    turn.add_tool_event("read_file", '{"path": "a"}', "text")
+
+    assert turn.tool_events == [{"name": "get_info", "arguments": "{}", "output": "os: Darwin"},
+                                {"name": "read_file", "arguments": '{"path": "a"}', "output": "text"}]
+    stored = Turn.from_dict(turn.to_dict(), threading.RLock(), None)
+    assert stored.tool_events == turn.tool_events
+
+
+def test_tool_events_from_older_conversations_are_empty():
+    turn = Turn()
+    data = turn.to_dict()
+    del data["tools"]  # a file written before tool events existed
+    assert Turn.from_dict(data, threading.RLock(), None).tool_events == []
+
+
+def test_tool_activity_for_ui_shows_the_last_calls_with_cut_arguments():
+    turns = [Turn(), Turn()]
+    turns[0].add_tool_event("get_info", "{}", "os: Darwin")
+    turns[1].add_tool_event("exec_shell_command", json.dumps({"command": "curl " + "x" * 200}), "done")
+
+    panel = conv.tool_activity_for_ui(turns)
+    assert "**get_info** `{}`" in panel and "os: Darwin" in panel
+    assert "**exec_shell_command**" in panel and panel.count("curl") == 1  # the arguments are cut
+    assert len(panel) < 400
+
+
+def test_tool_activity_for_ui_is_empty_without_tool_calls():
+    turn = Turn()
+    turn.set_assistant_text("no tools here")
+    assert conv.tool_activity_for_ui([turn]) == ""
+
+
+def test_tool_activity_for_ui_is_bounded_to_the_last_events():
+    turns = [Turn() for _ in range(20)]
+    for i, turn in enumerate(turns):
+        turn.add_tool_event(f"tool_{i}", "{}", "ok")
+
+    panel = conv.tool_activity_for_ui(turns)
+    assert "tool_19" in panel and "tool_0" not in panel

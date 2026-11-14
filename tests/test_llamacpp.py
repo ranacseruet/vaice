@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 import requests
 from fake_realtime import next_on_fresh_thread, pcm
+from websockets.exceptions import ConnectionClosedOK
 
 from vaice import config, lifecycle
 from vaice.conversation import Turn
@@ -241,6 +242,7 @@ def test_a_tool_call_is_executed_and_its_result_spoken(realtime):
                           "conversation.item.create", "response.create"]
     assert turn.assistant_text == "Let me check. It is noon."  # the tags are gone, the rounds joined
     assert [len(samples) for _, samples in frames] == [2]  # only the spoken answer has audio
+    assert turn.tool_events == [{"name": "get_info", "arguments": "{}", "output": "os: Darwin"}]
 
 
 def test_a_tool_call_beyond_the_round_cap_ends_the_reply(realtime, caplog):
@@ -253,6 +255,7 @@ def test_a_tool_call_beyond_the_round_cap_ends_the_reply(realtime, caplog):
         assert drive(tool_responder(server, lambda name, args: calls.append(name) or "ok"), turn=turn) == []
 
     assert calls == ["get_info", "get_info"]  # the third call is past MAX_TOOL_ROUNDS and never runs
+    assert [event["name"] for event in turn.tool_events] == ["get_info", "get_info"]
     conn = server.conversation()
     outputs = [e for e in conn.events
                if e["type"] == "conversation.item.create" and e.get("item", {}).get("type") == "function_call_output"]
@@ -274,6 +277,7 @@ def test_a_failing_executor_is_spoken_not_raised(realtime):
                  if e["type"] == "conversation.item.create" and e.get("item", {}).get("type") == "function_call_output"]
     assert output == "tool get_info failed: boom"
     assert turn.assistant_text == "I could not check."
+    assert turn.tool_events == [{"name": "get_info", "arguments": "{}", "output": "tool get_info failed: boom"}]
     assert len(frames) == 1
 
 
@@ -314,6 +318,8 @@ def test_a_call_for_an_unadvertised_tool_is_refused_not_executed(realtime):
                  if e["type"] == "conversation.item.create" and e.get("item", {}).get("type") == "function_call_output"]
     assert output == "tool read_file is not available"
     assert turn.assistant_text == "I could not read that."
+    assert turn.tool_events == [{"name": "read_file", "arguments": '{"path": "secrets"}',
+                                 "output": "tool read_file is not available"}]
     assert len(frames) == 1
 
 
@@ -324,6 +330,42 @@ def test_a_tool_result_is_compacted_to_what_the_model_can_speak():
     assert llamacpp._speech_friendly('["a", 2, {"k": "v"}]') == "a; 2; {\"k\": \"v\"}"
     assert llamacpp._speech_friendly("plain short result") == "plain short result"
     assert llamacpp._speech_friendly("y" * 1000) == "y" * llamacpp.TOOL_OUTPUT_CHARS + "..."
+
+
+def test_a_tool_call_is_reported_even_when_the_reply_fails_after_it(realtime):
+    server = realtime(reply=[[("call", "item_1", "get_info", "call_1", "{}"), ("done",), ("close",)]])
+    turn = Turn()
+    # where the hangup is noticed (the send of the result, or the next receive) decides the exception
+    with pytest.raises((ConnectionClosedOK, RuntimeError)):
+        drive(tool_responder(server, lambda name, args: "ok"), turn=turn)
+
+    assert [event["name"] for event in turn.tool_events] == ["get_info"]  # the call did happen
+
+
+def test_a_tool_call_finishing_after_a_barge_in_is_still_reported(realtime):
+    """The session thread reports the call itself: a turn closed mid-execution cannot lose it."""
+    server = realtime(reply=[[("call", "item_1", "get_info", "call_1", "{}"), ("done",)],
+                             [("text", "spoken"), ("audio", pcm(1)), ("done",)]])
+    release = threading.Event()
+    entered = threading.Event()
+
+    def slow_executor(name, args):
+        entered.set()  # the tool is "running"
+        release.wait(3)
+        return "os: Darwin"
+
+    turn = Turn()
+    gen = tool_responder(server, slow_executor).respond(AUDIO, [], turn)
+    consumer = threading.Thread(target=lambda: next_on_fresh_thread(gen), daemon=True)
+    consumer.start()
+    assert entered.wait(3)  # the executor is blocked inside the tool round
+    turn.close()  # the user interrupts; the generator will exit, the executor is still blocked
+    release.set()
+    consumer.join(5)
+    wait_for_threads_to_end()
+
+    assert [event["name"] for event in turn.tool_events] == ["get_info"]
+    assert turn.assistant_text == ""  # the interrupted reply kept none of the next round's text
 
 
 def test_the_default_executor_posts_the_tool_to_the_server(monkeypatch):

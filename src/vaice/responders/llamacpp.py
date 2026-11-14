@@ -180,6 +180,7 @@ def _converse(
     max_output_tokens: int,
     tools: list[dict] | None = None,
     executor: Callable[[str, str], str] | None = None,
+    turn: Turn | None = None,
 ) -> None:
     """Daemon thread: one realtime session for one reply. Puts (rate, samples) frames, then _DONE, on `out`
     (or the exception that ended it before _DONE) and keeps progress[0] = (reply text, samples received).
@@ -251,6 +252,8 @@ def _converse(
                         if stop():
                             raise _Stopped
                         output = _speech_friendly(executor(call.name, call.arguments))
+                        if turn is not None:  # the UI's tool panel; reported by the thread that ran the call,
+                            turn.add_tool_event(call.name, call.arguments, output)  # so barge-in cannot lose it
                         session.send({"type": "conversation.item.create", "item": {
                             "type": "function_call_output", "call_id": call.call_id, "output": output}})
                     calls = []
@@ -435,7 +438,7 @@ class LlamaCppResponder:
         threading.Thread(
             target=_converse,
             args=(self._url, self._timeout, _instructions(self._prompt, history), audio, chunks, cancelled, progress,
-                  self._max_output_tokens, self._tools, self._executor),
+                  self._max_output_tokens, self._tools, self._executor, turn),
             name="vaice-llamacpp",
             daemon=True,
         ).start()

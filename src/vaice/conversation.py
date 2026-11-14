@@ -42,6 +42,7 @@ class Turn:
         self._on_change = on_change
         self.user_text: str | None = None  # None until transcribed
         self.assistant_text = ""  # cumulative "spoken so far"
+        self.tool_events: list[dict] = []  # {"name", "arguments", "output"} per tool call, in order
         self.error = ""  # why the reply failed, for the UI only; never sent to the model
         self.interrupted = False
         self.complete = False
@@ -62,6 +63,12 @@ class Turn:
             if self.closed.is_set() or text == self.assistant_text:  # unchanged: skip the save
                 return
             self.assistant_text = text
+            self._changed()
+
+    def add_tool_event(self, name: str, arguments: str, output: str) -> None:
+        """A tool call the reply made, for the UI's tool-activity panel; never sent to the model."""
+        with self._lock:
+            self.tool_events.append({"name": name, "arguments": arguments, "output": output})
             self._changed()
 
     def audio_handed_out(self, seconds: float, now: float | None = None) -> None:
@@ -118,6 +125,7 @@ class Turn:
             return {
                 "user": self.user_text,
                 "assistant": self.assistant_text,
+                "tools": self.tool_events,
                 "error": self.error,
                 "interrupted": self.interrupted,
                 "complete": self.complete,
@@ -130,6 +138,7 @@ class Turn:
         turn.user_text = data["user"] or ""  # never transcribed (e.g. the app stopped first)
         turn.assistant_text = data["assistant"]
         turn.error = data.get("error", "")  # written by older versions without it
+        turn.tool_events = list(data.get("tools", []))  # older versions wrote no tool events
         turn.interrupted = bool(data["interrupted"]) or not data["complete"]
         turn.complete = True
         turn.closed.set()
@@ -155,6 +164,22 @@ def window_start(count: int, window: int) -> int:
 
 def _spoken(turn: Turn) -> str:
     return turn.assistant_text + (INTERRUPTED if turn.interrupted else "")
+
+
+def tool_activity_for_ui(turns: list[Turn], events: int = 10) -> str:
+    """Markdown for the UI's collapsed tool-activity panel: the last `events` calls, oldest first.
+
+    The tool output was already compacted for the model (see `responders.llamacpp`), so it is short
+    enough to show; the arguments are the model's own JSON and can run long, so they are cut.
+    """
+    shown: list[str] = []
+    for turn in turns:
+        for event in turn.tool_events:
+            arguments = " ".join(event["arguments"].split())
+            if len(arguments) > 120:
+                arguments = arguments[:120].rstrip() + "..."
+            shown.append(f"**{event['name']}** `{arguments}`\n```\n{event['output']}\n```")
+    return "\n\n".join(shown[-events:])
 
 
 def to_messages(turns: list[Turn]) -> list[Message]:
@@ -222,6 +247,11 @@ class Conversation:
                 if spoken:
                     messages.append({"role": "assistant", "content": spoken})
             return messages
+
+    def tool_activity_for_ui(self) -> str:
+        """The tool-activity panel's view: every recorded tool call, oldest last."""
+        with self._lock:
+            return tool_activity_for_ui(self._turns)
 
     def reset(self) -> None:
         """Forget everything. Turns started before this are detached: their later updates go nowhere."""
