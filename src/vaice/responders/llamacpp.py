@@ -120,6 +120,38 @@ class _Stopped(Exception):  # control flow inside a session thread, not an error
     """The thread was told to stop while it waited for the server."""
 
 
+# What a function_call_output may hold: the model reads the result aloud, so a long raw
+# result becomes long spoken junk (paths, kernel strings, JSON)
+TOOL_OUTPUT_CHARS = 120
+TOOL_VALUE_CHARS = 40
+
+
+def _short(text: str, chars: int) -> str:
+    return text if len(text) <= chars else text[:chars].rstrip() + "..."
+
+
+def _speech_friendly(output: str) -> str:
+    """Compact a tool result for the model to speak.
+
+    The result goes back into the conversation as text and the voice model tends to read it
+    aloud, so what we feed back is roughly what gets said: a JSON object becomes short
+    "key: value" pairs with truncated values, and the whole thing is capped. A spoken
+    "kernel version 25.6.0" is fine; a dictated uname string is not.
+    """
+    try:
+        data = json.loads(output)
+    except ValueError:
+        data = None
+    if isinstance(data, dict):
+        output = "; ".join(
+            f"{key}: {_short(value if isinstance(value, str) else json.dumps(value), TOOL_VALUE_CHARS)}"
+            for key, value in data.items())
+    elif isinstance(data, list):
+        output = "; ".join(_short(value if isinstance(value, str) else json.dumps(value), TOOL_VALUE_CHARS)
+                           for value in data[:5])
+    return _short(output, TOOL_OUTPUT_CHARS)
+
+
 class _ToolCall:
     """A function_call item the model asked for, filled in by the argument deltas."""
 
@@ -218,7 +250,7 @@ def _converse(
                         log.info("llamacpp tool call %s(%s)", call.name, call.arguments)
                         if stop():
                             raise _Stopped
-                        output = executor(call.name, call.arguments)
+                        output = _speech_friendly(executor(call.name, call.arguments))
                         session.send({"type": "conversation.item.create", "item": {
                             "type": "function_call_output", "call_id": call.call_id, "output": output}})
                     calls = []

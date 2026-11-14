@@ -118,8 +118,14 @@ LFM3-Audio notes from live testing: **tell the model to use the tools** — with
 most runs; a prompt like `Use the available tools to answer questions about this system.` made it
 call and speak the real answer in 4 of 4 runs (vs 1 of 6 with the default). Keep the tool subset
 small (one or two; with `tool_choice: "auto"` it never calls, and with three or more tools it tends
-to answer from its head and get it wrong). The transcript may show the raw tool result and stray
-tags around a tool round, and a tool answer can run long; the audio is clean.
+to answer from its head and get it wrong).
+
+The model **reads the fed-back tool result aloud** (a 2B voice model limitation; prompt lines
+forbidding it have no measurable effect), so `vaice` compacts every result before feeding it back:
+JSON becomes short `key: value` pairs, values are truncated at 40 characters and the whole output
+at 120 — enough for the model's first spoken sentence to answer the question, little enough that
+the dictation it appends stays short. Cleaner answers need a model that follows instructions.
+The transcript may also show the raw result and stray tags around a tool round; the audio is clean.
 
 ### Startup & Shutdown
 At startup, `vaice` checks `llama-server`:
