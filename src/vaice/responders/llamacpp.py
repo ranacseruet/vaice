@@ -343,6 +343,18 @@ def _instructions(prompt: str, history: Sequence[Message]) -> str:
     return text
 
 
+def _guard_executor(executor: Callable[[str, str], str], allowed: set[str]) -> Callable[[str, str], str]:
+    """Only the advertised tools execute: the model sometimes calls one that was not offered
+    (seen live), and a tool the user excluded must not reach the server."""
+
+    def guarded(name: str, arguments: str) -> str:
+        if name not in allowed:
+            return f"tool {name} is not available"
+        return executor(name, arguments)
+
+    return guarded
+
+
 class LlamaCppResponder:
     """Streams the reply of an audio-output model on llama-server (LFM3-Audio) over /v1/realtime.
 
@@ -368,9 +380,14 @@ class LlamaCppResponder:
         # Text tokens and audio frames count together; the model card's own voice-chat example uses 1024
         self._max_output_tokens = max_output_tokens
         # The server's built-in tools (fetch_tools), declared in session.update and executed through
-        # the server's /tools endpoint; None = no tools, the session.update of before
+        # the server's /tools endpoint; None = no tools, the session.update of before. The executor
+        # only runs the advertised names: a call for an excluded tool is refused, not executed.
         self._tools = tools or None
-        self._executor = executor if executor is not None else (execute_tool(url, timeout) if self._tools else None)
+        if self._tools and executor is None:
+            executor = execute_tool(url, timeout)
+        if self._tools and executor is not None:
+            executor = _guard_executor(executor, {str(tool.get("name")) for tool in self._tools})
+        self._executor = executor
 
     def respond(self, audio: AudioFrame, history: Sequence[Message], turn: Turn) -> Iterator[AudioFrame]:
         # First, so that nothing the reply does can keep the question from being transcribed

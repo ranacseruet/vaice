@@ -296,6 +296,27 @@ def test_a_tool_round_stopped_mid_way_skips_the_rest_and_hangs_up(realtime):
     wait_for_threads_to_end()
 
 
+def test_a_call_for_an_unadvertised_tool_is_refused_not_executed(realtime):
+    server = realtime(
+        reply=[
+            [("call", "item_1", "read_file", "call_9", '{"path": "secrets"}'), ("done",)],
+            [("text", "I could not read that."), ("audio", pcm(1)), ("done",)],
+        ],
+    )
+    executed = []
+    turn = Turn()
+    frames = drive(LlamaCppResponder(server.url, "", tools=[TIME_TOOL],
+                                     executor=lambda name, args: executed.append(name) or "ok"), turn=turn)
+
+    assert executed == []  # read_file was never advertised: the model imagined it
+    conn = server.conversation()
+    (output,) = [e["item"]["output"] for e in conn.events
+                 if e["type"] == "conversation.item.create" and e.get("item", {}).get("type") == "function_call_output"]
+    assert output == "tool read_file is not available"
+    assert turn.assistant_text == "I could not read that."
+    assert len(frames) == 1
+
+
 def test_the_default_executor_posts_the_tool_to_the_server(monkeypatch):
     posted = []
 
