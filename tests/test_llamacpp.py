@@ -781,7 +781,7 @@ def test_a_passing_server_gets_its_realtime_endpoint_probed(monkeypatch):
 
 
 def test_a_server_without_the_realtime_endpoint_fails_at_startup(monkeypatch):
-    # A rejected handshake is permanent: the HTTP checks all pass, the model speaks,
+    # A 404 handshake is permanent: the HTTP checks all pass, the model speaks,
     # but no wait would add the endpoint — fail now instead of at the first question.
     handshake = llamacpp.InvalidStatus(
         type("Response", (), {"status_code": 404})()
@@ -789,6 +789,20 @@ def test_a_server_without_the_realtime_endpoint_fails_at_startup(monkeypatch):
     serve_checks(monkeypatch, Reply(), Reply(body=models("text", "audio")), realtime=handshake)
     with pytest.raises(RuntimeError, match=r"does not serve ws://h:1/v1/realtime.*handshake returned 404"):
         check_server("http://h:1")
+
+
+def test_a_transient_handshake_status_is_a_warning(monkeypatch, caplog):
+    # A 429/5xx from the server or a proxy is transient: the documented startup
+    # behavior lets a temporarily unavailable server recover before the first
+    # question, and the probe must not make a momentary failure fatal.
+    handshake = llamacpp.InvalidStatus(
+        type("Response", (), {"status_code": 503})()
+    )
+    serve_checks(monkeypatch, Reply(), Reply(body=models("text", "audio")), realtime=handshake)
+    with caplog.at_level(logging.WARNING, logger="vaice.responders.llamacpp"):
+        assert check_server("http://h:1") is None
+    assert "answered with HTTP 503" in caplog.text
+    assert "replies will fail until it is up" in caplog.text
 
 
 def test_a_transient_realtime_connection_failure_is_a_warning(monkeypatch, caplog):

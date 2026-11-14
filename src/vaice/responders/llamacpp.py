@@ -538,10 +538,17 @@ def _probe_realtime(url: str, unavailable: Callable[[str], None]) -> None:
         connection = connect(ws_url, open_timeout=CHECK_TIMEOUT, close_timeout=CLOSE_TIMEOUT, max_size=None)
     except InvalidStatus as exc:
         status = getattr(getattr(exc, "response", None), "status_code", None)
-        raise RuntimeError(
-            f"llama-server at {url} does not serve {ws_url} (handshake returned {status}); "
-            "the llamacpp backend needs a server with the realtime endpoint"
-        ) from exc
+        if status == 404:
+            # The server answered "no such endpoint": permanent, no wait fixes it.
+            raise RuntimeError(
+                f"llama-server at {url} does not serve {ws_url} (handshake returned {status}); "
+                "the llamacpp backend needs a server with the realtime endpoint"
+            ) from exc
+        # A 429/5xx/3xx from the server or a proxy in front of it is transient —
+        # treat it like the other startup checks: warn and let the server recover
+        # before the first question.
+        unavailable(f"the realtime endpoint at {ws_url} answered with HTTP {status} ({exc})")
+        return
     except (WebSocketException, OSError, TimeoutError) as exc:
         unavailable(f"the realtime endpoint at {ws_url} did not accept a connection ({type(exc).__name__}: {exc})")
         return
