@@ -127,6 +127,11 @@ follow-up that inherited `required` was forced to call again, so it repeated the
 could loop until the token cap instead of answering. A call that still arrives in the forced
 final round is not executed.
 
+Only the answer the model gives **after** a tool result is recorded in the conversation: whatever
+it says before the call (the working-out-loud preamble) is spoken, but it is not written to
+history or shown in the transcript, so a wrong first pass cannot reinforce itself in the next
+turn's prompt.
+
 LFM3-Audio notes from live testing: **tell the model to use the tools** — with the default prompt
 ("Reply naturally and concisely…") the model announces a check and then stops without calling in
 most runs; a prompt like `Use the available tools to answer questions about this system.` made it
@@ -159,7 +164,8 @@ At startup, `vaice` checks `llama-server`:
 - An unreachable or still-loading server (HTTP 503) logs a warning and starts the UI anyway, so the server can finish loading before your first question.
 - A reachable server whose model does not advertise audio output is rejected immediately with an actionable error.
 - A reachable server whose HTTP endpoints answer but which does not route the `/v1/realtime` WebSocket (an older llama.cpp, a proxy in front of it) is rejected at startup too: the check opens the realtime endpoint once and fails with an actionable message, instead of the first question dying after a long stall. A momentary connection failure only warns — the server may just be busy.
-- Replies are capped at `VAICE_LLAMACPP_MAX_OUTPUT_TOKENS` (default 1024 — the model card's own voice-chat example uses 1024; text and audio frames count together, and the LFM3-Audio codec emits 12 tokens per 80 ms of speech); truncation is logged as a warning.
+- Replies are capped at `VAICE_LLAMACPP_MAX_OUTPUT_TOKENS` (default 1024 — the model card's own voice-chat example uses 1024; text and audio frames count together, and the LFM3-Audio codec emits 12 tokens per 80 ms of speech); truncation is logged as a warning. Before the cap can even apply, a reply that repeats the same 1–4-line block of text three times back-to-back (compared with case and punctuation ignored) is cut off there: the repeated tail is dropped from the transcript, what was already spoken up to the cut plays, and the session is closed, freeing the server slot. Under `--temp 0` the model sometimes cannot stop after answering and loops until the cap; the breaker cuts that tail early.
+- Every reply's instructions carry the current local date and time (`You know the current date and time: … Use it when asked about the date or time.`), so a "what time is it" question is answered from the machine's clock instead of ending in "I don't have a way" (or in a tool result's build timestamp read as the current time). The line is rebuilt for each reply; there is no `VAICE_*` knob to turn it off.
 - **Ctrl+C** stops the app cleanly: any reply in flight is abandoned (`the app is stopping; the reply is abandoned`) and the process exits within ~1 s when idle or ~5–6 s when a browser is connected mid-reply, even if the server never answers. Finished turns remain on disk.
 
 ### Multi-Turn Conversation & Barge-In

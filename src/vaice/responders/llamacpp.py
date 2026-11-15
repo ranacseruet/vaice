@@ -6,6 +6,7 @@ import queue
 import threading
 import time
 from collections.abc import Callable, Iterator, Sequence
+from datetime import datetime
 
 import requests
 from websockets.exceptions import ConnectionClosed, InvalidStatus, WebSocketException
@@ -31,8 +32,17 @@ CHECK_TIMEOUT = 2  # seconds for the startup HTTP checks
 # keeps a tool-calling loop from running away with the session (and the mic).
 MAX_TOOL_ROUNDS = 2
 
+# A reply that repeats the same 1-4-line block this many times back-to-back is degenerating: under
+# greedy decoding LFM3-Audio sometimes cannot stop after answering and loops to the token cap
+# (seconds of junk audio — a normalized timestamp ~60x, a 3-line block ~20x, live). The reply is
+# cut there: the repeated tail is dropped from the record and the session closed, which also frees
+# the server slot. 3 repeats keeps a legitimate refrain safe; the cut keeps the answer.
+LOOP_REPEATS = 3
+LOOP_MAX_BLOCK_LINES = 4
+
 ABANDONED = "the app is stopping; the reply is abandoned"
 _DONE = object()
+_ROUND = object()  # a tool-round boundary: the reply starts over after the tool results
 
 
 def _ws_url(base: str) -> str:
@@ -177,6 +187,48 @@ def _strip_tool_tags(delta: str) -> str:
     return delta
 
 
+def _normalized(line: str) -> str:
+    """What makes two lines the same for loop detection: case and punctuation are noise (the
+    observed loops repeat near-identical lines — "...EST" then "...EST."), spacing collapsed."""
+    return " ".join("".join(ch.lower() if ch.isalnum() else " " for ch in line).split())
+
+
+def _loop_block(text: str, repeats: int = LOOP_REPEATS, max_block: int = LOOP_MAX_BLOCK_LINES) -> int | None:
+    """The size, in non-empty lines, of the block repeated `repeats` times back-to-back at the end
+    of `text`; None when there is no such block. Line-based: the observed loops repeat
+    newline-separated lines ("2026-11-14 21:34:00 EST" ~60x, a 3-line block ~20x); repetition
+    inside a single line is not detected."""
+    lines = [line for line in text.split("\n") if line.strip()]
+    norm = [_normalized(line) for line in lines]
+    for size in range(1, max_block + 1):
+        need = size * repeats
+        if len(lines) >= need and norm[-need:] == norm[-size:] * repeats:
+            return size
+    return None
+
+
+def _trim_repeats(lines: list[str], block: int) -> list[str]:
+    """`lines` without the repeated tail: every copy of the looping block (compared normalized) is
+    dropped, so the record keeps the answer, not the loop. Only called after `_loop_block` has
+    found at least `LOOP_REPEATS` copies at the end. One copy is kept when the whole text is the
+    loop (a terse correct answer the model then loops on), so the turn still knows the answer."""
+    norm = [_normalized(line) for line in lines]
+    end = len(lines)
+    copies = 1
+    while True:
+        left = end - (copies + 1) * block
+        if left < 0:
+            break
+        if norm[left:left + block] != norm[left + block:left + 2 * block]:
+            break
+        copies += 1
+    if copies == 1:  # nothing repeats (defensive: only called after _loop_block fired)
+        return list(lines)
+    if copies * block == len(lines):  # nothing before the loop: keep one copy
+        return lines[:block]
+    return lines[: end - copies * block]
+
+
 def _create_response(session: "_Session", tool_choice: str | None = None) -> None:
     """Ask for a response, optionally overriding the session's tool choice for this response only.
 
@@ -252,7 +304,17 @@ def _converse(
                             call.arguments += event.get("delta", "")
                 elif kind == "response.output_text.delta":
                     text.append(_strip_tool_tags(event.get("delta", "")))
-                    progress[0] = ("".join(text), samples)
+                    joined = "".join(text)
+                    block = _loop_block(joined)
+                    if block is not None:
+                        # the reply cannot stop itself: record it without the repeated tail and end
+                        # it here (closing the socket cancels the generation and frees the slot)
+                        lines = [line for line in joined.split("\n") if line.strip()]
+                        text = ["\n".join(_trim_repeats(lines, block))]
+                        progress[0] = ("".join(text), samples)
+                        log.warning("llamacpp reply fell into a repetition loop; cut it off after the answer")
+                        break
+                    progress[0] = (joined, samples)
                 elif kind == "response.output_audio.delta":
                     frame = from_pcm16(base64.b64decode(event.get("delta", "")))
                     if len(frame):
@@ -273,8 +335,15 @@ def _converse(
                         break
                     # the model asked for tools: run them, feed the results back, and let it speak them
                     rounds += 1
-                    if text and not "".join(text).endswith(" "):
-                        text.append(" ")  # keep the announcement and the spoken answer apart
+                    # What was said before the tool result was working out loud, not the answer: it
+                    # stays spoken but is dropped from the turn, so a wrong first pass cannot end up
+                    # in history and reinforce itself. Text and the spoken_part share restart with
+                    # this round's audio; the marker goes out ahead of this round's frames, so the
+                    # consumer's handed-out count restarts with them too.
+                    text = []
+                    samples = 0
+                    progress[0] = ("", 0)
+                    out.put(_ROUND)
                     for call in calls:
                         log.info("llamacpp tool call %s(%s)", call.name, call.arguments)
                         if stop():
@@ -409,7 +478,27 @@ def _clean_turn_text(said: str) -> str:
     return " ".join(said.split())
 
 
-def _instructions(prompt: str, history: Sequence[Message]) -> str:
+def _clock_line() -> str:
+    """Ambient context for every reply: the local date and time, in the machine's zone.
+
+    The model has no clock, so "what time is it" would end in "I don't have a way" — or in a tool
+    result's build timestamp read as the current time. Built per reply (each reply gets a fresh
+    session), so it stays current without any tool. Phrased as something the model knows and is
+    told to use: a bare "Current date and time: ..." line was treated as inert text — the model
+    echoed it verbatim and still answered "I don't have access" (live A/B, 6 runs), while this
+    wording answered with the real time 6/6.
+    """
+    moment = datetime.now().astimezone()
+    stamp = moment.strftime(f"%A, %B {moment.day}, %Y at %I:%M %p %Z")
+    return f"You know the current date and time: {stamp}. Use it when asked about the date or time."
+
+
+def _context_lines(clock: bool = True) -> str:
+    """The context line(s) that ride inside the system block, before the first ChatML turn."""
+    return _clock_line() if clock else ""
+
+
+def _instructions(prompt: str, history: Sequence[Message], context: str = "") -> str:
     """The system prompt, with the earlier turns as ChatML user/assistant turns.
 
     A realtime session cannot be handed earlier assistant turns (conversation.item.create rejects
@@ -419,9 +508,12 @@ def _instructions(prompt: str, history: Sequence[Message]) -> str:
     past turn as `<|im_start|>{role}\\n...<|im_end|>` gives the model native ChatML turns instead
     of a flat transcript inside the system prompt (which makes 2B models confuse roles or repeat
     earlier replies). `Conversation` stays the one owner of history: windowing, barge-in cuts and
-    "New conversation" all apply.
+    "New conversation" all apply. `context` lines ride inside the system block, before the first
+    ChatML turn.
     """
     text = f"{MODE_INSTRUCTION} {prompt}".strip()
+    if context:
+        text += "\n" + context
     for role, said in history:
         text += f"<|im_end|>\n<|im_start|>{role}\n{_clean_turn_text(said)}"
     return text
@@ -431,8 +523,10 @@ class LlamaCppResponder:
     """Streams the reply of an audio-output model on llama-server (LFM3-Audio) over /v1/realtime.
 
     Each reply is a fresh realtime session on a daemon thread of its own, which hands the audio to the
-    generator through a queue; a second session transcribes the same audio in parallel. Nothing
-    here is bound to the thread that resumes the generator, so fastrtc may resume it from any.
+    generator through a queue; a second session transcribes the same audio in parallel. The
+    instructions carry the current local time (`_context_lines`) — switchable, so the live A/B can
+    isolate the line's effect. Nothing here is bound to the thread that resumes the generator, so
+    fastrtc may resume it from any.
     """
 
     name = "llamacpp"
@@ -445,6 +539,7 @@ class LlamaCppResponder:
         max_output_tokens: int = config.LLAMACPP_MAX_OUTPUT_TOKENS,
         tools: list[dict] | None = None,
         executor: Callable[[str, str], str] | None = None,
+        clock: bool = True,
     ):
         self._url = url
         self._prompt = prompt
@@ -459,6 +554,8 @@ class LlamaCppResponder:
         if self._tools and executor is None:
             executor = execute_tool(url, timeout)
         self._executor = executor
+        # Switchable so the live A/B can isolate the clock line's effect
+        self._clock = clock
 
     def respond(self, audio: AudioFrame, history: Sequence[Message], turn: Turn) -> Iterator[AudioFrame]:
         # First, so that nothing the reply does can keep the question from being transcribed
@@ -471,10 +568,11 @@ class LlamaCppResponder:
         chunks: queue.Queue = queue.Queue()
         cancelled = threading.Event()
         progress = [("", 0)]  # (reply text, audio samples) received so far; replaced whole by the session thread
+        context = _context_lines(clock=self._clock)
         threading.Thread(
             target=_converse,
-            args=(self._url, self._timeout, _instructions(self._prompt, history), audio, chunks, cancelled, progress,
-                  self._max_output_tokens, self._tools, self._executor, turn),
+            args=(self._url, self._timeout, _instructions(self._prompt, history, context), audio, chunks, cancelled,
+                  progress, self._max_output_tokens, self._tools, self._executor, turn),
             name="vaice-llamacpp",
             daemon=True,
         ).start()
@@ -493,6 +591,10 @@ class LlamaCppResponder:
                     continue
                 if item is _DONE:
                     break
+                if item is _ROUND:  # a tool round ended: only what follows is the recorded answer
+                    handed_out = 0
+                    turn.set_assistant_text("")
+                    continue
                 if isinstance(item, BaseException):
                     raise item
                 if turn.closed.is_set():

@@ -5,6 +5,7 @@ import subprocess
 import sys
 import threading
 import time
+from datetime import datetime
 
 import numpy as np
 import pytest
@@ -24,6 +25,18 @@ AUDIO = (48000, np.stack([TONE, np.zeros_like(TONE)]))  # 0.1 s of stereo browse
 @pytest.fixture(autouse=True)
 def quick_polls(monkeypatch):
     monkeypatch.setattr(llamacpp, "POLL_SECONDS", 0.02)
+
+
+@pytest.fixture
+def fixed_clock(monkeypatch):
+    """Pin the clock line, so no test straddles a minute boundary between the reply and its assert."""
+
+    class _FixedDatetime:
+        @staticmethod
+        def now():
+            return datetime(2026, 11, 14, 21, 45)
+
+    monkeypatch.setattr(llamacpp, "datetime", _FixedDatetime)
 
 
 class CountingTurn(Turn):
@@ -80,14 +93,14 @@ def test_the_question_is_sent_as_mono_pcm16_at_the_rate_the_server_announces(rea
     assert len(server2.conversation().audio) == 800 * 2
 
 
-def test_the_session_is_configured_before_any_audio(realtime):
+def test_the_session_is_configured_before_any_audio(realtime, fixed_clock):
     server = realtime()
     drive(LlamaCppResponder(server.url, "Be brief."))
 
     conn = server.conversation()
     assert conn.types == ["session.update", "input_audio_buffer.append", "response.create"]
     assert conn.session == {
-        "instructions": f"{MODE_INSTRUCTION} Be brief.",
+        "instructions": f"{MODE_INSTRUCTION} Be brief.\n{llamacpp._clock_line()}",
         "output_modalities": ["text", "audio"],
         "max_output_tokens": config.LLAMACPP_MAX_OUTPUT_TOKENS,
     }
@@ -100,13 +113,13 @@ def test_a_custom_reply_cap_is_sent_as_max_output_tokens(realtime):
     assert server.conversation().session["max_output_tokens"] == 77
 
 
-def test_earlier_turns_go_into_the_instructions_as_text(realtime):
+def test_earlier_turns_go_into_the_instructions_as_text(realtime, fixed_clock):
     server = realtime()
     history = [("user", "What is the capital of France?"), ("assistant", "Paris,\nof course.")]
     drive(LlamaCppResponder(server.url, "Be brief."), history=history)
 
     assert server.conversation().session["instructions"] == (
-        f"{MODE_INSTRUCTION} Be brief."
+        f"{MODE_INSTRUCTION} Be brief.\n{llamacpp._clock_line()}"
         "<|im_end|>\n<|im_start|>user\nWhat is the capital of France?"
         "<|im_end|>\n<|im_start|>assistant\nParis, of course."
     )
@@ -124,10 +137,37 @@ def test_control_tokens_are_stripped_from_turn_text():
     )
 
 
-def test_the_mode_line_is_there_even_without_a_prompt(realtime):
+def test_the_mode_line_is_there_even_without_a_prompt(realtime, fixed_clock):
     server = realtime()
     drive(LlamaCppResponder(server.url, ""))
-    assert server.conversation().session["instructions"] == MODE_INSTRUCTION
+    assert server.conversation().session["instructions"] == f"{MODE_INSTRUCTION}\n{llamacpp._clock_line()}"
+
+
+def test_the_clock_line_states_the_local_date_and_time(fixed_clock):
+    line = llamacpp._clock_line()
+    assert line.startswith("You know the current date and time: Saturday, November 14, 2026 at 09:45 PM ")
+    assert " ." not in line  # the zone name is filled in (%Z), whatever the machine's timezone is
+    assert line.endswith("Use it when asked about the date or time.")
+
+
+def test_the_instructions_carry_the_clock_line(realtime, fixed_clock):
+    server = realtime()
+    history = [("user", "Hi there"), ("assistant", "Hello.")]
+    drive(LlamaCppResponder(server.url, "", tools=[TIME_TOOL], executor=lambda name, args: "ok"), history=history)
+
+    instructions = server.conversation().session["instructions"]
+    assert llamacpp._clock_line() in instructions
+    # the context line stays inside the system block, before the first ChatML turn
+    assert instructions.index(llamacpp._clock_line()) < instructions.index("<|im_end|>")
+
+    plain = realtime()
+    drive(LlamaCppResponder(plain.url, ""))
+    without_tools = plain.conversation().session["instructions"]
+    assert llamacpp._clock_line() in without_tools  # the clock is for every reply
+
+    off = realtime()
+    drive(LlamaCppResponder(off.url, "", clock=False))
+    assert off.conversation().session["instructions"] == MODE_INSTRUCTION
 
 
 def test_the_question_is_also_transcribed_in_a_session_of_its_own(realtime):
@@ -260,9 +300,97 @@ def test_a_tool_call_is_executed_and_its_result_spoken(realtime):
                           "conversation.item.create", "response.create"]
     # the first response inherits required; the one after the result must be allowed to answer
     assert tool_choices(conn) == [None, {"tool_choice": "auto"}]
-    assert turn.assistant_text == "Let me check. It is noon."  # the tags are gone, the rounds joined
+    assert turn.assistant_text == "It is noon."  # the preamble before the tool result is not the answer
     assert [len(samples) for _, samples in frames] == [2]  # only the spoken answer has audio
     assert turn.tool_events == [{"name": "get_info", "arguments": "{}", "output": "os: Darwin"}]
+
+
+def test_what_is_said_before_a_tool_result_is_not_recorded_as_the_answer(realtime):
+    """The preamble was working out loud: it still comes out as audio, but only the final round's
+    text is the turn's answer, so a wrong first pass cannot end up in history."""
+    server = realtime(
+        reply=[
+            [("text", "Let me check the time."), ("audio", pcm(1)),
+             ("call", "item_1", "get_info", "call_9", "{}"), ("done",)],
+            [("text", "It is noon."), ("audio", pcm(1, 2)), ("done",)],
+        ],
+    )
+    turn = Turn()
+    frames = drive(tool_responder(server, lambda name, args: '{"os": "Darwin"}'), turn=turn)
+
+    assert [len(samples) for _, samples in frames] == [1, 2]  # the preamble was spoken all the same
+    assert turn.assistant_text == "It is noon."
+    assert turn.tool_events == [{"name": "get_info", "arguments": "{}", "output": "os: Darwin"}]
+
+
+def test_a_second_tool_round_drops_the_text_that_preceded_it_too(realtime):
+    server = realtime(
+        reply=[
+            [("text", "Let me check."), ("call", "item_1", "get_info", "call_1", "{}"), ("done",)],
+            [("text", "Checking again."), ("call", "item_2", "get_info", "call_2", "{}"), ("done",)],
+            [("text", "It is noon."), ("audio", pcm(1)), ("done",)],
+        ],
+    )
+    turn = Turn()
+    drive(tool_responder(server, lambda name, args: "os: Darwin"), turn=turn)
+
+    assert turn.assistant_text == "It is noon."
+    assert [event["name"] for event in turn.tool_events] == ["get_info", "get_info"]
+
+
+def test_a_repeated_tail_is_detected_as_a_loop():
+    assert llamacpp._loop_block("It is noon.\n" + "2026-11-14 21:34:00 EST\n" * llamacpp.LOOP_REPEATS) == 1
+    assert llamacpp._loop_block("It is noon.\n" + "a\nb\nc\n" * llamacpp.LOOP_REPEATS) == 3
+    # near-identical lines count as repeats: the observed loops vary punctuation and case
+    assert llamacpp._loop_block("It is noon.\n" + "2026-11-14 21:34:00 EST\n2026-11-14 21:34:00 EST.\n" * 2) == 1
+    assert llamacpp._loop_block("It is noon.\nOnce more.\n") is None
+    assert llamacpp._loop_block("same\nsame\n") is None  # two repeats: not yet a loop
+    assert llamacpp._loop_block("") is None
+    assert llamacpp._loop_block("a\nb\nc\nd\ne\n" * llamacpp.LOOP_REPEATS) is None  # past the block cap
+
+
+def test_the_repeated_tail_is_dropped_entirely():
+    # real content before the loop: every copy of the loop goes, the answer stays
+    assert llamacpp._trim_repeats(["Answer.", "t", "t", "t."], 1) == ["Answer."]
+    # the answer itself is the looped line: one copy is kept, so the turn still knows the answer
+    assert llamacpp._trim_repeats(["macOS.", "macOS.", "macOS."], 1) == ["macOS."]
+    assert llamacpp._trim_repeats(["a", "b", "c", "a", "b", "c"], 3) == ["a", "b", "c"]
+    assert llamacpp._trim_repeats(["Answer.", "t"], 1) == ["Answer.", "t"]  # one copy is no repeat
+    assert llamacpp._trim_repeats(["Answer."], 1) == ["Answer."]
+
+
+def test_a_repetition_loop_is_cut_off_after_the_answer(realtime, caplog):
+    """Under greedy decoding the model sometimes cannot stop after answering and loops to the
+    token cap (seconds of junk audio). The reply is cut at the loop: the answer is kept."""
+    tail = "2026-11-14 21:34:00 EST\n"
+    server = realtime(reply=[
+        ("text", "It is noon.\n"), ("audio", pcm(1)), ("text", tail * llamacpp.LOOP_REPEATS),
+        ("audio", pcm(1)), ("done",),
+    ])
+    turn = Turn()
+    with caplog.at_level(logging.WARNING, logger="vaice.responders.llamacpp"):
+        frames = drive(LlamaCppResponder(server.url, ""), turn=turn)
+
+    assert turn.assistant_text == "It is noon."  # the repeated tail is not recorded
+    assert "repetition loop" in caplog.text
+    assert [len(samples) for _, samples in frames] == [1]  # the audio past the cut was never handed out
+    wait_for_threads_to_end()
+
+
+def test_a_loop_with_variants_is_cut_and_the_record_keeps_the_answer(realtime, caplog):
+    """Lines differing only in punctuation are the same repeat (normalized compare); the record
+    keeps the answer, not even one copy of the loop."""
+    server = realtime(reply=[
+        ("text", "It is noon.\n"), ("audio", pcm(1)),
+        ("text", "2026-11-14 21:34:00 EST\n" * 2 + "2026-11-14 21:34:00 EST.\n" * 2), ("done",),
+    ])
+    turn = Turn()
+    with caplog.at_level(logging.WARNING, logger="vaice.responders.llamacpp"):
+        drive(LlamaCppResponder(server.url, ""), turn=turn)
+
+    assert turn.assistant_text == "It is noon."
+    assert "repetition loop" in caplog.text
+    wait_for_threads_to_end()
 
 
 def test_a_tool_call_beyond_the_round_cap_ends_the_reply(realtime, caplog):
