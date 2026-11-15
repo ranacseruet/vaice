@@ -679,15 +679,25 @@ def _warn_text_temperature(url: str) -> None:
     decoding for text (`--temp 0`); at the default 0.8 a 2B audio model drifts off-topic and loses
     the conversation thread. The audio sampling params are separate (they come from the GGUF), so
     the speech sounds fine while the content is not. Non-fatal: a props problem must not break
-    startup (a router-style /props has no params at all).
+    startup. When the temperature cannot be read — a router-style /props has no params, or the
+    check itself fails — this logs a hint instead of staying silent: an absent warning must not
+    be mistaken for "greedy is fine".
     """
     try:
         r = requests.get(f"{url}/props", timeout=CHECK_TIMEOUT)
         settings = r.json().get("default_generation_settings") or {}
         temp = (settings.get("params") or {}).get("temperature")
-    except (requests.RequestException, ValueError, AttributeError):
+    except (requests.RequestException, ValueError, AttributeError) as exc:
+        log.warning(
+            "could not verify the server's temperature (/props failed: %s: %s); replies may drift — "
+            "start llama-server with --temp 0", type(exc).__name__, exc)
         return
-    if isinstance(temp, (int, float)) and temp > 0:
+    if not isinstance(temp, (int, float)):
+        log.warning(
+            "could not verify the server's temperature (/props reports none, e.g. a router-style "
+            "/props without params); replies may drift — start llama-server with --temp 0")
+        return
+    if temp > 0:
         log.warning(
             "llama-server samples reply text at temperature %g; the LFM3-Audio model card recommends "
             "greedy decoding for text (start llama-server with --temp 0). Higher temperatures make a "

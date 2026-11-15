@@ -1019,18 +1019,21 @@ def test_a_greedy_server_gets_no_temperature_warning(monkeypatch, caplog):
     assert "temperature" not in caplog.text
 
 
-def test_a_props_response_without_params_gets_no_temperature_warning(monkeypatch, caplog):
+def test_a_props_response_without_params_logs_a_hint(monkeypatch, caplog):
     serve_checks(monkeypatch, Reply(), Reply(body=models("text", "audio")), props_with(None))
     with caplog.at_level(logging.WARNING, logger="vaice.responders.llamacpp"):
         check_server("http://h:1")
-    assert "temperature" not in caplog.text
+    assert "could not verify the server's temperature" in caplog.text
+    assert "--temp 0" in caplog.text
 
 
-def test_a_failing_props_check_is_not_fatal(monkeypatch, caplog):
+def test_a_failing_props_check_logs_a_hint_and_is_not_fatal(monkeypatch, caplog):
     serve_checks(monkeypatch, Reply(), Reply(body=models("text", "audio")),
                  props=requests.ConnectionError("refused"))
-    check_server("http://h:1")  # must not raise
-    assert "temperature" not in caplog.text
+    with caplog.at_level(logging.WARNING, logger="vaice.responders.llamacpp"):
+        check_server("http://h:1")  # must not raise
+    assert "could not verify the server's temperature" in caplog.text
+    assert "--temp 0" in caplog.text
 
 
 def test_a_model_that_cannot_speak_is_an_error_naming_it(monkeypatch):

@@ -25,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - A tool round could not end in an answer: the follow-up response inherited `tool_choice: "required"`, so the model called again, repeated the raw result in its text, and could loop until the token cap (live: the same sentence repeated to 1024 tokens, 62.7 s of audio).
 - A reply that hit the 2-round tool cap now gets a forced final answer instead of stopping after the last call.
+- A router-style `/props` (no `params`) or a failed `/props` fetch is no longer silent: `vaice` now logs a distinct hint ("could not verify the server's temperature … start llama-server with `--temp 0`"), so a missing temperature warning cannot be mistaken for greedy decoding being configured.
 - A transcription session whose server never answers the websocket upgrade no longer blocks its thread for the whole `VAICE_LLAMACPP_TIMEOUT` (120 s): the handshake now uses the short startup-check timeout, as a transcription is best-effort and degrades to an empty transcript anyway.
 - A tool call can no longer block the session thread for the whole 120 s timeout while ignoring a stop: the default executor streams `POST /tools` with a short read timeout and re-checks the reply's stop signal (a barge-in or the app stopping), so a stopped reply gives up within about a second; the session also no longer asks the model to continue after the tool results when the stop already fired.
 - The "reply had no audio" warning no longer fires for a tool-call response, which has no audio by design.
