@@ -194,7 +194,7 @@ _OPEN_BLOCK = re.compile(r"<tool_call>|<function(=[^>\s]*)?>")
 _CONTROL = re.compile(r"<\|.*?\|>")
 # Simple tokens the stray-markup rules know about; used to hold back a trailing partial tag while streaming
 _TOKEN_PREFIXES = ("<tool_call>", "</tool_call>", "<think>", "</think>", "<thinking>", "</thinking>",
-                   "<answer>", "</answer>", "</function>")
+                   "<answer>", "</answer>", "<function>", "</function>")
 
 
 def _next_markup(text: str):
@@ -265,6 +265,11 @@ class _MarkupStripper:
                 self._drop_close = None
                 continue
             found = _next_markup(self._pending)
+            if found is not None and found[1] == len(self._pending) and not found[2].endswith(">"):
+                # an orphan tag sitting at the very end of what we have seen: it may still grow
+                # (<answer -> <answer>), so hold it for the next delta instead of consuming it —
+                # only a boundary (a ">" or any other character) settles it
+                found = None
             if found is not None:
                 s, e, tok = found
                 if s:

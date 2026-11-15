@@ -729,6 +729,45 @@ def test_the_markup_stripper_holds_a_truncated_orphan_tag_to_the_end():
     assert out == "the answer is 42."  # the trailing partial tag is markup: dropped, not recorded
 
 
+def test_incomplete_simple_tags_are_deferred_until_the_boundary_arrives():
+    stripper = llamacpp._MarkupStripper()
+    out = ""
+    for chunk in ("<answer", ">hello</answer", ">"):
+        out += stripper.feed(chunk)
+    assert out == "hello"
+
+    stripper = llamacpp._MarkupStripper()
+    out = ""
+    for chunk in "<thinking>hello</thinking>":
+        out += stripper.feed(chunk)
+    assert out == "hello"
+
+
+def test_partial_function_openers_are_held_back():
+    stripper = llamacpp._MarkupStripper()
+    out = stripper.feed("<fun")
+    out += stripper.feed('ction=get_info>{"x":1}</function>ok')
+    assert out == "ok"
+
+
+def test_the_function_opener_split_at_every_point():
+    full = '<function=get_info>{"x":1}</function>ok'
+    for cut in range(1, len("<function=get_info>") + 1):
+        stripper = llamacpp._MarkupStripper()
+        out = stripper.feed(full[:cut])
+        out += stripper.feed(full[cut:])
+        assert out == "ok", f"split at {cut}"
+
+
+def test_the_tool_call_opener_split_at_every_point():
+    full = "<tool_call>{\"n\": 1}</tool_call>ok"
+    for cut in range(1, len("<tool_call>") + 1):
+        stripper = llamacpp._MarkupStripper()
+        out = stripper.feed(full[:cut])
+        out += stripper.feed(full[cut:])
+        assert out == "ok", f"split at {cut}"
+
+
 def test_a_reply_with_markup_records_clean_text(realtime):
     server = realtime(reply=[[("text", "It is noon.<tool_call>{\"name\": \"get_info\"}</tool_call> "),
                               ("text", "It is sunny.</think and a stray <|im_start|> token."),
