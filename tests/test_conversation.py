@@ -484,3 +484,30 @@ def test_tool_activity_for_ui_is_bounded_to_the_last_events():
 
     panel = conv.tool_activity_for_ui(turns)
     assert "tool_19" in panel and "tool_0" not in panel
+
+
+def test_add_tool_event_caps_long_output_with_a_marker():
+    turn = Turn()
+    turn.add_tool_event("read_file", "{}", "x" * 5000)
+
+    output = turn.tool_events[0]["output"]
+    assert len(output) == conv.TOOL_EVENT_OUTPUT_CHARS
+    assert output.endswith("... (truncated)")
+
+
+def test_tool_activity_for_ui_marks_truncated_output():
+    turn = Turn()
+    turn.tool_events.append({"name": "read_file", "arguments": "{}", "output": "y" * 5000})
+
+    panel = conv.tool_activity_for_ui([turn])
+    assert "... (truncated)" in panel
+    assert len(panel) < conv.TOOL_EVENT_OUTPUT_CHARS + 100
+
+
+def test_a_capped_output_is_capped_only_once():
+    turn = Turn()
+    turn.add_tool_event("read_file", "{}", "x" * 5000)
+    once = turn.tool_events[0]["output"]
+    turn.add_tool_event("again", "{}", turn.tool_events[0]["output"])
+
+    assert turn.tool_events[1]["output"] == once  # the marker is not doubled

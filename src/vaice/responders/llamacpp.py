@@ -3,6 +3,7 @@ import base64
 import json
 import logging
 import queue
+import re
 import threading
 import time
 from collections.abc import Callable, Iterator, Sequence
@@ -183,11 +184,110 @@ class _ToolCall:
         self.arguments = ""
 
 
-def _strip_tool_tags(delta: str) -> str:
-    """Tool rounds leak the tool-call answer tags into the text deltas; the audio does not."""
-    for tag in ("<answer>", "</answer>"):
-        delta = delta.replace(tag, "")
-    return delta
+# Simple tags: dropped outright. The closing ">" is optional on the thinking/answer names on purpose:
+# a trailing or orphan `</think` (observed live) is dropped too. Closes of tool_call/function are
+# dropped the same way. The lookahead keeps `<answerful>` from matching `<answer` + prose.
+_TAG_SIMPLE = re.compile(
+    r"</?(?:thinking|think|answer)(?![A-Za-z0-9])(=[^>\s]*)?>?"
+    r"|</(?:tool_call|function)(?![A-Za-z0-9])(=[^>\s]*)?>?"
+)
+# Block openers must be complete (a ">"): they start dropping through their close tag. A truncated
+# opener is never opened, so a split `<to` + `ol_call>` cannot leak its JSON body as prose either.
+_OPEN_BLOCK = re.compile(r"<tool_call>|<function(=[^>\s]*)?>")
+_CONTROL = re.compile(r"<\|.*?\|>")
+# Simple tokens the stray-markup rules know about; used to hold back a trailing partial tag while streaming
+_TOKEN_PREFIXES = ("<tool_call>", "</tool_call>", "<think>", "</think>", "<thinking>", "</thinking>",
+                   "<answer>", "</answer>", "</function>")
+
+
+def _next_markup(text: str):
+    """The leftmost complete markup token in `text`, as (start, end, token); None when there is none."""
+    best = None
+    for rx in (_CONTROL, _TAG_SIMPLE, _OPEN_BLOCK):
+        m = rx.search(text)
+        if m and (best is None or m.start() < best[0]):
+            best = (m.start(), m.end(), m.group(0))
+    return best
+
+
+def _holdback(text: str) -> int:
+    """The length of the trailing suffix of `text` that could grow into a markup token.
+
+    Only such a suffix is withheld; everything else is emitted. A bare "<" holds back one char,
+    "</think" holds back seven (an observed trailing leak), "<|im" holds back four, and so on.
+    """
+    for m in re.finditer(r"<", text):
+        rem = text[m.start():]
+        low = rem.lower()
+        if any(prefix.lower().startswith(low) for prefix in _TOKEN_PREFIXES):
+            return len(rem)
+        if low == "<" or low == "</":
+            return len(rem)
+        if low.startswith(("<tool_call", "<function", "</function")) and ">" not in low:
+            return len(rem)
+        if low.startswith("<|") and "|>" not in low and len(low) <= 100:
+            return len(rem)
+    return 0
+
+
+def _partial_suffix(text: str, target: str) -> int:
+    """The length of the longest suffix of `text` that is a prefix of `target` (a split close tag)."""
+    for n in range(min(len(text), len(target) - 1), 0, -1):
+        if text.endswith(target[:n]):
+            return n
+    return 0
+
+
+class _MarkupStripper:
+    """Drops model markup from the streaming text, across deltas.
+
+    LFM3-Audio leaks its tool/reasoning scaffolding into the text it speaks and writes: a raw
+    `<tool_call>{...}</tool_call>` block, orphan `</think` fragments, stray `<|im_start|>`-style
+    control tokens, the `<answer>` delimiters. The audio is unaffected; the recorded transcript
+    and the UI are not. Tokens can be split across deltas, so the stripper holds back a trailing
+    suffix that could grow into one; anything withheld is markup, and a reply that ends without it
+    arriving simply never emits it. A `<tool_call>`/`<function=...>` block (which can span deltas)
+    is dropped through its close tag; an unterminated block is dropped entirely.
+    """
+
+    def __init__(self) -> None:
+        self._pending = ""
+        self._drop_close: str | None = None
+
+    def feed(self, delta: str) -> str:
+        self._pending += delta
+        out: list[str] = []
+        while self._pending:
+            if self._drop_close is not None:
+                i = self._pending.find(self._drop_close)
+                if i == -1:  # still inside the block: hold back only a split close tag
+                    self._pending = self._pending[len(self._pending) - _partial_suffix(self._pending,
+                                                                                    self._drop_close):]
+                    return "".join(out)
+                self._pending = self._pending[i + len(self._drop_close):]
+                self._drop_close = None
+                continue
+            found = _next_markup(self._pending)
+            if found is not None:
+                s, e, tok = found
+                if s:
+                    out.append(self._pending[:s])
+                self._pending = self._pending[e:]
+                low = tok.lower()
+                if low.startswith("<tool_call>"):
+                    self._drop_close = "</tool_call>"
+                elif low.startswith("<function") and low.endswith(">"):
+                    self._drop_close = "</function>"
+                continue  # a simple tag is dropped outright
+            hb = _holdback(self._pending)
+            if hb == 0:
+                out.append(self._pending)
+                self._pending = ""
+            else:  # a partial token: hold it back for the next delta; a reply that ends never emits it
+                out.append(self._pending[:len(self._pending) - hb])
+                self._pending = self._pending[len(self._pending) - hb:]
+            break
+        return "".join(out)
 
 
 def _normalized(line: str) -> str:
@@ -296,6 +396,7 @@ def _converse(
         return cancelled.is_set() or lifecycle.stopping.is_set()
 
     acc = ["", 0]  # the current round's text and samples; a fresh one per round (frames keep the old)
+    stripper = _MarkupStripper()  # fresh with each round, like acc: block state must not leak across rounds
     try:
         with _open(url, timeout) as ws:
             session = _Session(ws, timeout, stop)
@@ -327,7 +428,7 @@ def _converse(
                         if call.item_id == event.get("item_id"):
                             call.arguments += event.get("delta", "")
                 elif kind == "response.output_text.delta":
-                    acc[0] += _strip_tool_tags(event.get("delta", ""))
+                    acc[0] += stripper.feed(event.get("delta", ""))
                     trimmed = _loop_trimmed(acc[0])
                     if trimmed is not None:
                         # the reply cannot stop itself: record it without the repeated tail and end
@@ -365,6 +466,7 @@ def _converse(
                     # keep the old one); the marker goes out ahead of this round's frames, so the
                     # consumer's handed-out count restarts with them too.
                     acc = ["", 0]
+                    stripper = _MarkupStripper()
                     out.put(_ROUND)
                     for call in calls:
                         log.info("llamacpp tool call %s(%s)", call.name, call.arguments)

@@ -20,6 +20,17 @@ INAUDIBLE = "(inaudible)"
 INTERRUPTED = " (interrupted)"
 _clock = time.monotonic  # when playback started/stopped; tests substitute a fake
 _VERSION = 1
+# The model-facing tool output was already compacted (responders/llamacpp toolcaps); what is recorded
+# and shown in the UI's activity panel is stored capped, so a long file does not bloat the panel or
+# conversation.json. The cap is idempotent: re-applying it to an already-capped value changes nothing.
+TOOL_EVENT_OUTPUT_CHARS = 800
+_TRUNCATED = "... (truncated)"
+
+
+def _cap(text: str, limit: int) -> str:
+    if len(text) <= limit or len(_TRUNCATED) >= limit:
+        return text
+    return text[: limit - len(_TRUNCATED)].rstrip() + _TRUNCATED
 
 
 class Turn:
@@ -66,9 +77,14 @@ class Turn:
             self._changed()
 
     def add_tool_event(self, name: str, arguments: str, output: str) -> None:
-        """A tool call the reply made, for the UI's tool-activity panel; never sent to the model."""
+        """A tool call the reply made, for the UI's tool-activity panel; never sent to the model.
+
+        The output is stored capped: it is what the model saw (the compacted output), and the
+        panel and the saved conversation stay bounded no matter how large the tool result was.
+        """
         with self._lock:
-            self.tool_events.append({"name": name, "arguments": arguments, "output": output})
+            self.tool_events.append({"name": name, "arguments": arguments,
+                                     "output": _cap(output, TOOL_EVENT_OUTPUT_CHARS)})
             self._changed()
 
     def audio_handed_out(self, seconds: float, now: float | None = None) -> None:
@@ -171,6 +187,8 @@ def tool_activity_for_ui(turns: list[Turn], events: int = 10) -> str:
 
     The tool output was already compacted for the model (see `responders.llamacpp`), so it is short
     enough to show; the arguments are the model's own JSON and can run long, so they are cut.
+    Outputs are capped with an explicit marker as well (events from files written before the cap
+    was added carry the full compacted text).
     """
     shown: list[str] = []
     for turn in turns:
@@ -178,7 +196,8 @@ def tool_activity_for_ui(turns: list[Turn], events: int = 10) -> str:
             arguments = " ".join(event["arguments"].split())
             if len(arguments) > 120:
                 arguments = arguments[:120].rstrip() + "..."
-            shown.append(f"**{event['name']}** `{arguments}`\n```\n{event['output']}\n```")
+            output = _cap(event["output"], TOOL_EVENT_OUTPUT_CHARS)
+            shown.append(f"**{event['name']}** `{arguments}`\n```\n{output}\n```")
     return "\n\n".join(shown[-events:])
 
 

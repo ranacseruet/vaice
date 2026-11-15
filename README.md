@@ -155,9 +155,12 @@ the audio includes them varies, so keep the caps conservative.
 
 Tool calls and their results are kept **out of the conversation**: the chatbot shows only what was
 said, and each call lands in the collapsed *Tool activity* panel under it (name, arguments, result;
-the last 10 across the conversation). There is no weather tool in llama-server — a question it
-cannot answer with the configured tools is refused (or, with `exec_shell_command` enabled, the
-model improvises a shell command, which is one more reason to keep that tool out).
+the last 10 across the conversation, each result capped at 800 characters with a `... (truncated)`
+marker). The transcript that is recorded and shown is also cleaned of the model's scaffolding
+(`<tool_call>…</tool_call>` blocks, `</think` fragments, stray `<|…|>` control tokens). There is
+no weather tool in llama-server — a question it cannot answer with the configured tools is refused
+(or, with `exec_shell_command` enabled, the model improvises a shell command, which is one more
+reason to keep that tool out).
 
 ### Startup & Shutdown
 At startup, `vaice` checks `llama-server`:
