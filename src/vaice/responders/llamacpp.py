@@ -27,6 +27,9 @@ POLL_SECONDS = 0.25
 # The close handshake of a socket whose server is busy or gone must not hold a thread for long
 CLOSE_TIMEOUT = 1.0
 CHECK_TIMEOUT = 2  # seconds for the startup HTTP checks
+# How often a tool call in flight re-checks whether the reply was stopped. The read timeout of the
+# streaming POST is this long, so a hanging tool gives up within about one interval.
+TOOL_READ_TIMEOUT = 1.0
 # The maximum number of tool rounds a reply may make after its first response. A tool round is one
 # response that asked for tools, their execution, and the response that speaks the results; the cap
 # keeps a tool-calling loop from running away with the session (and the mic).
@@ -373,6 +376,8 @@ def _converse(
                         session.send({"type": "conversation.item.create", "item": {
                             "type": "function_call_output", "call_id": call.call_id, "output": output}})
                     calls = []
+                    if stop():  # don't ask the model to continue after the user or the app stopped
+                        raise _Stopped
                     # after the first round, let the model chain; at the cap, force the answer
                     _create_response(session, "auto" if rounds < MAX_TOOL_ROUNDS else "none")
     except _Stopped:
@@ -425,7 +430,7 @@ def write_capable_tools(url: str, timeout: float = CHECK_TIMEOUT) -> list[str]:
     return [str(entry.get("tool")) for entry in r.json() if (entry.get("permissions") or {}).get("write")]
 
 
-def execute_tool(url: str, timeout: float) -> Callable[[str, str], str]:
+def execute_tool(url: str, timeout: float, stop: Callable[[], bool] | None = None) -> Callable[[str, str], str]:
     """What a `function_call` is worth: `POST {url}/tools` with `{"tool": name, "params": {...}}`.
 
     The server reads the tool's parameters from `params` (a JSON object), not from the model's
@@ -435,6 +440,12 @@ def execute_tool(url: str, timeout: float) -> Callable[[str, str], str]:
     must be spoken too, not raised: this runs on the session thread, and the result (not the
     traceback) is what the model sees and what `app.py` shows in the UI. A closure over `url` and
     `timeout`, mirroring how `_open` builds the websocket.
+
+    The request is streamed with a short read timeout and re-checked against `stop` (when given),
+    so a tool call that outlives a stop returns within about `TOOL_READ_TIMEOUT` instead of
+    blocking the session thread for the whole `timeout` — the caller decides what an aborted call
+    is worth (`_converse` stops the session on a stop). `timeout` bounds the call overall: when it
+    passes before the reply is complete, the call fails instead of waiting forever.
     """
 
     def call(name: str, arguments: str) -> str:
@@ -444,13 +455,31 @@ def execute_tool(url: str, timeout: float) -> Callable[[str, str], str]:
             return f"tool {name} failed: arguments are not JSON: {arguments!r}"
         if not isinstance(params, dict):
             return f"tool {name} failed: arguments are not a JSON object: {arguments!r}"
+        if stop is not None and stop():
+            return f"tool {name} aborted: the reply was stopped"
+        deadline = time.monotonic() + timeout
         try:
-            r = requests.post(f"{url}/tools", json={"tool": name, "params": params}, timeout=timeout)
+            with requests.post(f"{url}/tools", json={"tool": name, "params": params},
+                               timeout=(CHECK_TIMEOUT, TOOL_READ_TIMEOUT), stream=True) as r:
+                if not r.ok:
+                    return f"tool {name} failed: HTTP {r.status_code}: {r.text[:200]}"
+                chunks: list[bytes] = []
+                iterator = r.iter_content(chunk_size=65536)
+                while True:
+                    if time.monotonic() > deadline:
+                        return f"tool {name} failed: timed out after {timeout:g}s"
+                    if stop is not None and stop():
+                        return f"tool {name} aborted: the reply was stopped"
+                    try:
+                        chunk = next(iterator, None)
+                    except requests.ReadTimeout:
+                        continue  # the server is still working: re-check stop and the deadline
+                    if chunk is None:
+                        break  # the server finished the reply
+                    chunks.append(chunk)
         except requests.RequestException as exc:
             return f"tool {name} failed: {exc}"
-        if not r.ok:
-            return f"tool {name} failed: HTTP {r.status_code}: {r.text[:200]}"
-        return str(r.text)
+        return b"".join(chunks).decode(getattr(r, "encoding", None) or "utf-8", errors="replace")
 
     return call
 
@@ -568,10 +597,9 @@ class LlamaCppResponder:
         # The server's built-in tools (fetch_tools), declared in session.update and executed through
         # the server's /tools endpoint; None = no tools, the session.update of before. The server
         # decides which tools those are (--tools) and refuses to execute anything it did not
-        # advertise, so the executor passes every call through.
+        # advertise, so the executor passes every call through. The default executor is built per
+        # reply (respond()), because it carries that reply's stop signal.
         self._tools = tools or None
-        if self._tools and executor is None:
-            executor = execute_tool(url, timeout)
         self._executor = executor
         # Switchable so the live A/B can isolate the clock line's effect
         self._clock = clock
@@ -586,11 +614,17 @@ class LlamaCppResponder:
         ).start()
         chunks: queue.Queue = queue.Queue()
         cancelled = threading.Event()
+        # The default executor is per reply: it carries this reply's stop signal, so an in-flight
+        # tool call gives up when the user barges in or the app stops
+        executor = self._executor
+        if executor is None and self._tools:
+            executor = execute_tool(self._url, self._timeout,
+                                    stop=lambda: cancelled.is_set() or lifecycle.stopping.is_set())
         context = _context_lines(clock=self._clock)
         threading.Thread(
             target=_converse,
             args=(self._url, self._timeout, _instructions(self._prompt, history, context), audio, chunks, cancelled,
-                  self._max_output_tokens, self._tools, self._executor, turn),
+                  self._max_output_tokens, self._tools, executor, turn),
             name="vaice-llamacpp",
             daemon=True,
         ).start()

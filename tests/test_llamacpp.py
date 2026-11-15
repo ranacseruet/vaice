@@ -567,19 +567,21 @@ def test_a_tool_call_finishing_after_a_barge_in_is_still_reported(realtime):
 def test_the_default_executor_posts_the_tool_to_the_server(monkeypatch):
     posted = []
 
-    def post(url, json=None, timeout=None):
-        posted.append((url, json, timeout))
+    def post(url, json=None, timeout=None, stream=None):
+        posted.append((url, json, timeout, stream))
         return Reply(body='{"os": "Darwin"}')
 
     monkeypatch.setattr(llamacpp.requests, "post", post)
     execute = llamacpp.execute_tool("http://h:1", 7.0)
     assert execute("get_info", "{}") == '{"os": "Darwin"}'
-    assert posted == [("http://h:1/tools", {"tool": "get_info", "params": {}}, 7.0)]
+    assert posted == [("http://h:1/tools", {"tool": "get_info", "params": {}},
+                       (llamacpp.CHECK_TIMEOUT, llamacpp.TOOL_READ_TIMEOUT), True)]
 
     posted.clear()
     assert execute("read_file", '{"path": "/tmp/secret.txt", "start_line": 1}') == '{"os": "Darwin"}'
     assert posted == [("http://h:1/tools",
-                       {"tool": "read_file", "params": {"path": "/tmp/secret.txt", "start_line": 1}}, 7.0)]
+                       {"tool": "read_file", "params": {"path": "/tmp/secret.txt", "start_line": 1}},
+                       (llamacpp.CHECK_TIMEOUT, llamacpp.TOOL_READ_TIMEOUT), True)]
 
     assert "arguments are not JSON" in execute("read_file", "{not json")
     assert "arguments are not a JSON object" in execute("read_file", '["path"]')
@@ -588,11 +590,42 @@ def test_the_default_executor_posts_the_tool_to_the_server(monkeypatch):
     monkeypatch.setattr(llamacpp.requests, "post", lambda *a, **k: (_ for _ in ()).throw(requests.ConnectionError("x")))
     assert llamacpp.execute_tool("http://h:1", 7.0)("get_info", "{}") == "tool get_info failed: x"
 
-    def bad(url, json=None, timeout=None):
+    def bad(url, json=None, timeout=None, stream=None):
         return Reply(status=500, body="boom")
 
     monkeypatch.setattr(llamacpp.requests, "post", bad)
     assert "HTTP 500" in llamacpp.execute_tool("http://h:1", 7.0)("get_info", "{}")
+
+
+def test_a_tool_call_does_not_start_when_the_reply_was_already_stopped(monkeypatch):
+    def unexpected(*a, **k):
+        raise AssertionError("a stopped reply must not reach the server")
+
+    monkeypatch.setattr(llamacpp.requests, "post", unexpected)
+    assert "aborted" in llamacpp.execute_tool("http://h:1", 7.0, stop=lambda: True)("get_info", "{}")
+
+
+def test_a_tool_call_that_outlives_a_stop_gives_up_promptly(monkeypatch):
+    """The tool call outlives stop(): the simulated server never sends a byte, the stop fires
+    mid-call, and the executor must return within seconds instead of the whole open timeout."""
+    stop = threading.Event()
+    monkeypatch.setattr(llamacpp.requests, "post", lambda *a, **k: HangingToolReply())
+    timer = threading.Timer(0.2, stop.set)
+    timer.start()
+    start = time.monotonic()
+    result = llamacpp.execute_tool("http://h:1", 120.0, stop=stop.is_set)("get_info", "{}")
+    elapsed = time.monotonic() - start
+    timer.cancel()
+    assert elapsed < 5
+    assert "aborted" in result
+
+
+def test_a_tool_call_that_never_gets_an_answer_times_out(monkeypatch):
+    monkeypatch.setattr(llamacpp.requests, "post", lambda *a, **k: HangingToolReply())
+    start = time.monotonic()
+    result = llamacpp.execute_tool("http://h:1", 0.3)("get_info", "{}")  # no stop signal at all
+    assert time.monotonic() - start < 5
+    assert "timed out" in result
 
 
 def test_fetch_tools_flattens_every_advertised_tool(monkeypatch):
@@ -871,6 +904,7 @@ class Reply:
         self.ok = status < 400
         self._body = body
         self.text = str(body)
+        self.encoding = "utf-8"
 
     def json(self):
         if self._body is None:
@@ -880,6 +914,34 @@ class Reply:
     def raise_for_status(self):
         if not self.ok:
             raise requests.HTTPError(str(self.status_code))
+
+    # the default executor streams the POST: it must survive `with` and iter_content
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def iter_content(self, chunk_size=65536):
+        payload = self.text.encode("utf-8")
+        for i in range(0, len(payload), chunk_size):
+            yield payload[i:i + chunk_size]
+
+
+class HangingToolReply(Reply):
+    """A /tools response whose server is working and never sends a byte; each read times out."""
+
+    def iter_content(self, chunk_size=65536):
+        return _InfiniteReads()
+
+
+class _InfiniteReads:
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        time.sleep(0.02)
+        raise requests.ReadTimeout("no bytes received")
 
 
 def models(*modalities):
