@@ -10,7 +10,8 @@ from datetime import datetime
 import numpy as np
 import pytest
 import requests
-from fake_realtime import next_on_fresh_thread, pcm
+from fake_realtime import pcm
+from threads import next_on_fresh_thread
 from websockets.exceptions import ConnectionClosedOK
 
 from vaice import config, lifecycle
@@ -703,6 +704,42 @@ def test_the_markup_stripper_holds_a_truncated_orphan_tag_to_the_end():
     assert out == "the answer is 42."  # the trailing partial tag is markup: dropped, not recorded
 
 
+def test_holdback_holds_a_bare_angle_bracket_and_emits_what_is_not_markup():
+    stripper = llamacpp._MarkupStripper()
+    assert stripper.feed("price <") == "price "  # could grow into a token: withheld
+    assert stripper.feed("b") == "<b"  # not any token's prefix: emitted
+
+
+def test_holdback_holds_a_split_closing_tag_and_emits_the_prose_after():
+    stripper = llamacpp._MarkupStripper()
+    assert stripper.feed("stop </thi") == "stop "
+    assert stripper.feed("nk now") == " now"
+
+
+def test_holdback_holds_a_split_function_opener():
+    stripper = llamacpp._MarkupStripper()
+    assert stripper.feed("x <function=ge") == "x "
+    assert stripper.feed("t_info>{json}</function> y") == " y"
+
+
+def test_holdback_holds_a_split_tool_call_and_a_partial_control_token():
+    stripper = llamacpp._MarkupStripper()
+    assert stripper.feed("text <tool_c") == "text "
+    assert stripper.feed("all>body</tool_call> tail") == " tail"
+
+    stripper = llamacpp._MarkupStripper()
+    assert stripper.feed("a <|im") == "a "
+    assert stripper.feed("_start|> b") == " b"
+
+
+def test_the_markup_stripper_drops_a_function_block():
+    stripper = llamacpp._MarkupStripper()
+    out = stripper.feed("a <function=get_info>")
+    out += stripper.feed('{"name": "get_info"}</function> b')
+
+    assert out == "a  b"
+
+
 def test_a_reply_with_markup_records_clean_text(realtime):
     server = realtime(reply=[[("text", "It is noon.<tool_call>{\"name\": \"get_info\"}</tool_call> "),
                               ("text", "It is sunny.</think and a stray <|im_start|> token."),
@@ -710,6 +747,83 @@ def test_a_reply_with_markup_records_clean_text(realtime):
     turn = Turn()
     drive(LlamaCppResponder(server.url, ""), turn=turn)
     assert turn.assistant_text == "It is noon. It is sunny. and a stray  token."
+
+
+# -- error paths and stopping
+
+
+class _NoOutputWs:
+    """A server that never sends anything; the client was already told to stop."""
+
+    def __init__(self):
+        self.sent = []
+
+    def recv(self, timeout):
+        raise TimeoutError
+
+    def send(self, event):
+        self.sent.append(event)
+
+
+def test_a_session_told_to_stop_gives_up_waiting():
+    session = llamacpp._Session(_NoOutputWs(), 120.0, stop=lambda: True)
+    assert session.receive() is None
+    assert session.expect("session.created") is None
+    with pytest.raises(llamacpp._Stopped):
+        session.rates()
+    with pytest.raises(llamacpp._Stopped):
+        session.update({})
+
+
+def test_a_non_json_server_message_fails_the_reply(realtime):
+    server = realtime(reply=[("raw", "this is not json")])
+    with pytest.raises(RuntimeError, match="unexpected llama-server message"):
+        drive(LlamaCppResponder(server.url, ""))
+
+
+def test_a_session_created_without_audio_rates_fails_the_reply(realtime):
+    server = realtime(session_created={"type": "session.created", "session": {}})
+    with pytest.raises(RuntimeError, match=r"session\.created lacks the audio rates"):
+        drive(LlamaCppResponder(server.url, ""))
+
+
+def test_a_transcription_stopped_before_it_can_finish_reports_an_empty_transcript(realtime):
+    server = realtime()
+    turn = CountingTurn()
+    lifecycle.request_stop()  # the app is already stopping when the transcript would be read
+    llamacpp._transcribe_into(server.url, 5.0, AUDIO, turn)  # must not wait the full timeout
+
+    assert turn.user_texts == [""]
+
+
+def test_a_stop_after_the_tool_call_does_not_ask_the_model_to_continue(realtime):
+    server = realtime(reply=[[("call", "item_1", "get_info", "call_1", "{}"), ("done",)]])
+
+    def executor(name, arguments):
+        lifecycle.request_stop()  # the app asked to stop while the tool was running
+        return "ok"
+
+    turn = Turn()
+    assert drive(tool_responder(server, executor), turn=turn) == []
+
+    conn = server.conversation()
+    assert conn.types == ["session.update", "input_audio_buffer.append", "response.create",
+                          "conversation.item.create"]  # the call was recorded; no follow-up response.create
+
+
+def test_the_default_executor_is_built_per_reply_with_the_reply_s_stop_signal(monkeypatch, realtime):
+    captured = {}
+
+    def fake_execute_tool(url, timeout, stop=None):
+        captured.update(url=url, timeout=timeout, stop=stop)
+        return lambda name, arguments: "ok"
+
+    monkeypatch.setattr(llamacpp, "execute_tool", fake_execute_tool)
+    server = realtime(reply=[[("audio", pcm(1)), ("done",)]])
+    drive(LlamaCppResponder(server.url, "", tools=[TIME_TOOL]), turn=Turn())
+
+    assert captured["stop"] is not None  # a hanging tool call can now be interrupted by this reply's stop
+    assert captured["stop"]() is True  # respond()'s cancelled event is set once the reply ends
 
 
 # -- failures

@@ -155,3 +155,14 @@ def test_an_out_of_range_vad_threshold_is_a_clean_error(monkeypatch):
     finally:
         monkeypatch.undo()
         importlib.reload(config)
+
+
+@pytest.mark.parametrize("name", ["VAICE_VAD_MIN_SILENCE_MS", "VAICE_VAD_SPEECH_PAD_MS"])
+def test_a_negative_vad_value_is_a_clean_error(monkeypatch, name):
+    monkeypatch.setenv(name, "-1")
+    try:
+        with pytest.raises(SystemExit, match="must be >= 0"):
+            importlib.reload(config)
+    finally:
+        monkeypatch.undo()
+        importlib.reload(config)

@@ -5,8 +5,10 @@ import threading
 import time
 
 import numpy as np
+import pytest
 from fastrtc import AdditionalOutputs, ReplyOnPause
 from fastrtc.utils import WebRTCError, webrtc_error_handler
+from threads import run_on_thread, start_thread
 
 from vaice import interruptible
 from vaice.interruptible import InterruptSafeReplyOnPause, stop_playing_reply
@@ -49,32 +51,6 @@ class Rig:
 
     def start_emit(self, name="fastrtc-emit"):
         return start_thread(self.handler.emit, name)
-
-
-class Running:
-    def __init__(self, target, name):
-        self.result = None
-        self.thread = threading.Thread(target=self._run, args=(target,), name=name)
-        self.thread.start()
-
-    def _run(self, target):
-        try:
-            self.result = target()
-        except BaseException as exc:
-            self.result = exc
-
-    def join(self):
-        self.thread.join(timeout=10)
-        assert not self.thread.is_alive(), "thread is stuck"
-        return self.result
-
-
-def start_thread(target, name):
-    return Running(target, name)
-
-
-def run_on_thread(target, name):
-    return Running(target, name).join()
 
 
 def reply_that_blocks_on_its_second_chunk(entered, release):
@@ -709,3 +685,25 @@ def test_reset_clears_any_saved_preroll_so_it_never_leaks_into_a_new_conversatio
     # 2 x ONE_SECOND (speech + pause), with no 100s prepended from before the reset
     assert heard[0][1].shape[-1] == 2 * 48000
     assert not np.any(heard[0][1] == 100)
+
+
+def test_a_fastrtc_without_the_generator_attribute_fails_at_construction(monkeypatch):
+    """A fastrtc upgrade that drops the attribute the interrupt fix relies on must fail loudly
+    at construction with the actionable message, not mysteriously at runtime."""
+
+    def bare_init(self, *args, **kwargs):
+        self.model_options = None  # the VAD default branch reads it
+
+    monkeypatch.setattr(ReplyOnPause, "__init__", bare_init)
+    with pytest.raises(RuntimeError, match="generator` attribute"):
+        InterruptSafeReplyOnPause(lambda _: iter(()))
+
+
+def test_a_fastrtc_without_the_pause_event_fails_at_construction(monkeypatch):
+    def bare_init(self, *args, **kwargs):
+        self.model_options = None
+        self.generator = None  # the first guard passes; the pause event is gone
+
+    monkeypatch.setattr(ReplyOnPause, "__init__", bare_init)
+    with pytest.raises(RuntimeError, match="event` attribute"):
+        InterruptSafeReplyOnPause(lambda _: iter(()))

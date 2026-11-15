@@ -221,8 +221,6 @@ def _holdback(text: str) -> int:
         low = rem.lower()
         if any(prefix.lower().startswith(low) for prefix in _TOKEN_PREFIXES):
             return len(rem)
-        if low == "<" or low == "</":
-            return len(rem)
         if low.startswith(("<tool_call", "<function", "</function")) and ">" not in low:
             return len(rem)
         if low.startswith("<|") and "|>" not in low and len(low) <= 100:

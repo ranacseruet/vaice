@@ -54,14 +54,19 @@ class FakeRealtime:
     ("close",)              hang up
     ("stall",)              say nothing more, until the client goes away
     ("wait", Event)         pause until the event is set (or the client goes away)
+    ("raw", str)            send the string as-is (not JSON), for the malformed-message path
+
+    `session_created` replaces the built session.created payload (a malformed one, for the
+    rates-missing path).
     """
 
-    def __init__(self, reply=None, transcription=None, rates=(16000, 24000)):
+    def __init__(self, reply=None, transcription=None, rates=(16000, 24000), session_created: dict | None = None):
         scripts = reply if reply is not None else [("text", "Hi."), ("audio", pcm(1, 2)), ("done",)]
         # one script per response.create (a list of scripts) when the reply makes tool calls
         self.reply_scripts = list(scripts) if scripts and isinstance(scripts[0], list) else [scripts]
         self.transcription = transcription if transcription is not None else [("transcript", "hello there")]
         self.rates = rates
+        self.session_created = session_created
         self.connections: list[Connection] = []
         self._sockets: list = []
         self._server = None
@@ -111,19 +116,16 @@ class FakeRealtime:
         self._sockets.append(ws)
         rate_in, rate_out = self.rates
         try:
-            ws.send(
-                json.dumps(
-                    {
-                        "type": "session.created",
-                        "session": {
-                            "audio": {
-                                "input": {"format": {"type": "audio/pcm", "rate": rate_in}, "turn_detection": None},
-                                "output": {"format": {"type": "audio/pcm", "rate": rate_out}},
-                            }
-                        },
+            created = self.session_created if self.session_created is not None else {
+                "type": "session.created",
+                "session": {
+                    "audio": {
+                        "input": {"format": {"type": "audio/pcm", "rate": rate_in}, "turn_detection": None},
+                        "output": {"format": {"type": "audio/pcm", "rate": rate_out}},
                     }
-                )
-            )
+                },
+            }
+            ws.send(json.dumps(created))
             for raw in ws:
                 event = json.loads(raw)
                 conn.events.append(event)
@@ -166,6 +168,8 @@ class FakeRealtime:
                 ws.send(json.dumps({"type": TRANSCRIPT_DONE, "transcript": step[1]}))
             elif kind == "error":
                 ws.send(json.dumps({"type": "error", "error": {"message": step[1]}}))
+            elif kind == "raw":
+                ws.send(step[1])
             elif kind == "close":
                 ws.close()
                 return
@@ -184,21 +188,3 @@ class FakeRealtime:
             with contextlib.suppress(TimeoutError):
                 ws.recv(timeout=0.02)
 
-
-
-def next_on_fresh_thread(gen, name="fastrtc-worker"):
-    """next(gen) on a thread of its own, like fastrtc resumes a reply generator for every chunk.
-
-    Returns the value, or the exception it raised (StopIteration at the end)."""
-    box = {}
-
-    def run():
-        try:
-            box["value"] = next(gen)
-        except BaseException as exc:
-            box["value"] = exc
-
-    thread = threading.Thread(target=run, name=name)
-    thread.start()
-    thread.join()
-    return box["value"]

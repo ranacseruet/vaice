@@ -3,12 +3,13 @@ import importlib
 import itertools
 import logging
 import signal
-import threading
 
 import numpy as np
 import pytest
+import requests
 from fake_realtime import pcm
 from fastrtc import AdditionalOutputs
+from threads import next_on_fresh_thread, run_on_thread
 
 from vaice import app, config, lifecycle
 from vaice import conversation as conv
@@ -84,29 +85,6 @@ def test_an_interrupted_reply_never_completes_its_turn():
     assert not conversation._turns[0].complete
 
 
-def resume(gen, name):
-    """next(gen) on a fresh thread, like fastrtc does for every chunk. Returns the value, or StopIteration."""
-    box = {}
-
-    def run():
-        try:
-            box["value"] = next(gen)
-        except BaseException as exc:
-            box["value"] = exc
-
-    t = threading.Thread(target=run, name=name)
-    t.start()
-    t.join()
-    return box["value"]
-
-
-def finalize(gen):
-    """gen.close() from yet another thread, as CPython does when it finally drops the generator."""
-    t = threading.Thread(target=gen.close, name="finalizer")
-    t.start()
-    t.join()
-
-
 class SentenceResponder:
     """Speaks its replies a sentence at a time, two chunks each, and records a sentence's text only
     after both chunks went out: a reply cut off mid-sentence keeps the sentences before it."""
@@ -144,12 +122,12 @@ def test_barge_in_keeps_the_partial_reply_and_a_late_finalization_changes_nothin
     # Turn 1: the reply is cut off partway through its second sentence
     first = handler(AUDIO)
     for i in range(3):  # both chunks of "First one.", then the first chunk of "Second one."
-        assert isinstance(resume(first, f"fastrtc-{i}"), tuple)
+        assert isinstance(next_on_fresh_thread(first, f"fastrtc-{i}"), tuple)
 
     # The user speaks again: fastrtc starts a new generator and drops the old one without finishing it
     second = handler(AUDIO)
     outputs = []
-    while not isinstance(item := resume(second, f"fastrtc-{len(outputs) + 10}"), StopIteration):
+    while not isinstance(item := next_on_fresh_thread(second, f"fastrtc-{len(outputs) + 10}"), StopIteration):
         outputs.append(item)
 
     # The new reply saw the partial answer, marked as interrupted
@@ -166,7 +144,7 @@ def test_barge_in_keeps_the_partial_reply_and_a_late_finalization_changes_nothin
 
     # Only now does CPython finalize the dropped generator, on another thread
     stored = (conversation.messages_for_ui(), (conversation._path).read_text())
-    finalize(first)
+    run_on_thread(first.close, "finalizer")
 
     assert (conversation.messages_for_ui(), conversation._path.read_text()) == stored
     assert not conversation._turns[0].complete and conversation._turns[0].interrupted
@@ -184,7 +162,7 @@ def test_two_questions_through_the_app_and_the_llamacpp_backend(tmp_path, realti
     def ask(n):
         gen = handler(AUDIO)
         outputs = []
-        while not isinstance(item := resume(gen, f"fastrtc-{n}-{len(outputs)}"), StopIteration):
+        while not isinstance(item := next_on_fresh_thread(gen, f"fastrtc-{n}-{len(outputs)}"), StopIteration):
             outputs.append(item)
         return outputs
 
@@ -576,3 +554,104 @@ def test_main_installs_the_stop_handler_and_asks_the_app_to_stop_when_the_server
     finally:
         signal.signal(signal.SIGINT, previous)
         lifecycle.stopping.clear()
+
+
+def _fake_stream_class(launched=None):
+    class FakeStream:
+        class ui:  # a stand-in for the gradio app
+
+            @staticmethod
+            def launch(server_port, pwa):
+                if launched is not None:
+                    launched.append((server_port, pwa))
+
+    return FakeStream
+
+
+def _main_with(monkeypatch, tmp_path, fetch_tools=None, write_capable_tools=None, tools=True):
+    launched = []
+    if tools is not None:
+        monkeypatch.setattr(app.config, "LLAMACPP_TOOLS", tools)
+    if fetch_tools is not None:
+        monkeypatch.setattr(app, "fetch_tools", fetch_tools)
+    if write_capable_tools is not None:
+        monkeypatch.setattr(app, "write_capable_tools", write_capable_tools)
+    monkeypatch.setattr(app, "parse_args", lambda: argparse.Namespace())
+    monkeypatch.setattr(app, "check_server", lambda: None)
+    monkeypatch.setattr(app, "LlamaCppResponder", lambda **_: FakeResponder())
+    monkeypatch.setattr(app, "build_stream", lambda responder, conversation: _fake_stream_class(launched)())
+    monkeypatch.setattr(app.config, "CONVERSATION_FILE", tmp_path / "conversation.json")
+    previous = signal.getsignal(signal.SIGINT)
+    try:
+        app.main()
+    finally:
+        signal.signal(signal.SIGINT, previous)
+    return launched
+
+
+def test_main_continues_without_tools_when_the_servers_tools_are_unavailable(monkeypatch, tmp_path, caplog):
+    def boom(url):
+        raise requests.ConnectionError("refused")
+
+    with caplog.at_level(logging.WARNING, logger="vaice.app"):
+        _main_with(monkeypatch, tmp_path, fetch_tools=boom)
+
+    assert "continuing without" in caplog.text
+
+
+def test_main_logs_the_advertised_tools(monkeypatch, tmp_path, caplog):
+    with caplog.at_level(logging.INFO, logger="vaice.app"):
+        _main_with(monkeypatch, tmp_path,
+                   fetch_tools=lambda url: [{"name": "get_info"}],
+                   write_capable_tools=lambda url: [])
+
+    assert "tools enabled: get_info" in caplog.text
+
+
+def test_main_warns_when_the_advertised_tools_can_write(monkeypatch, tmp_path, caplog):
+    with caplog.at_level(logging.WARNING, logger="vaice.app"):
+        _main_with(monkeypatch, tmp_path,
+                   fetch_tools=lambda url: [{"name": "exec_shell_command"}],
+                   write_capable_tools=lambda url: ["exec_shell_command"])
+
+    assert "can change this machine" in caplog.text
+
+
+def test_main_warns_when_write_capability_cannot_be_checked(monkeypatch, tmp_path, caplog):
+    def boom(url):
+        raise requests.ConnectionError("refused")
+
+    with caplog.at_level(logging.WARNING, logger="vaice.app"):
+        _main_with(monkeypatch, tmp_path,
+                   fetch_tools=lambda url: [{"name": "get_info"}],
+                   write_capable_tools=boom)
+
+    assert "could not check whether the advertised tools can modify this machine" in caplog.text
+
+
+def test_main_warns_when_the_server_advertises_no_tools(monkeypatch, tmp_path, caplog):
+    with caplog.at_level(logging.WARNING, logger="vaice.app"):
+        _main_with(monkeypatch, tmp_path, fetch_tools=lambda url: [])
+
+    assert "advertises none" in caplog.text
+
+
+def test_main_reports_a_keyboard_interrupt_and_still_requests_stop(monkeypatch, tmp_path, caplog):
+    """Ctrl+C while the server is loading: 'stopped' is logged and the responders are told to give up."""
+    monkeypatch.setattr(app, "parse_args", lambda: argparse.Namespace())
+
+    def interrupt():
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(app, "check_server", interrupt)
+    monkeypatch.setattr(app.config, "CONVERSATION_FILE", tmp_path / "conversation.json")
+    previous = signal.getsignal(signal.SIGINT)
+    try:
+        with caplog.at_level(logging.INFO, logger="vaice.app"):
+            app.main()  # must not raise
+    finally:
+        signal.signal(signal.SIGINT, previous)
+
+    assert "stopped" in caplog.text
+    assert lifecycle.stopping.is_set()
+    lifecycle.stopping.clear()
