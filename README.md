@@ -94,6 +94,8 @@ Precedence: variables already in the environment (e.g. `set -a; source .env; set
 | `VAICE_LLAMACPP_PROMPT` | `Reply naturally and concisely in 1 to 2 spoken sentences.` | Reply instructions; `vaice` prepends `Respond with interleaved text and audio.` |
 | `VAICE_LLAMACPP_TIMEOUT` | `120` | Seconds to open a connection or the longest silence from `llama-server` before a reply fails |
 | `VAICE_LLAMACPP_MAX_OUTPUT_TOKENS` | `1024` | Reply cap sent as the realtime session's `max_output_tokens`; text tokens and audio frames count together. Raise it for longer spoken replies |
+| `VAICE_LLAMACPP_TOOL_VALUE_CHARS` | `200` | Longest string value kept from a tool result before it is fed back to the model. Too small cuts answer-bearing fields (a build timestamp, the end of a file); too large makes the model dictate the result |
+| `VAICE_LLAMACPP_TOOL_OUTPUT_CHARS` | `800` | Cap on the whole compacted tool result fed back to the model |
 | `VAICE_LLAMACPP_TOOLS` | *(unset)* | Voice access to llama-server's built-in tools (see *Tools* below). Unset = off; `builtin` = every tool the server advertises — the set is chosen on the server with `--tools` |
 
 ## How It Works & Conversation History
@@ -110,26 +112,41 @@ llama-server -hf LiquidAI/LFM3-Audio-2B-GGUF:Q4_K_M --temp 0 --tools get_info,re
 then start `vaice` with `VAICE_LLAMACPP_TOOLS=builtin`. vaice takes **every tool the server
 advertises** — the set of tools is the server operator's decision, made once on the
 `llama-server` command line (`--tools get_info,read_file`), and it is also the gate: the server
-refuses to execute anything it did not advertise. The definitions come from the server's
-`GET /tools`, are declared in each realtime `session.update` (with `tool_choice: "required"`), and
-a spoken question like *"What operating system is this?"* makes the model emit a function call;
-`vaice` executes it through the server's `POST /tools` and feeds the result back, and the model
-speaks the answer. A call for a tool the server did not advertise is refused by the server and
-spoken as a failure.
+refuses to execute anything it did not advertise. If the server advertises a tool marked
+`permissions.write` (`exec_shell_command`, `write_file`, `edit_file` in llama-server's built-ins),
+vaice warns at startup. The definitions come from `GET /tools`, are declared in each realtime
+`session.update`, and a spoken question like *"What operating system is this?"* makes the model
+emit a function call; `vaice` executes it through the server's `POST /tools` and feeds the result
+back, and the model speaks the answer. A call for a tool the server did not advertise is refused
+by the server and spoken as a failure.
+
+The first response is requested with `tool_choice: "required"`; after a tool result vaice asks
+for the next response with `auto` (the model may answer or chain one more call), and after the
+second tool round it asks for the final answer with `none`. That closes a live failure mode: a
+follow-up that inherited `required` was forced to call again, so it repeated the raw result and
+could loop until the token cap instead of answering. A call that still arrives in the forced
+final round is not executed.
 
 LFM3-Audio notes from live testing: **tell the model to use the tools** — with the default prompt
 ("Reply naturally and concisely…") the model announces a check and then stops without calling in
 most runs; a prompt like `Use the available tools to answer questions about this system.` made it
 call and speak the real answer in 4 of 4 runs (vs 1 of 6 with the default). Keep the tool subset
-small (one or two; with `tool_choice: "auto"` it never calls, and with three or more tools it tends
-to answer from its head and get it wrong).
+small (one or two; with three or more tools it tends to answer from its head and get it wrong).
+`tool_choice: "required"` is reliable in text-only mode, but it is not enforced with interleaved
+text+audio: with the voice output the model can answer without calling, so in practice the prompt
+and the tool subset decide whether it calls.
 
 The model **reads the fed-back tool result aloud** (a 2B voice model limitation; prompt lines
 forbidding it have no measurable effect), so `vaice` compacts every result before feeding it back:
-JSON becomes short `key: value` pairs, values are truncated at 40 characters and the whole output
-at 120 — enough for the model's first spoken sentence to answer the question, little enough that
-the dictation it appends stays short. Cleaner answers need a model that follows instructions.
-The transcript may also show the raw result and stray tags around a tool round; the audio is clean.
+JSON becomes short `key: value` pairs, values are truncated at 200 characters and the whole output
+at 800 by default (`VAICE_LLAMACPP_TOOL_VALUE_CHARS`, `VAICE_LLAMACPP_TOOL_OUTPUT_CHARS`). A
+`read_file` payload is plain text, so it is bounded by the 800-character output cap only — a
+210-character file lost its last word when the 200-character per-value cap applied to it. The
+caps have to be large enough to keep the answer: at 40/120 a `get_info` result lost the timestamp
+before the model could speak it, and a "what time" question became "I can't tell the time". Larger
+caps mean more dictation; the defaults keep the answer while holding the result to a couple of
+sentences. The transcript can also show the raw result and stray tags around a tool round; whether
+the audio includes them varies, so keep the caps conservative.
 
 Tool calls and their results are kept **out of the conversation**: the chatbot shows only what was
 said, and each call lands in the collapsed *Tool activity* panel under it (name, arguments, result;

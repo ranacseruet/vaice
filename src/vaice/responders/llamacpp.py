@@ -122,8 +122,8 @@ class _Stopped(Exception):  # control flow inside a session thread, not an error
 
 # What a function_call_output may hold: the model reads the result aloud, so a long raw
 # result becomes long spoken junk (paths, kernel strings, JSON)
-TOOL_OUTPUT_CHARS = 120
-TOOL_VALUE_CHARS = 40
+TOOL_OUTPUT_CHARS = config.LLAMACPP_TOOL_OUTPUT_CHARS
+TOOL_VALUE_CHARS = config.LLAMACPP_TOOL_VALUE_CHARS
 
 
 def _short(text: str, chars: int) -> str:
@@ -135,17 +135,25 @@ def _speech_friendly(output: str) -> str:
 
     The result goes back into the conversation as text and the voice model tends to read it
     aloud, so what we feed back is roughly what gets said: a JSON object becomes short
-    "key: value" pairs with truncated values, and the whole thing is capped. A spoken
-    "kernel version 25.6.0" is fine; a dictated uname string is not.
+    "key: value" pairs with truncated values, and the whole thing is capped. A plain-text payload
+    (read_file's `plain_text_response`) is kept up to the output cap instead, because the answer
+    can be at the end of a short file. A spoken "kernel version 25.6.0" is fine; a dictated uname
+    string is not.
     """
     try:
         data = json.loads(output)
     except ValueError:
         data = None
     if isinstance(data, dict):
-        output = "; ".join(
-            f"{key}: {_short(value if isinstance(value, str) else json.dumps(value), TOOL_VALUE_CHARS)}"
-            for key, value in data.items())
+        if isinstance(data.get("plain_text_response"), str):
+            # read_file's payload is one text blob; capping it at the per-value limit would cut the
+            # end of a short file (a 210-char file lost its last word at 200), so the whole-output
+            # cap bounds it instead
+            output = data["plain_text_response"]
+        else:
+            output = "; ".join(
+                f"{key}: {_short(value if isinstance(value, str) else json.dumps(value), TOOL_VALUE_CHARS)}"
+                for key, value in data.items())
     elif isinstance(data, list):
         output = "; ".join(_short(value if isinstance(value, str) else json.dumps(value), TOOL_VALUE_CHARS)
                            for value in data[:5])
@@ -167,6 +175,20 @@ def _strip_tool_tags(delta: str) -> str:
     for tag in ("<answer>", "</answer>"):
         delta = delta.replace(tag, "")
     return delta
+
+
+def _create_response(session: "_Session", tool_choice: str | None = None) -> None:
+    """Ask for a response, optionally overriding the session's tool choice for this response only.
+
+    The session sets `tool_choice: "required"` so the first response follows a tool request through.
+    Left to inherit, that also forces the response after a tool result to call a tool again: the
+    model repeats the raw result and can loop until the token cap. `auto` lets it answer (or chain),
+    and `none` guarantees the final answer at the round cap.
+    """
+    event: dict = {"type": "response.create"}
+    if tool_choice is not None:
+        event["response"] = {"tool_choice": tool_choice}
+    session.send(event)
 
 
 def _converse(
@@ -211,7 +233,7 @@ def _converse(
                 update["tool_choice"] = "required"
             session.update(update)
             session.send({"type": "input_audio_buffer.append", "audio": _b64(to_pcm16(audio, rate_in))})
-            session.send({"type": "response.create"})
+            _create_response(session)
             text: list[str] = []
             samples = 0
             response_samples = 0
@@ -239,9 +261,15 @@ def _converse(
                         progress[0] = ("".join(text), samples)  # before the frame is handed over
                         out.put((rate_out, frame))
                 elif kind == "response.done":
-                    _check_done(event, response_samples, max_output_tokens)
+                    had_calls = bool(calls)
+                    _check_done(event, response_samples, max_output_tokens, had_calls)
                     response_samples = 0
-                    if not calls or executor is None or rounds >= MAX_TOOL_ROUNDS:
+                    if not calls or executor is None:
+                        break
+                    if rounds >= MAX_TOOL_ROUNDS:
+                        # the last response was forced with tool_choice "none"; a call that still
+                        # arrived is not executed, or the model could keep the loop alive forever
+                        log.warning("llamacpp ignored a tool call in the forced final round (%s)", calls[0].name)
                         break
                     # the model asked for tools: run them, feed the results back, and let it speak them
                     rounds += 1
@@ -257,7 +285,8 @@ def _converse(
                         session.send({"type": "conversation.item.create", "item": {
                             "type": "function_call_output", "call_id": call.call_id, "output": output}})
                     calls = []
-                    session.send({"type": "response.create"})
+                    # after the first round, let the model chain; at the cap, force the answer
+                    _create_response(session, "auto" if rounds < MAX_TOOL_ROUNDS else "none")
     except _Stopped:
         pass
     except BaseException as exc:  # noqa: BLE001 - re-raised in the consumer, which must see any failure
@@ -266,7 +295,7 @@ def _converse(
         out.put(_DONE)
 
 
-def _check_done(event: dict, samples: int, max_output_tokens: int) -> None:
+def _check_done(event: dict, samples: int, max_output_tokens: int, had_calls: bool = False) -> None:
     response = event.get("response") or {}
     status = response.get("status")
     if status != "completed":  # "cancelled": we never ask for it, so someone else stopped the reply
@@ -275,7 +304,8 @@ def _check_done(event: dict, samples: int, max_output_tokens: int) -> None:
     tokens = (response.get("usage") or {}).get("output_tokens")
     if isinstance(tokens, int) and tokens >= max_output_tokens:
         log.warning("llamacpp reply hit the %d-token limit and was cut off", max_output_tokens)
-    if not samples:
+    if not samples and not had_calls:
+        # a tool-call response has no audio by design; the answer comes after the tool result
         log.warning("llama-server's reply had no audio (is the model one with audio output?)")
 
 
@@ -294,18 +324,40 @@ def fetch_tools(url: str, timeout: float = CHECK_TIMEOUT) -> list[dict]:
     return [{"type": "function", **entry["definition"]["function"]} for entry in r.json()]
 
 
-def execute_tool(url: str, timeout: float) -> Callable[[str, str], str]:
-    """What a `function_call` is worth: `POST {url}/tools` with `{"tool": name, "arguments": json}`.
+def write_capable_tools(url: str, timeout: float = CHECK_TIMEOUT) -> list[str]:
+    """Names of the advertised tools llama-server marks as able to change this machine.
 
-    The result goes back as the function_call_output, so the model can speak it. A failure must be
-    spoken too, not raised: this runs on the session thread, and the result (not the traceback) is
-    what the model sees and what `app.py` shows in the UI. A closure over `url` and `timeout`,
-    mirroring how `_open` builds the websocket.
+    `GET {url}/tools` reports `permissions.write` (true for exec_shell_command, write_file,
+    edit_file in llama-server's built-ins). vaice does not filter the tool set — the server's
+    `--tools` is the gate — so this only feeds a startup warning. A request or shape problem
+    raises, like `fetch_tools`; the caller decides whether a failed check is worth a warning.
+    """
+    r = requests.get(f"{url}/tools", timeout=timeout)
+    r.raise_for_status()
+    return [str(entry.get("tool")) for entry in r.json() if (entry.get("permissions") or {}).get("write")]
+
+
+def execute_tool(url: str, timeout: float) -> Callable[[str, str], str]:
+    """What a `function_call` is worth: `POST {url}/tools` with `{"tool": name, "params": {...}}`.
+
+    The server reads the tool's parameters from `params` (a JSON object), not from the model's
+    `arguments` JSON string; sending the string left `read_file` without its `path` (the server
+    answered "key 'path' not found") while parameterless tools such as `get_info` worked by
+    accident. The result goes back as the function_call_output, so the model can speak it. A failure
+    must be spoken too, not raised: this runs on the session thread, and the result (not the
+    traceback) is what the model sees and what `app.py` shows in the UI. A closure over `url` and
+    `timeout`, mirroring how `_open` builds the websocket.
     """
 
     def call(name: str, arguments: str) -> str:
         try:
-            r = requests.post(f"{url}/tools", json={"tool": name, "arguments": arguments}, timeout=timeout)
+            params = json.loads(arguments) if arguments.strip() else {}
+        except ValueError:
+            return f"tool {name} failed: arguments are not JSON: {arguments!r}"
+        if not isinstance(params, dict):
+            return f"tool {name} failed: arguments are not a JSON object: {arguments!r}"
+        try:
+            r = requests.post(f"{url}/tools", json={"tool": name, "params": params}, timeout=timeout)
         except requests.RequestException as exc:
             return f"tool {name} failed: {exc}"
         if not r.ok:

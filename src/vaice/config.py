@@ -69,6 +69,15 @@ LLAMACPP_TIMEOUT = _number("VAICE_LLAMACPP_TIMEOUT", default="120", kind=float)
 # voice-chat example uses 1024; llama-server's session default would be "inf".
 LLAMACPP_MAX_OUTPUT_TOKENS = _number("VAICE_LLAMACPP_MAX_OUTPUT_TOKENS", default="1024", kind=int)
 
+# Tool results are fed back to the model as text, and it tends to read them aloud. Each string value
+# and the whole compacted result are capped: too small and an answer-bearing field (the timestamp in
+# `get_info`, the end of a file) is cut off; too large and the model dictates the raw result. The
+# defaults keep the answer while leaving the dictation short.
+LLAMACPP_TOOL_VALUE_CHARS = _number("VAICE_LLAMACPP_TOOL_VALUE_CHARS", default="200", kind=int)
+LLAMACPP_TOOL_OUTPUT_CHARS = _number("VAICE_LLAMACPP_TOOL_OUTPUT_CHARS", default="800", kind=int)
+if LLAMACPP_TOOL_VALUE_CHARS <= 0 or LLAMACPP_TOOL_OUTPUT_CHARS <= 0:
+    raise SystemExit("vaice: VAICE_LLAMACPP_TOOL_VALUE_CHARS and VAICE_LLAMACPP_TOOL_OUTPUT_CHARS must be > 0")
+
 
 # The tools `llama-server` makes available to the model in `session.update`: off (unset) or on
 # ("builtin" = every tool the server advertises on GET /tools). The set of tools is the server

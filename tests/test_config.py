@@ -126,6 +126,27 @@ def test_the_settings_are_read_from_the_environment_at_import(monkeypatch):
         importlib.reload(config)
 
 
+def test_tool_compaction_caps_are_read_from_the_environment(monkeypatch):
+    monkeypatch.setenv("VAICE_LLAMACPP_TOOL_VALUE_CHARS", "120")
+    monkeypatch.setenv("VAICE_LLAMACPP_TOOL_OUTPUT_CHARS", "600")
+    try:
+        reloaded = importlib.reload(config)
+        assert (reloaded.LLAMACPP_TOOL_VALUE_CHARS, reloaded.LLAMACPP_TOOL_OUTPUT_CHARS) == (120, 600)
+    finally:
+        monkeypatch.undo()
+        importlib.reload(config)
+
+
+def test_a_non_positive_tool_compaction_cap_is_a_clean_error(monkeypatch):
+    monkeypatch.setenv("VAICE_LLAMACPP_TOOL_VALUE_CHARS", "0")
+    try:
+        with pytest.raises(SystemExit, match="VAICE_LLAMACPP_TOOL_VALUE_CHARS"):
+            importlib.reload(config)
+    finally:
+        monkeypatch.undo()
+        importlib.reload(config)
+
+
 def test_an_out_of_range_vad_threshold_is_a_clean_error(monkeypatch):
     monkeypatch.setenv("VAICE_VAD_THRESHOLD", "5")
     try:

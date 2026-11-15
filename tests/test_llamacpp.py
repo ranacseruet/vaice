@@ -198,6 +198,19 @@ def test_a_reply_without_audio_is_a_warning_and_records_no_text(realtime, caplog
     assert "no audio" in caplog.text
 
 
+def test_a_tool_call_response_does_not_warn_about_missing_audio(realtime, caplog):
+    """A tool-call response has no audio by design; the answer comes after the tool result."""
+    server = realtime(
+        reply=[
+            [("call", "item_1", "get_info", "call_1", "{}"), ("done",)],
+            [("text", "done"), ("audio", pcm(1)), ("done",)],
+        ],
+    )
+    with caplog.at_level(logging.WARNING, logger="vaice.responders.llamacpp"):
+        drive(tool_responder(server, lambda name, args: "ok"))
+    assert "no audio" not in caplog.text
+
+
 def test_a_reply_cut_off_by_the_token_limit_is_logged(realtime, caplog):
     server = realtime(reply=[("audio", pcm(1)), ("done", "completed", config.LLAMACPP_MAX_OUTPUT_TOKENS)])
     with caplog.at_level(logging.WARNING, logger="vaice.responders.llamacpp"):
@@ -213,6 +226,11 @@ TIME_TOOL = {"type": "function", "name": "get_info", "description": "Runtime inf
 
 def tool_responder(server, executor):
     return LlamaCppResponder(server.url, "", tools=[TIME_TOOL], executor=executor)
+
+
+def tool_choices(conn):
+    """The per-response tool_choice of each response.create (None = inherit the session's required)."""
+    return [e.get("response") for e in conn.events if e["type"] == "response.create"]
 
 
 def test_a_tool_call_is_executed_and_its_result_spoken(realtime):
@@ -240,6 +258,8 @@ def test_a_tool_call_is_executed_and_its_result_spoken(realtime):
     assert outputs == [{"type": "function_call_output", "call_id": "call_9", "output": "os: Darwin"}]
     assert conn.types == ["session.update", "input_audio_buffer.append", "response.create",
                           "conversation.item.create", "response.create"]
+    # the first response inherits required; the one after the result must be allowed to answer
+    assert tool_choices(conn) == [None, {"tool_choice": "auto"}]
     assert turn.assistant_text == "Let me check. It is noon."  # the tags are gone, the rounds joined
     assert [len(samples) for _, samples in frames] == [2]  # only the spoken answer has audio
     assert turn.tool_events == [{"name": "get_info", "arguments": "{}", "output": "os: Darwin"}]
@@ -256,10 +276,13 @@ def test_a_tool_call_beyond_the_round_cap_ends_the_reply(realtime, caplog):
 
     assert calls == ["get_info", "get_info"]  # the third call is past MAX_TOOL_ROUNDS and never runs
     assert [event["name"] for event in turn.tool_events] == ["get_info", "get_info"]
+    assert "ignored a tool call in the forced final round" in caplog.text
     conn = server.conversation()
     outputs = [e for e in conn.events
                if e["type"] == "conversation.item.create" and e.get("item", {}).get("type") == "function_call_output"]
     assert len(outputs) == 2
+    # first inherits required, after round 1 auto, after round 2 the forced final answer
+    assert tool_choices(conn) == [None, {"tool_choice": "auto"}, {"tool_choice": "none"}]
 
 
 def test_a_failing_executor_is_spoken_not_raised(realtime):
@@ -331,6 +354,14 @@ def test_a_tool_result_is_compacted_to_what_the_model_can_speak():
     assert llamacpp._speech_friendly("y" * 1000) == "y" * llamacpp.TOOL_OUTPUT_CHARS + "..."
 
 
+def test_a_plain_text_file_read_keeps_its_tail_past_the_per_value_cap():
+    text = "x" * (llamacpp.TOOL_VALUE_CHARS + 50) + " the secret word is elephant"
+    assert llamacpp._speech_friendly('{"plain_text_response": "' + text + '"}') == text
+    over = "y" * (llamacpp.TOOL_OUTPUT_CHARS + 100)
+    assert llamacpp._speech_friendly('{"plain_text_response": "' + over + '"}') == (
+        over[:llamacpp.TOOL_OUTPUT_CHARS] + "...")
+
+
 def test_a_tool_call_is_reported_even_when_the_reply_fails_after_it(realtime):
     server = realtime(reply=[[("call", "item_1", "get_info", "call_1", "{}"), ("done",), ("close",)]])
     turn = Turn()
@@ -377,7 +408,16 @@ def test_the_default_executor_posts_the_tool_to_the_server(monkeypatch):
     monkeypatch.setattr(llamacpp.requests, "post", post)
     execute = llamacpp.execute_tool("http://h:1", 7.0)
     assert execute("get_info", "{}") == '{"os": "Darwin"}'
-    assert posted == [("http://h:1/tools", {"tool": "get_info", "arguments": "{}"}, 7.0)]
+    assert posted == [("http://h:1/tools", {"tool": "get_info", "params": {}}, 7.0)]
+
+    posted.clear()
+    assert execute("read_file", '{"path": "/tmp/secret.txt", "start_line": 1}') == '{"os": "Darwin"}'
+    assert posted == [("http://h:1/tools",
+                       {"tool": "read_file", "params": {"path": "/tmp/secret.txt", "start_line": 1}}, 7.0)]
+
+    assert "arguments are not JSON" in execute("read_file", "{not json")
+    assert "arguments are not a JSON object" in execute("read_file", '["path"]')
+    assert len(posted) == 1  # neither malformed call reached the server
 
     monkeypatch.setattr(llamacpp.requests, "post", lambda *a, **k: (_ for _ in ()).throw(requests.ConnectionError("x")))
     assert llamacpp.execute_tool("http://h:1", 7.0)("get_info", "{}") == "tool get_info failed: x"
@@ -407,6 +447,23 @@ def test_fetch_tools_flattens_every_advertised_tool(monkeypatch):
         requests.ConnectionError("refused")))
     with pytest.raises(requests.ConnectionError):
         llamacpp.fetch_tools("http://h:1")
+
+
+def test_write_capable_tools_names_only_the_tools_the_server_marks_write(monkeypatch):
+    listing = [
+        {"tool": "read_file", "permissions": {"write": False}},
+        {"tool": "exec_shell_command", "permissions": {"write": True}},
+        {"tool": "get_info"},  # no permissions block = not marked write
+        {"tool": "edit_file", "permissions": {"write": True}},
+    ]
+    monkeypatch.setattr(llamacpp.requests, "get", lambda url, timeout: Reply(body=listing))
+
+    assert llamacpp.write_capable_tools("http://h:1") == ["exec_shell_command", "edit_file"]
+
+    monkeypatch.setattr(llamacpp.requests, "get", lambda url, timeout: (_ for _ in ()).throw(
+        requests.ConnectionError("refused")))
+    with pytest.raises(requests.ConnectionError):
+        llamacpp.write_capable_tools("http://h:1")
 
 
 def test_a_normal_reply_logs_no_truncation_warning(realtime, caplog):

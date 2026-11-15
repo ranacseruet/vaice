@@ -15,7 +15,7 @@ from vaice.conversation import Conversation, Turn
 from vaice.interruptible import InterruptSafeReplyOnPause, stop_playing_reply
 from vaice.lifecycle import install_stop_handler, request_stop
 from vaice.responders.base import Responder
-from vaice.responders.llamacpp import LlamaCppResponder, check_server, fetch_tools
+from vaice.responders.llamacpp import LlamaCppResponder, check_server, fetch_tools, write_capable_tools
 
 log = logging.getLogger(__name__)
 
@@ -155,6 +155,16 @@ def main() -> None:
                 log.warning("tools requested, but llama-server's /tools is unavailable (%s); continuing without", exc)
             if tools:
                 log.info("tools enabled: %s", ", ".join(str(tool.get("name")) for tool in tools))
+                try:
+                    risky = write_capable_tools(config.LLAMACPP_URL)
+                except (requests.RequestException, ValueError, AttributeError, TypeError) as exc:
+                    log.warning("could not check whether the advertised tools can modify this machine (%s)", exc)
+                else:
+                    if risky:
+                        log.warning(
+                            "llama-server advertises tools that can change this machine (%s); they run with "
+                            "the server's permissions. Start llama-server with a read-only set, e.g. "
+                            "--tools get_info,read_file", ", ".join(risky))
             else:
                 log.warning(
                     "tools requested (VAICE_LLAMACPP_TOOLS), but llama-server advertises none; start it with "
