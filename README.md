@@ -92,7 +92,7 @@ Precedence: variables already in the environment (e.g. `set -a; source .env; set
 | `VAICE_CAN_INTERRUPT` | `1` | Set `0` to disable barge-in: a reply always runs to the end |
 | `VAICE_LLAMACPP_URL` | `http://localhost:8001` | `llama-server` URL; only scheme, host and port are used (`/health`, `/v1/models` and `ws://…/v1/realtime` hang off it) |
 | `VAICE_LLAMACPP_PROMPT` | `Reply naturally and concisely in 1 to 2 spoken sentences.` | Reply instructions; `vaice` prepends `Respond with interleaved text and audio.` |
-| `VAICE_LLAMACPP_TIMEOUT` | `120` | Seconds to open a connection or the longest silence from `llama-server` before a reply fails |
+| `VAICE_LLAMACPP_TIMEOUT` | `120` | Seconds to open a connection or the longest silence from `llama-server` before a reply fails. It is also the total bound for a tool call: when it passes — or the reply is stopped — vaice stops waiting for the call and discards the result (the underlying request is not cancelled; the server may still run/finish the tool) |
 | `VAICE_LLAMACPP_MAX_OUTPUT_TOKENS` | `1024` | Reply cap sent as the realtime session's `max_output_tokens`; text tokens and audio frames count together. Raise it for longer spoken replies |
 | `VAICE_LLAMACPP_TOOL_VALUE_CHARS` | `200` | Longest string value kept from a tool result before it is fed back to the model. Too small cuts answer-bearing fields (a build timestamp, the end of a file); too large makes the model dictate the result |
 | `VAICE_LLAMACPP_TOOL_OUTPUT_CHARS` | `800` | Cap on the whole compacted tool result fed back to the model |
@@ -114,7 +114,12 @@ advertises** — the set of tools is the server operator's decision, made once o
 `llama-server` command line (`--tools get_info,read_file`), and it is also the gate: the server
 refuses to execute anything it did not advertise. If the server advertises a tool marked
 `permissions.write` (`exec_shell_command`, `write_file`, `edit_file` in llama-server's built-ins),
-vaice warns at startup. The definitions come from `GET /tools`, are declared in each realtime
+vaice warns at startup. Tool calls run with an overall bound of `VAICE_LLAMACPP_TIMEOUT` (120 s by
+default); when it passes, or when the reply is stopped (barge-in, **New conversation**, Ctrl+C),
+`vaice` stops waiting for the call and discards its result — it does **not** cancel the HTTP
+request, so the server may still run (and finish) the tool, which is one more reason to keep the
+set read-only. Stopping returns the session to listening instead of stalling the thread for the
+full timeout. The definitions come from `GET /tools`, are declared in each realtime
 `session.update`, and a spoken question like *"What operating system is this?"* makes the model
 emit a function call; `vaice` executes it through the server's `POST /tools` and feeds the result
 back, and the model speaks the answer. A call for a tool the server did not advertise is refused
