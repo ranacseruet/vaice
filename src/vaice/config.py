@@ -97,9 +97,11 @@ LLAMACPP_TOOLS = _tools("VAICE_LLAMACPP_TOOLS")
 
 PORT = _number("VAICE_PORT", default="7860", kind=int)
 
-# The conversation is kept here between runs; the last HISTORY_TURNS exchanges go into each prompt
-DATA_DIR = Path(os.getenv("VAICE_DATA_DIR", "~/.vaice")).expanduser()
-CONVERSATION_FILE = DATA_DIR / "conversation.json"
+# The conversation is kept here between runs; the last HISTORY_TURNS exchanges go into each prompt.
+# Set VAICE_DATA_DIR="" to keep the conversation in memory only: nothing is written, loaded, or kept.
+_DATA_DIR = os.getenv("VAICE_DATA_DIR", "~/.vaice")
+DATA_DIR = None if _DATA_DIR.strip() == "" else Path(_DATA_DIR).expanduser()
+CONVERSATION_FILE = None if DATA_DIR is None else DATA_DIR / "conversation.json"
 HISTORY_TURNS = _number("VAICE_HISTORY_TURNS", default="10", kind=int)
 
 # fastrtc's Silero VAD: what counts as speech, and when an utterance ends. A barge-in fires when

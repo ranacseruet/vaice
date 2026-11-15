@@ -568,7 +568,8 @@ def _fake_stream_class(launched=None):
     return FakeStream
 
 
-def _main_with(monkeypatch, tmp_path, fetch_tools=None, write_capable_tools=None, tools=True):
+def _main_with(monkeypatch, tmp_path, fetch_tools=None, write_capable_tools=None, tools=True,
+               conversation_file="default"):
     launched = []
     if tools is not None:
         monkeypatch.setattr(app.config, "LLAMACPP_TOOLS", tools)
@@ -580,7 +581,8 @@ def _main_with(monkeypatch, tmp_path, fetch_tools=None, write_capable_tools=None
     monkeypatch.setattr(app, "check_server", lambda: None)
     monkeypatch.setattr(app, "LlamaCppResponder", lambda **_: FakeResponder())
     monkeypatch.setattr(app, "build_stream", lambda responder, conversation: _fake_stream_class(launched)())
-    monkeypatch.setattr(app.config, "CONVERSATION_FILE", tmp_path / "conversation.json")
+    monkeypatch.setattr(app.config, "CONVERSATION_FILE",
+                        tmp_path / "conversation.json" if conversation_file == "default" else None)
     previous = signal.getsignal(signal.SIGINT)
     try:
         app.main()
@@ -655,3 +657,13 @@ def test_main_reports_a_keyboard_interrupt_and_still_requests_stop(monkeypatch, 
     assert "stopped" in caplog.text
     assert lifecycle.stopping.is_set()
     lifecycle.stopping.clear()
+
+
+def test_main_keeps_the_conversation_in_memory_when_vaice_data_dir_is_empty(monkeypatch, tmp_path, caplog):
+    """VAICE_DATA_DIR='' disables persistence: no conversation.json is read or written, and the
+    startup log says so."""
+    with caplog.at_level(logging.INFO, logger="vaice.app"):
+        _main_with(monkeypatch, tmp_path, conversation_file=None)
+
+    assert "in memory only" in caplog.text
+    assert not (tmp_path / "conversation.json").exists()

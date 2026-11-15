@@ -173,8 +173,12 @@ def main() -> None:
         responder = LlamaCppResponder(tools=tools or None)
         log.info("using llama-server at %s", config.LLAMACPP_URL)
 
-        conversation = Conversation(config.CONVERSATION_FILE, window=config.HISTORY_TURNS)
-        log.info("conversation history in %s (%d turns loaded)", config.CONVERSATION_FILE, len(conversation))
+        if config.CONVERSATION_FILE is None:  # VAICE_DATA_DIR="": the conversation is in memory only
+            log.info("VAICE_DATA_DIR is empty: the conversation is kept in memory only (nothing is persisted)")
+            conversation = Conversation(None, window=config.HISTORY_TURNS)
+        else:
+            conversation = Conversation(config.CONVERSATION_FILE, window=config.HISTORY_TURNS)
+            log.info("conversation history in %s (%d turns loaded)", config.CONVERSATION_FILE, len(conversation))
 
         stream = build_stream(responder, conversation)
         # gradio's index.html always links /manifest.json, and launch() re-derives pwa from

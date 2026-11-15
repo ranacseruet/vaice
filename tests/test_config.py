@@ -166,3 +166,23 @@ def test_a_negative_vad_value_is_a_clean_error(monkeypatch, name):
     finally:
         monkeypatch.undo()
         importlib.reload(config)
+
+
+def test_an_empty_vaice_data_dir_disables_persistence(monkeypatch):
+    monkeypatch.setenv("VAICE_DATA_DIR", "")
+    try:
+        reloaded = importlib.reload(config)
+        assert reloaded.DATA_DIR is None and reloaded.CONVERSATION_FILE is None
+    finally:
+        monkeypatch.undo()
+        importlib.reload(config)
+
+
+def test_an_empty_or_blank_vaice_data_dir_is_not_the_default(monkeypatch):
+    monkeypatch.setenv("VAICE_DATA_DIR", "   ")  # whitespace-only also means memory only
+    try:
+        reloaded = importlib.reload(config)
+        assert reloaded.DATA_DIR is None and reloaded.CONVERSATION_FILE is None
+    finally:
+        monkeypatch.undo()
+        importlib.reload(config)

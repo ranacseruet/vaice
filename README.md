@@ -84,7 +84,7 @@ Precedence: variables already in the environment (e.g. `set -a; source .env; set
 | Variable | Default | Meaning |
 |---|---|---|
 | `VAICE_PORT` | `7860` | UI port |
-| `VAICE_DATA_DIR` | `~/.vaice` | Directory where `conversation.json` is stored |
+| `VAICE_DATA_DIR` | `~/.vaice` | Directory where `conversation.json` is stored (created `0755`; the file itself is `0600`). Set to empty (`VAICE_DATA_DIR=`) to keep the conversation in memory only — nothing is persisted |
 | `VAICE_HISTORY_TURNS` | `10` | Past exchanges included in each prompt (`0` = none); older ones are dropped in blocks |
 | `VAICE_VAD_THRESHOLD` | `0.6` | Silero VAD speech probability threshold — what counts as speech, and so what can interrupt a playing reply. Raise (e.g. `0.7`) if room noise or speaker feedback cuts replies short |
 | `VAICE_VAD_MIN_SILENCE_MS` | `150` | Silence that must follow speech before an utterance counts as ended — delays the reply start and barge-ins alike |
@@ -172,7 +172,7 @@ At startup, `vaice` checks `llama-server`:
 - **Ctrl+C** stops the app cleanly: any reply in flight is abandoned (`the app is stopping; the reply is abandoned`) and the process exits within ~1 s when idle or ~5–6 s when a browser is connected mid-reply, even if the server never answers. Finished turns remain on disk.
 
 ### Multi-Turn Conversation & Barge-In
-`vaice` persists your conversation to `~/.vaice/conversation.json` (see `VAICE_DATA_DIR`) after every update, so it survives page reloads and restarts.
+`vaice` persists your conversation to `~/.vaice/conversation.json` (see `VAICE_DATA_DIR`; set it empty to keep everything in memory — see *Privacy* below) after every update, so it survives page reloads and restarts.
 
 - **New conversation:** Clicking **New conversation** (or the chatbot's trash icon) clears the stored history and immediately silences any reply playing or queued. Any utterance you were halfway through saying when clicking it is discarded; what you say after clicking starts a fresh conversation with no prior turns in the prompt.
 - **Live transcript updates:** The chatbot view is checked once a second and re-rendered only when it changes, so a user transcript that finishes *after* the spoken reply ends still replaces the `"…"` placeholder automatically.
@@ -189,6 +189,12 @@ At startup, `vaice` checks `llama-server`:
   - A corrupt `conversation.json` is moved aside to `conversation.json.corrupt` with a warning, and `vaice` starts with an empty conversation.
   - Unwritable disk state logs a warning and continues the conversation in memory without crashing the session.
   - A failed reply (`llama-server` down, WebSocket closed, or server error event) is caught inside the reply generator so `fastrtc`'s WebRTC audio task stays alive; the partial reply and `(error: …)` note appear in the UI, and the next question works without reloading the page.
+
+## Privacy
+- `~/.vaice/conversation.json` is written with mode **0600** (owner read/write only) via a temporary file and `os.replace`, so a reader never sees a half-written file; the `~/.vaice` directory itself is created with the usual 0755 permissions, meaning other local users can see that the file exists (not what it holds).
+- The transcript is retained **indefinitely**, until you click **New conversation** (which clears it) or delete the file while `vaice` is stopped. New conversation is the way to forget everything, including any embarrassing questions.
+- `vaice` talks to one server: the `llama-server` at `VAICE_LLAMACPP_URL` (local by default, e.g. `http://localhost:8001`) over HTTP and WebSocket. The microphone audio, the transcripts, the tool results and the model's replies go there; nothing else leaves the machine through `vaice` (the model's tools run on that server and run with *its* permissions). If you point `VAICE_LLAMACPP_URL` at a remote host, your audio and conversation go there instead.
+- Set `VAICE_DATA_DIR=""` to keep the conversation **in memory only**: nothing is read from or written to disk, and history disappears when the app stops. Persistence can also be limited with `VAICE_HISTORY_TURNS` (the prompt window), which trims context but keeps the file — set `VAICE_DATA_DIR=""` if the file itself is the concern.
 
 ## Troubleshooting
 
