@@ -872,6 +872,7 @@ def test_a_stop_after_the_tool_call_does_not_ask_the_model_to_continue(realtime)
     assert drive(tool_responder(server, executor), turn=turn) == []
 
     conn = server.conversation()
+    assert conn.closed.wait(3)  # the session is torn down before we inspect what it sent
     assert conn.types == ["session.update", "input_audio_buffer.append", "response.create",
                           "conversation.item.create"]  # the call was recorded; no follow-up response.create
 
