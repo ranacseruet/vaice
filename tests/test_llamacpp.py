@@ -745,6 +745,21 @@ def test_a_transcription_that_never_arrives_times_out_into_an_empty_transcript(r
     assert turn.user_texts == [""]
 
 
+def test_a_transcription_session_that_never_upgrades_gives_up_promptly(silent_listener, caplog):
+    """A server that accepts the TCP connection but never answers the websocket upgrade: the
+    transcription thread must not park itself for the whole reply-path open timeout."""
+    turn = CountingTurn()
+    started = time.monotonic()
+    with caplog.at_level(logging.ERROR, logger="vaice.responders.llamacpp"):
+        llamacpp._transcribe_into(silent_listener, 120.0, AUDIO, turn)
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 10  # CHECK_TIMEOUT (2 s) + margin, far from 120 s
+    assert turn.transcribed.wait(3)
+    assert turn.user_texts == [""]
+    assert "transcribing the question failed" in caplog.text
+
+
 def test_a_transcript_that_lands_after_the_turn_was_interrupted_is_still_reported_once(realtime):
     release = threading.Event()
     server = realtime(

@@ -493,8 +493,13 @@ def _transcribe(url: str, timeout: float, audio: AudioFrame) -> str:
 
     A conversation session never sends a transcript of the user's audio. No language is set, so the
     model detects it ("Perform ASR."), which reads English the same and does not pin the user to it.
+
+    The handshake uses CHECK_TIMEOUT, not the reply path's `timeout`: a transcription is
+    best-effort and degrades to an empty transcript, so against a server that accepts the
+    connection but never answers the upgrade the transcription thread must not park itself for the
+    whole open timeout.
     """
-    with _open(url, timeout) as ws:
+    with _open(url, CHECK_TIMEOUT) as ws:
         session = _Session(ws, timeout, lifecycle.stopping.is_set)
         rate_in, _ = session.rates()
         session.update({"type": "transcription"})
