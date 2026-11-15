@@ -393,6 +393,44 @@ def test_a_loop_with_variants_is_cut_and_the_record_keeps_the_answer(realtime, c
     wait_for_threads_to_end()
 
 
+def test_a_third_repeated_line_is_not_cut_while_its_line_is_incomplete(realtime, caplog):
+    """While streaming, only completed lines are compared: a third "Status: ready" that continues
+    into "Status: ready for input" is not a loop."""
+    server = realtime(reply=[
+        ("text", "Status: ready\n"),
+        ("text", "Status: ready\n"),
+        ("text", "Status: ready"),
+        ("text", " for input.\n"),
+        ("audio", pcm(1)),
+        ("done",),
+    ])
+    turn = Turn()
+    with caplog.at_level(logging.WARNING, logger="vaice.responders.llamacpp"):
+        drive(LlamaCppResponder(server.url, ""), turn=turn)
+
+    assert "repetition loop" not in caplog.text
+    assert turn.assistant_text == "Status: ready\nStatus: ready\nStatus: ready for input.\n"
+
+
+def test_a_loop_completed_only_in_the_final_line_is_trimmed_at_the_end(realtime, caplog):
+    """The last copy of the loop completes in the final delta (no trailing newline): the reply is
+    not cut mid-stream, and the record drops the repeated tail when the response finishes."""
+    server = realtime(reply=[
+        ("text", "It is noon.\n"),
+        ("text", "2026-11-14 21:34:00 EST\n"),
+        ("text", "2026-11-14 21:34:00 EST\n"),
+        ("text", "2026-11-14 21:34:00 EST"),  # no trailing newline: the last line completes the loop
+        ("audio", pcm(1)),
+        ("done",),
+    ])
+    turn = Turn()
+    with caplog.at_level(logging.WARNING, logger="vaice.responders.llamacpp"):
+        drive(LlamaCppResponder(server.url, ""), turn=turn)
+
+    assert "repetition loop" in caplog.text
+    assert turn.assistant_text == "It is noon."
+
+
 def test_a_tool_call_beyond_the_round_cap_ends_the_reply(realtime, caplog):
     server = realtime(
         reply=[[("call", f"item_{n}", "get_info", f"call_{n}", "{}"), ("done",)] for n in (1, 2, 3)],

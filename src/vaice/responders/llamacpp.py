@@ -207,6 +207,26 @@ def _loop_block(text: str, repeats: int = LOOP_REPEATS, max_block: int = LOOP_MA
     return None
 
 
+def _loop_trimmed(joined: str, *, final: bool = False) -> str | None:
+    """`joined` without the repeated tail when it ends with a loop, or None. While streaming the
+    trailing partial line is not a repeat yet — only completed lines (everything up to the last
+    newline) are compared, so a third "Status: ready" that is the start of "Status: ready for
+    input" is not cut as a loop. At the end of the response every line is final and the last one
+    counts too."""
+    if final:
+        probe = joined if joined.endswith("\n") else joined + "\n"
+    else:
+        cut = joined.rfind("\n")
+        if cut < 0:
+            return None  # no completed line yet
+        probe = joined[: cut + 1]
+    block = _loop_block(probe)
+    if block is None:
+        return None
+    lines = [line for line in probe.split("\n") if line.strip()]
+    return "\n".join(_trim_repeats(lines, block))
+
+
 def _trim_repeats(lines: list[str], block: int) -> list[str]:
     """`lines` without the repeated tail: every copy of the looping block (compared normalized) is
     dropped, so the record keeps the answer, not the loop. Only called after `_loop_block` has
@@ -250,14 +270,17 @@ def _converse(
     audio: AudioFrame,
     out: queue.Queue,
     cancelled: threading.Event,
-    progress: list[tuple[str, int]],
     max_output_tokens: int,
     tools: list[dict] | None = None,
     executor: Callable[[str, str], str] | None = None,
     turn: Turn | None = None,
 ) -> None:
-    """Daemon thread: one realtime session for one reply. Puts (rate, samples) frames, then _DONE, on `out`
-    (or the exception that ended it before _DONE) and keeps progress[0] = (reply text, samples received).
+    """Daemon thread: one realtime session for one reply. Puts frames, `_ROUND` at each tool-round
+    boundary, exceptions, and finally `(_DONE, (reply text, samples received))` on `out`.
+
+    Every frame carries a reference to its round's `acc = [text, samples]`, so the consumer never reads
+    shared state the session thread keeps changing: a preamble frame dequeued after the thread has
+    raced into the next round still pairs with that round's text against that round's final samples.
 
     A thread of our own, because fastrtc resumes the reply generator on whichever worker thread is
     free and the socket must not depend on any of them: connect() can block for the whole open
@@ -269,6 +292,7 @@ def _converse(
     def stop() -> bool:
         return cancelled.is_set() or lifecycle.stopping.is_set()
 
+    acc = ["", 0]  # the current round's text and samples; a fresh one per round (frames keep the old)
     try:
         with _open(url, timeout) as ws:
             session = _Session(ws, timeout, stop)
@@ -286,9 +310,6 @@ def _converse(
             session.update(update)
             session.send({"type": "input_audio_buffer.append", "audio": _b64(to_pcm16(audio, rate_in))})
             _create_response(session)
-            text: list[str] = []
-            samples = 0
-            response_samples = 0
             calls: list[_ToolCall] = []
             rounds = 0
             while (event := session.receive()) is not None:
@@ -303,29 +324,28 @@ def _converse(
                         if call.item_id == event.get("item_id"):
                             call.arguments += event.get("delta", "")
                 elif kind == "response.output_text.delta":
-                    text.append(_strip_tool_tags(event.get("delta", "")))
-                    joined = "".join(text)
-                    block = _loop_block(joined)
-                    if block is not None:
+                    acc[0] += _strip_tool_tags(event.get("delta", ""))
+                    trimmed = _loop_trimmed(acc[0])
+                    if trimmed is not None:
                         # the reply cannot stop itself: record it without the repeated tail and end
                         # it here (closing the socket cancels the generation and frees the slot)
-                        lines = [line for line in joined.split("\n") if line.strip()]
-                        text = ["\n".join(_trim_repeats(lines, block))]
-                        progress[0] = ("".join(text), samples)
+                        acc[0] = trimmed
                         log.warning("llamacpp reply fell into a repetition loop; cut it off after the answer")
                         break
-                    progress[0] = (joined, samples)
                 elif kind == "response.output_audio.delta":
                     frame = from_pcm16(base64.b64decode(event.get("delta", "")))
                     if len(frame):
-                        samples += len(frame)
-                        response_samples += len(frame)
-                        progress[0] = ("".join(text), samples)  # before the frame is handed over
-                        out.put((rate_out, frame))
+                        acc[1] += len(frame)
+                        # the frame carries its round's accumulator, so the consumer records this
+                        # round's text against this round's audio, whatever the thread does next
+                        out.put((rate_out, frame, acc))
                 elif kind == "response.done":
+                    trimmed = _loop_trimmed(acc[0], final=True)
+                    if trimmed is not None:  # the repeated tail only completed in the last line
+                        acc[0] = trimmed
+                        log.warning("llamacpp reply fell into a repetition loop; cut it off after the answer")
                     had_calls = bool(calls)
-                    _check_done(event, response_samples, max_output_tokens, had_calls)
-                    response_samples = 0
+                    _check_done(event, acc[1], max_output_tokens, had_calls)
                     if not calls or executor is None:
                         break
                     if rounds >= MAX_TOOL_ROUNDS:
@@ -338,11 +358,10 @@ def _converse(
                     # What was said before the tool result was working out loud, not the answer: it
                     # stays spoken but is dropped from the turn, so a wrong first pass cannot end up
                     # in history and reinforce itself. Text and the spoken_part share restart with
-                    # this round's audio; the marker goes out ahead of this round's frames, so the
+                    # this round's audio (a fresh accumulator; the frames from the previous round
+                    # keep the old one); the marker goes out ahead of this round's frames, so the
                     # consumer's handed-out count restarts with them too.
-                    text = []
-                    samples = 0
-                    progress[0] = ("", 0)
+                    acc = ["", 0]
                     out.put(_ROUND)
                     for call in calls:
                         log.info("llamacpp tool call %s(%s)", call.name, call.arguments)
@@ -361,7 +380,7 @@ def _converse(
     except BaseException as exc:  # noqa: BLE001 - re-raised in the consumer, which must see any failure
         out.put(exc)
     finally:
-        out.put(_DONE)
+        out.put((_DONE, acc))
 
 
 def _check_done(event: dict, samples: int, max_output_tokens: int, had_calls: bool = False) -> None:
@@ -567,16 +586,16 @@ class LlamaCppResponder:
         ).start()
         chunks: queue.Queue = queue.Queue()
         cancelled = threading.Event()
-        progress = [("", 0)]  # (reply text, audio samples) received so far; replaced whole by the session thread
         context = _context_lines(clock=self._clock)
         threading.Thread(
             target=_converse,
             args=(self._url, self._timeout, _instructions(self._prompt, history, context), audio, chunks, cancelled,
-                  progress, self._max_output_tokens, self._tools, self._executor, turn),
+                  self._max_output_tokens, self._tools, self._executor, turn),
             name="vaice-llamacpp",
             daemon=True,
         ).start()
         handed_out = 0
+        final = ["", 0]  # the session thread's last accumulator: (text, samples) of the final round
         try:
             while True:
                 try:
@@ -589,23 +608,25 @@ class LlamaCppResponder:
                     if turn.closed.is_set():  # barge-in, or the conversation was reset
                         return
                     continue
-                if item is _DONE:
-                    break
+                if isinstance(item, BaseException):
+                    raise item
                 if item is _ROUND:  # a tool round ended: only what follows is the recorded answer
                     handed_out = 0
                     turn.set_assistant_text("")
                     continue
-                if isinstance(item, BaseException):
-                    raise item
+                if isinstance(item, tuple) and item[0] is _DONE:  # the session thread's last state
+                    final = item[1]
+                    break
                 if turn.closed.is_set():
                     return
-                handed_out += len(item[1])
-                turn.set_assistant_text(spoken_part(*progress[0], handed_out))
-                yield item
+                _rate, frame, (round_text, round_samples) = item  # the frame's own snapshot
+                handed_out += len(frame)
+                turn.set_assistant_text(spoken_part(round_text, round_samples, handed_out))
+                yield _rate, frame
             if lifecycle.stopping.is_set():  # the session thread may have noticed first, and stopped for the app
                 log.warning(ABANDONED)
                 return
-            turn.set_assistant_text(spoken_part(*progress[0], handed_out))  # all of it, now that it's all out
+            turn.set_assistant_text(spoken_part(final[0], final[1], handed_out))  # all of it, now that it's all out
         finally:
             cancelled.set()  # the session thread closes the socket, which cancels the reply on the server
 
