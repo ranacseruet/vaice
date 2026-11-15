@@ -568,21 +568,19 @@ def test_a_tool_call_finishing_after_a_barge_in_is_still_reported(realtime):
 def test_the_default_executor_posts_the_tool_to_the_server(monkeypatch):
     posted = []
 
-    def post(url, json=None, timeout=None, stream=None):
-        posted.append((url, json, timeout, stream))
+    def post(url, json=None, timeout=None):
+        posted.append((url, json, timeout))
         return Reply(body='{"os": "Darwin"}')
 
     monkeypatch.setattr(llamacpp.requests, "post", post)
     execute = llamacpp.execute_tool("http://h:1", 7.0)
     assert execute("get_info", "{}") == '{"os": "Darwin"}'
-    assert posted == [("http://h:1/tools", {"tool": "get_info", "params": {}},
-                       (llamacpp.CHECK_TIMEOUT, llamacpp.TOOL_READ_TIMEOUT), True)]
+    assert posted == [("http://h:1/tools", {"tool": "get_info", "params": {}}, 7.0)]
 
     posted.clear()
     assert execute("read_file", '{"path": "/tmp/secret.txt", "start_line": 1}') == '{"os": "Darwin"}'
     assert posted == [("http://h:1/tools",
-                       {"tool": "read_file", "params": {"path": "/tmp/secret.txt", "start_line": 1}},
-                       (llamacpp.CHECK_TIMEOUT, llamacpp.TOOL_READ_TIMEOUT), True)]
+                       {"tool": "read_file", "params": {"path": "/tmp/secret.txt", "start_line": 1}}, 7.0)]
 
     assert "arguments are not JSON" in execute("read_file", "{not json")
     assert "arguments are not a JSON object" in execute("read_file", '["path"]')
@@ -591,7 +589,7 @@ def test_the_default_executor_posts_the_tool_to_the_server(monkeypatch):
     monkeypatch.setattr(llamacpp.requests, "post", lambda *a, **k: (_ for _ in ()).throw(requests.ConnectionError("x")))
     assert llamacpp.execute_tool("http://h:1", 7.0)("get_info", "{}") == "tool get_info failed: x"
 
-    def bad(url, json=None, timeout=None, stream=None):
+    def bad(url, json=None, timeout=None):
         return Reply(status=500, body="boom")
 
     monkeypatch.setattr(llamacpp.requests, "post", bad)
@@ -607,25 +605,53 @@ def test_a_tool_call_does_not_start_when_the_reply_was_already_stopped(monkeypat
 
 
 def test_a_tool_call_that_outlives_a_stop_gives_up_promptly(monkeypatch):
-    """The tool call outlives stop(): the simulated server never sends a byte, the stop fires
-    mid-call, and the executor must return within seconds instead of the whole open timeout."""
+    """The tool call outlives stop(): the simulated server never answers, the stop fires mid-call,
+    and the executor must return within seconds instead of the whole open timeout."""
     stop = threading.Event()
-    monkeypatch.setattr(llamacpp.requests, "post", lambda *a, **k: HangingToolReply())
+    block = threading.Event()
+
+    def blocking_post(*a, **k):
+        block.wait(30)  # a tool whose POST hangs forever
+        return Reply(body='{"os": "Darwin"}')
+
+    monkeypatch.setattr(llamacpp.requests, "post", blocking_post)
     timer = threading.Timer(0.2, stop.set)
     timer.start()
     start = time.monotonic()
     result = llamacpp.execute_tool("http://h:1", 120.0, stop=stop.is_set)("get_info", "{}")
     elapsed = time.monotonic() - start
     timer.cancel()
+    block.set()  # let the abandoned worker thread finish
     assert elapsed < 5
     assert "aborted" in result
 
 
+def test_a_tool_that_is_slow_but_alive_is_not_killed(monkeypatch):
+    """A tool whose answer takes longer than the poll interval but within the deadline completes
+    normally: cancellation polling must not destroy a healthy request."""
+
+    def slow_post(url, json=None, timeout=None):
+        time.sleep(1.2)
+        return Reply(body='{"os": "Darwin"}')
+
+    monkeypatch.setattr(llamacpp.requests, "post", slow_post)
+    result = llamacpp.execute_tool("http://h:1", 10.0, stop=lambda: False)("get_info", "{}")
+    assert result == '{"os": "Darwin"}'
+
+
 def test_a_tool_call_that_never_gets_an_answer_times_out(monkeypatch):
-    monkeypatch.setattr(llamacpp.requests, "post", lambda *a, **k: HangingToolReply())
+    block = threading.Event()
+
+    def blocking_post(*a, **k):
+        block.wait(30)  # a tool whose POST hangs forever
+        return Reply(body='{"os": "Darwin"}')
+
+    monkeypatch.setattr(llamacpp.requests, "post", blocking_post)
     start = time.monotonic()
     result = llamacpp.execute_tool("http://h:1", 0.3)("get_info", "{}")  # no stop signal at all
-    assert time.monotonic() - start < 5
+    elapsed = time.monotonic() - start
+    block.set()  # let the abandoned worker thread finish
+    assert elapsed < 5
     assert "timed out" in result
 
 
@@ -738,6 +764,45 @@ def test_the_markup_stripper_drops_a_function_block():
     out += stripper.feed('{"name": "get_info"}</function> b')
 
     assert out == "a  b"
+
+
+def test_incomplete_simple_tags_are_deferred_until_the_boundary_arrives():
+    stripper = llamacpp._MarkupStripper()
+    out = ""
+    for chunk in ("<answer", ">hello</answer", ">"):
+        out += stripper.feed(chunk)
+    assert out == "hello"
+
+    stripper = llamacpp._MarkupStripper()
+    out = ""
+    for chunk in "<thinking>hello</thinking>":
+        out += stripper.feed(chunk)
+    assert out == "hello"
+
+
+def test_partial_function_openers_are_held_back():
+    stripper = llamacpp._MarkupStripper()
+    out = stripper.feed("<fun")
+    out += stripper.feed('ction=get_info>{"x":1}</function>ok')
+    assert out == "ok"
+
+
+def test_the_function_opener_split_at_every_point():
+    full = '<function=get_info>{"x":1}</function>ok'
+    for cut in range(1, len("<function=get_info>") + 1):
+        stripper = llamacpp._MarkupStripper()
+        out = stripper.feed(full[:cut])
+        out += stripper.feed(full[cut:])
+        assert out == "ok", f"split at {cut}"
+
+
+def test_the_tool_call_opener_split_at_every_point():
+    full = "<tool_call>{\"n\": 1}</tool_call>ok"
+    for cut in range(1, len("<tool_call>") + 1):
+        stripper = llamacpp._MarkupStripper()
+        out = stripper.feed(full[:cut])
+        out += stripper.feed(full[cut:])
+        assert out == "ok", f"split at {cut}"
 
 
 def test_a_reply_with_markup_records_clean_text(realtime):
@@ -1073,7 +1138,6 @@ class Reply:
         self.ok = status < 400
         self._body = body
         self.text = str(body)
-        self.encoding = "utf-8"
 
     def json(self):
         if self._body is None:
@@ -1083,34 +1147,6 @@ class Reply:
     def raise_for_status(self):
         if not self.ok:
             raise requests.HTTPError(str(self.status_code))
-
-    # the default executor streams the POST: it must survive `with` and iter_content
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc):
-        return False
-
-    def iter_content(self, chunk_size=65536):
-        payload = self.text.encode("utf-8")
-        for i in range(0, len(payload), chunk_size):
-            yield payload[i:i + chunk_size]
-
-
-class HangingToolReply(Reply):
-    """A /tools response whose server is working and never sends a byte; each read times out."""
-
-    def iter_content(self, chunk_size=65536):
-        return _InfiniteReads()
-
-
-class _InfiniteReads:
-    def __iter__(self):
-        return self
-
-    def __next__(self):
-        time.sleep(0.02)
-        raise requests.ReadTimeout("no bytes received")
 
 
 def models(*modalities):
