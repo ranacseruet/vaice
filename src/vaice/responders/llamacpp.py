@@ -28,9 +28,6 @@ POLL_SECONDS = 0.25
 # The close handshake of a socket whose server is busy or gone must not hold a thread for long
 CLOSE_TIMEOUT = 1.0
 CHECK_TIMEOUT = 2  # seconds for the startup HTTP checks
-# How often a tool call in flight re-checks whether the reply was stopped. The read timeout of the
-# streaming POST is this long, so a hanging tool gives up within about one interval.
-TOOL_READ_TIMEOUT = 1.0
 # The maximum number of tool rounds a reply may make after its first response. A tool round is one
 # response that asked for tools, their execution, and the response that speaks the results; the cap
 # keeps a tool-calling loop from running away with the session (and the mic).
@@ -197,7 +194,7 @@ _OPEN_BLOCK = re.compile(r"<tool_call>|<function(=[^>\s]*)?>")
 _CONTROL = re.compile(r"<\|.*?\|>")
 # Simple tokens the stray-markup rules know about; used to hold back a trailing partial tag while streaming
 _TOKEN_PREFIXES = ("<tool_call>", "</tool_call>", "<think>", "</think>", "<thinking>", "</thinking>",
-                   "<answer>", "</answer>", "</function>")
+                   "<answer>", "</answer>", "<function>", "</function>")
 
 
 def _next_markup(text: str):
@@ -266,6 +263,11 @@ class _MarkupStripper:
                 self._drop_close = None
                 continue
             found = _next_markup(self._pending)
+            if found is not None and found[1] == len(self._pending) and not found[2].endswith(">"):
+                # an orphan tag sitting at the very end of what we have seen: it may still grow
+                # (<answer -> <answer>), so hold it for the next delta instead of consuming it —
+                # only a boundary (a ">" or any other character) settles it
+                found = None
             if found is not None:
                 s, e, tok = found
                 if s:
@@ -541,11 +543,11 @@ def execute_tool(url: str, timeout: float, stop: Callable[[], bool] | None = Non
     traceback) is what the model sees and what `app.py` shows in the UI. A closure over `url` and
     `timeout`, mirroring how `_open` builds the websocket.
 
-    The request is streamed with a short read timeout and re-checked against `stop` (when given),
-    so a tool call that outlives a stop returns within about `TOOL_READ_TIMEOUT` instead of
-    blocking the session thread for the whole `timeout` — the caller decides what an aborted call
-    is worth (`_converse` stops the session on a stop). `timeout` bounds the call overall: when it
-    passes before the reply is complete, the call fails instead of waiting forever.
+    The request itself is not cancelled (the HTTP library has no safe way to interrupt a synchronous
+    call), but the caller does not have to wait for it: the POST runs on a daemon thread and this
+    stops waiting when `stop` (when given) fires or `timeout` passes — the reply gives up promptly
+    and the result is discarded. The thread ends when the server answers or `timeout` expires; it
+    is a daemon, so it cannot keep the process alive.
     """
 
     def call(name: str, arguments: str) -> str:
@@ -557,29 +559,31 @@ def execute_tool(url: str, timeout: float, stop: Callable[[], bool] | None = Non
             return f"tool {name} failed: arguments are not a JSON object: {arguments!r}"
         if stop is not None and stop():
             return f"tool {name} aborted: the reply was stopped"
-        deadline = time.monotonic() + timeout
-        try:
-            with requests.post(f"{url}/tools", json={"tool": name, "params": params},
-                               timeout=(CHECK_TIMEOUT, TOOL_READ_TIMEOUT), stream=True) as r:
+        # requests' timeout applies per socket operation and does not help here; instead, the call
+        # runs on a daemon thread and this polls it — a healthy slow tool is never destroyed, and
+        # the timeout bounds the caller either way
+        result: dict[str, str] = {}
+
+        def work() -> None:
+            try:
+                r = requests.post(f"{url}/tools", json={"tool": name, "params": params}, timeout=timeout)
                 if not r.ok:
-                    return f"tool {name} failed: HTTP {r.status_code}: {r.text[:200]}"
-                chunks: list[bytes] = []
-                iterator = r.iter_content(chunk_size=65536)
-                while True:
-                    if time.monotonic() > deadline:
-                        return f"tool {name} failed: timed out after {timeout:g}s"
-                    if stop is not None and stop():
-                        return f"tool {name} aborted: the reply was stopped"
-                    try:
-                        chunk = next(iterator, None)
-                    except requests.ReadTimeout:
-                        continue  # the server is still working: re-check stop and the deadline
-                    if chunk is None:
-                        break  # the server finished the reply
-                    chunks.append(chunk)
-        except requests.RequestException as exc:
-            return f"tool {name} failed: {exc}"
-        return b"".join(chunks).decode(getattr(r, "encoding", None) or "utf-8", errors="replace")
+                    result["out"] = f"tool {name} failed: HTTP {r.status_code}: {str(r.text)[:200]}"
+                    return
+                result["out"] = str(r.text)
+            except Exception as exc:  # noqa: BLE001 - a tool failure must be spoken, not raised; the thread must never die silently
+                result["out"] = f"tool {name} failed: {exc}"
+
+        worker = threading.Thread(target=work, name=f"vaice-tool-{name}", daemon=True)
+        worker.start()
+        deadline = time.monotonic() + timeout
+        while worker.is_alive():
+            if stop is not None and stop():
+                return f"tool {name} aborted: the reply was stopped"
+            if time.monotonic() > deadline:
+                return f"tool {name} failed: timed out after {timeout:g}s"
+            worker.join(POLL_SECONDS)
+        return result.get("out", f"tool {name} failed: the request thread died")
 
     return call
 
