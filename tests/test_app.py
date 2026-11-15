@@ -201,7 +201,8 @@ def test_ui_has_the_transcript_a_reset_button_and_loads_the_stored_conversation(
     (accordion,) = [c for c in config["components"] if c["type"] == "accordion"]
     assert accordion["props"]["label"] == "Tool activity"
     assert accordion["props"]["open"] is False
-    (click_outputs,) = [tuple(d["outputs"]) for d in config["dependencies"] if d["targets"][0][1] == "click"]
+    (click_outputs,) = [tuple(d["outputs"]) for d in config["dependencies"]
+                        if d["targets"][0] == (button["id"], "click")]
     assert len(click_outputs) == 2 and chatbot["id"] in click_outputs  # chatbot + tool panel
     (load_output,) = [tuple(d["outputs"]) for d in config["dependencies"] if d["targets"][0][1] == "load"]
     assert load_output == (chatbot["id"],)  # a page load fills only the chatbot; the timer fills the panel
@@ -256,13 +257,13 @@ def test_a_late_transcript_reaches_the_chatbot_after_the_reply_ran_out():
     (tick,) = [d for d in config["dependencies"] if d["targets"][0] == (ours[0]["id"], "tick")]
     tick_fn = stream.ui.fns[tick["id"]].fn
 
-    view, tools, seen = tick_fn("")  # the State starts blank, so the first tick shows the empty view once
+    view, tools, seen, _export = tick_fn("")  # the State starts blank, so the first tick shows the empty view once
     assert view == [] and tools == ""
     turn = conversation.start_turn()
-    view, tools, seen = tick_fn(seen)  # the question was heard; its transcript has not arrived yet
+    view, tools, seen, _export = tick_fn(seen)  # the question was heard; its transcript has not arrived yet
     assert view == [{"role": "user", "content": "…"}]
     turn.set_user_text("and after the reply?")  # the transcript lands late, past the final update
-    view, tools, seen = tick_fn(seen)
+    view, tools, seen, _export = tick_fn(seen)
     assert view[-1] == {"role": "user", "content": "and after the reply?"}  # the stuck "…" is replaced
     assert tick_fn(seen)[0] == {"__type__": "update"}  # unchanged again: silent
 
@@ -275,14 +276,14 @@ def test_a_tool_round_fills_the_collapsed_tool_panel():
     (tick,) = [d for d in config["dependencies"] if d["targets"][0] == (ours[0]["id"], "tick")]
     tick_fn = stream.ui.fns[tick["id"]].fn
 
-    _, _, seen = tick_fn("")
+    _, _, seen, _ = tick_fn("")
     turn = conversation.start_turn()
     turn.set_user_text("what is this machine?")
     turn.add_tool_event("get_info", "{}", "os: Darwin")
     turn.set_assistant_text("It is a Mac.")
     turn.finish()
 
-    view, tools, seen = tick_fn(seen)
+    view, tools, seen, _export = tick_fn(seen)
     assert view[-1] == {"role": "assistant", "content": "It is a Mac."}
     assert "**get_info** `{}`" in tools and "os: Darwin" in tools
     assert tick_fn(seen)[0] == {"__type__": "update"}  # unchanged: silent
@@ -291,7 +292,9 @@ def test_a_tool_round_fills_the_collapsed_tool_panel():
 def test_what_you_say_after_new_conversation_is_the_next_turn():
     conversation = Conversation()
     stream = build_stream(FakeResponder(), conversation)
-    (click,) = [d for d in stream.ui.get_config_file()["dependencies"] if d["targets"][0][1] == "click"]
+    config = stream.ui.get_config_file()
+    (button,) = [c for c in config["components"] if c["type"] == "button"]
+    (click,) = [d for d in config["dependencies"] if d["targets"][0] == (button["id"], "click")]
 
     conversation.start_turn().set_user_text("said before the reset")
     stream.ui.fns[click["id"]].fn()  # the button
@@ -333,7 +336,9 @@ def test_the_reset_button_silences_a_playing_reply(tmp_path):
         _clear_queue = staticmethod(lambda: stopped.append("queue"))
 
     stream.handlers["connection-1"] = PlayingReply()  # type: ignore[assignment]
-    (button,) = [d for d in stream.ui.get_config_file()["dependencies"] if d["targets"][0][1] == "click"]
+    config = stream.ui.get_config_file()
+    (reset_button,) = [c for c in config["components"] if c["type"] == "button"]
+    (button,) = [d for d in config["dependencies"] if d["targets"][0] == (reset_button["id"], "click")]
 
     stream.ui.fns[button["id"]].fn()
 
@@ -535,8 +540,8 @@ def test_main_installs_the_stop_handler_and_asks_the_app_to_stop_when_the_server
         class ui:  # a stand-in for the gradio app
 
             @staticmethod
-            def launch(server_port, pwa):
-                launched.append((server_port, pwa))
+            def launch(server_port, pwa, allowed_paths):
+                launched.append((server_port, pwa, allowed_paths))
 
     monkeypatch.setattr(app, "parse_args", lambda: argparse.Namespace())
     monkeypatch.setattr(app, "check_server", lambda: startup.append("check"))
@@ -549,7 +554,9 @@ def test_main_installs_the_stop_handler_and_asks_the_app_to_stop_when_the_server
 
         assert signal.getsignal(signal.SIGINT) is not previous  # Ctrl+C is handled
         assert startup == ["check", "construct"]
-        assert launched == [(app.config.PORT, True)]  # pwa on, or the browser 404s on /manifest.json
+        assert launched == [(app.config.PORT, True, [str(app.config.DATA_DIR / "exports")])]
+        # pwa on, or the browser 404s on /manifest.json; the exports dir is allowed, or the
+        # download raises InvalidPathError once the app is running
         assert lifecycle.stopping.is_set()  # the server is gone: the responders may give up
     finally:
         signal.signal(signal.SIGINT, previous)
@@ -561,9 +568,9 @@ def _fake_stream_class(launched=None):
         class ui:  # a stand-in for the gradio app
 
             @staticmethod
-            def launch(server_port, pwa):
+            def launch(server_port, pwa, allowed_paths):
                 if launched is not None:
-                    launched.append((server_port, pwa))
+                    launched.append((server_port, pwa, allowed_paths))
 
     return FakeStream
 
@@ -667,3 +674,49 @@ def test_main_keeps_the_conversation_in_memory_when_vaice_data_dir_is_empty(monk
 
     assert "in memory only" in caplog.text
     assert not (tmp_path / "conversation.json").exists()
+
+
+def test_export_transcript_writes_the_markdown_under_the_data_dir(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    conversation = Conversation()
+    turn = conversation.start_turn()
+    turn.set_user_text("hello")
+    turn.set_assistant_text("hi there")
+    turn.finish()
+
+    path = app.export_transcript(conversation)
+
+    assert path == str(tmp_path / "exports" / "transcript.md")
+    assert (tmp_path / "exports" / "transcript.md").read_text(encoding="utf-8") == conversation.export_markdown()
+
+
+def test_the_timer_keeps_the_export_button_on_the_current_transcript(tmp_path, monkeypatch):
+    """A DownloadButton downloads the value it already holds, so the export must not be wired to
+    the button's own click (every download would be one click behind). The 1 s timer rewrites the
+    file whenever the view changes, so one click downloads what the chatbot shows."""
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    conversation = Conversation()
+    stream = build_stream(FakeResponder(), conversation)
+    cfg = stream.ui.get_config_file()
+
+    (download_button,) = [c for c in cfg["components"] if c["type"] == "downloadbutton"]
+    assert not [d for d in cfg["dependencies"] if d["targets"][0] == (download_button["id"], "click")]
+    ours = [c for c in cfg["components"] if c["type"] == "timer" and c["props"]["value"] == VIEW_REFRESH_SECONDS]
+    assert len(ours) == 1
+    (tick,) = [d for d in cfg["dependencies"] if d["targets"][0] == (ours[0]["id"], "tick")]
+    assert download_button["id"] in tick["outputs"]  # the timer arms the download button
+    tick_fn = stream.ui.fns[tick["id"]].fn
+
+    _, _, seen, export = tick_fn("")  # the empty view is new, so the export is written
+    assert export == str(tmp_path / "exports" / "transcript.md")
+    assert (tmp_path / "exports" / "transcript.md").read_text(encoding="utf-8") == conversation.export_markdown()
+
+    turn = conversation.start_turn()
+    turn.set_user_text("hello")
+    turn.set_assistant_text("hi there")
+    turn.finish()
+    _, _, seen, export = tick_fn(seen)  # the view changed: the export is rewritten
+    assert export == str(tmp_path / "exports" / "transcript.md")
+    assert "hello" in (tmp_path / "exports" / "transcript.md").read_text(encoding="utf-8")
+
+    assert tick_fn(seen)[3] == {"__type__": "update"}  # unchanged: the button keeps its file

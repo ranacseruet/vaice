@@ -40,13 +40,35 @@ def refresh_view(conversation: Conversation, known: str) -> tuple:
 
     The reply can finish before its parallel transcription session reports the transcript, so
     without this the "…" would sit in the chatbot until the next exchange or a page reload. Views
-    are compared as JSON so an unchanged transcript is never re-rendered.
+    are compared as JSON so an unchanged transcript is never re-rendered. The tick also rewrites
+    the transcript export when the view changed, so the download button always holds the current
+    conversation: a DownloadButton downloads the value it already holds, so writing the file on
+    click would leave every download one click behind.
     """
     view = (conversation.messages_for_ui(), conversation.tool_activity_for_ui())
     rendered = json.dumps(view, ensure_ascii=False)
     if rendered == known:
-        return gr.skip(), gr.skip(), known  # gr.skip(): leave the components alone
-    return view[0], view[1], rendered
+        return gr.skip(), gr.skip(), known, gr.skip()  # gr.skip(): leave the components alone
+    try:
+        export_path = export_transcript(conversation)
+    except OSError:
+        # The export is a side channel: a failed write must not freeze the chatbot refresh
+        log.warning("could not write the transcript export; the download button keeps its old file",
+                    exc_info=True)
+        export_path = gr.skip()
+    return view[0], view[1], rendered, export_path
+
+
+def export_transcript(conversation: Conversation) -> str:
+    """Save the transcript as markdown under the data dir; the UI offers the file as a download.
+
+    One fixed name, overwritten on every export: a single-user demo keeps one current
+    transcript, and a stable path keeps the download wiring simple.
+    """
+    path = config.DATA_DIR / "exports" / "transcript.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(conversation.export_markdown(), encoding="utf-8")
+    return str(path)
 
 
 def make_handler(responder: Responder, conversation: Conversation):
@@ -127,11 +149,19 @@ def build_stream(responder: Responder, conversation: Conversation) -> Stream:
         new_conversation.click(reset, outputs=[chatbot, tool_panel])
         chatbot.clear(reset)  # the chatbot's own trash icon would otherwise only clear the view
 
+        # The transcript as a shareable markdown file. A DownloadButton downloads the value it
+        # already holds and only then dispatches its click, so wiring the export to the button's
+        # own click would leave every download one click behind. The button instead starts with
+        # the current transcript, and the 1 s timer below rewrites the file whenever the
+        # conversation changes, so one click downloads what the chatbot shows.
+        export_button = gr.DownloadButton("Export transcript", value=export_transcript(conversation))
+
         # refresh_view's backstop: catches conversation changes no reply update covered (a late
         # transcript, a barge-in's trimmed text, a tool round); seen holds the views it last rendered
         seen = gr.State("")
         gr.Timer(VIEW_REFRESH_SECONDS).tick(
-            partial(refresh_view, conversation), inputs=[seen], outputs=[chatbot, tool_panel, seen])
+            partial(refresh_view, conversation), inputs=[seen],
+            outputs=[chatbot, tool_panel, seen, export_button])
     return stream
 
 
@@ -183,8 +213,11 @@ def main() -> None:
         stream = build_stream(responder, conversation)
         # gradio's index.html always links /manifest.json, and launch() re-derives pwa from
         # its own kwarg (None -> Spaces-only), so without pwa=True the route 404s and the
-        # browser logs a manifest fetch error on every load.
-        stream.ui.launch(server_port=config.PORT, pwa=True)
+        # browser logs a manifest fetch error on every load. allowed_paths lets the running
+        # app serve the transcript export, which lives under the data dir, outside the
+        # working directory: without it the download raises InvalidPathError.
+        stream.ui.launch(server_port=config.PORT, pwa=True,
+                         allowed_paths=[str(config.DATA_DIR / "exports")])
     except KeyboardInterrupt:
         # Ctrl+C while the model was loading: nothing to close, just leave
         log.info("stopped")

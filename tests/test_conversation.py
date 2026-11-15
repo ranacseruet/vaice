@@ -511,3 +511,53 @@ def test_a_capped_output_is_capped_only_once():
     turn.add_tool_event("again", "{}", turn.tool_events[0]["output"])
 
     assert turn.tool_events[1]["output"] == once  # the marker is not doubled
+
+
+def test_export_markdown_renders_the_dialogue_with_speakers():
+    c = Conversation()
+    exchange(c, "capital of France?", "Paris.")
+    exchange(c, "and of Italy?", "Rome.")
+
+    assert c.export_markdown() == (
+        "# vaice transcript\n"
+        "\n"
+        "**User:** capital of France?\n"
+        "\n"
+        "**Assistant:** Paris.\n"
+        "\n"
+        "**User:** and of Italy?\n"
+        "\n"
+        "**Assistant:** Rome.\n"
+    )
+
+
+def test_export_markdown_shows_tool_calls_as_blockquotes_in_the_panel_format():
+    c = Conversation()
+    turn = exchange(c, "what system is this?", "This is a Mac.")
+    turn.add_tool_event("get_info", "{}", "os: Darwin")
+
+    md = c.export_markdown()
+    assert "> **get_info** `{}`\n> ```\n> os: Darwin\n> ```" in md
+
+
+def test_export_markdown_keeps_interruptions_errors_and_pending_transcripts_honest():
+    c = Conversation()
+    cut_off = c.start_turn()
+    cut_off.set_user_text("tell me a story")
+    cut_off.set_assistant_text("Once upon a")
+    c.start_turn()  # starting the next turn closes (interrupts) the story
+    failed = c.start_turn()
+    failed.fail("server went away")
+
+    md = c.export_markdown()
+    assert "**Assistant:** Once upon a (interrupted)" in md
+    assert "**Assistant:** (error: server went away)" in md
+    assert "**User:** …" in md  # the newest turn is still being transcribed
+
+
+def test_export_markdown_marks_an_empty_transcript_and_an_inaudible_turn():
+    assert Conversation().export_markdown() == "# vaice transcript\n\n(no conversation yet)\n"
+
+    c = Conversation()
+    exchange(c, "", "I could not hear that.")
+    assert f"**User:** {INAUDIBLE}" in c.export_markdown()
