@@ -16,6 +16,7 @@ from vaice.interruptible import InterruptSafeReplyOnPause, stop_playing_reply
 from vaice.lifecycle import install_stop_handler, request_stop
 from vaice.responders.base import Responder
 from vaice.responders.llamacpp import LlamaCppResponder, check_server, fetch_tools, write_capable_tools
+from vaice.server import ensure_server
 
 log = logging.getLogger(__name__)
 
@@ -137,15 +138,21 @@ def build_stream(responder: Responder, conversation: Conversation) -> Stream:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="vaice", description="Talk to a local llama-server audio model.")
+    parser.add_argument(
+        "command", nargs="?", choices=["up"],
+        help="up: start llama-server first if none is running (and stop it at exit), then open the UI")
     return parser.parse_args(argv)
 
 
 def main() -> None:
-    parse_args()
+    up = parse_args().command == "up"
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     install_stop_handler()  # Ctrl+C: the responders give up, gradio closes the server
+    managed = None  # the llama-server `vaice up` started, if any
     try:
+        if up:
+            managed = ensure_server()
         check_server()
         tools: list[dict] = []
         if config.LLAMACPP_TOOLS:
@@ -184,9 +191,11 @@ def main() -> None:
         # gradio's index.html always links /manifest.json, and launch() re-derives pwa from
         # its own kwarg (None -> Spaces-only), so without pwa=True the route 404s and the
         # browser logs a manifest fetch error on every load.
-        stream.ui.launch(server_port=config.PORT, pwa=True)
+        stream.ui.launch(server_port=config.PORT, pwa=True, inbrowser=up)
     except KeyboardInterrupt:
         # Ctrl+C while the model was loading: nothing to close, just leave
         log.info("stopped")
     finally:
         request_stop()  # the app is over: don't wait for a model call that may never return
+        if managed is not None:
+            managed.stop()

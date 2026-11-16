@@ -24,40 +24,62 @@ browser mic ─WebRTC─▶ fastrtc (VAD: detects you stopped talking)
 
 ## Quickstart (From Scratch in 3 Steps)
 
-### 1. Install and start `llama-server` with an audio model
+### 1. Install `llama-server`
 
 `vaice` requires [llama.cpp](https://github.com/ggml-org/llama.cpp) `llama-server` **b11960 or newer** (v0.8.0+) for the `/v1/realtime` WebSocket. Install it via Homebrew (macOS/Linux):
 
 ```bash
 brew install llama.cpp
-llama-server -hf LiquidAI/LFM3-Audio-2B-GGUF:Q4_K_M --temp 0 --port 8001
 ```
 
-> **Sampling:** the LFM3-Audio model card recommends **greedy decoding (temperature 0) for text output** — hence `--temp 0` above. The `/v1/realtime` API has no temperature field, so reply text is sampled with the server's own setting; at the default 0.8 a 2B audio model drifts off-topic and loses the conversation thread (`vaice` warns about this at startup — and logs a distinct hint when it cannot verify the temperature at all, e.g. a router-style `/props`). Speech sampling is separate and comes from the GGUF (audio temperature 1.0, top_k 128, repetition penalty 1.1), so no audio flags are needed.
-> **Language & voice:** voice chat is English-only for now; ASR and TTS cover 18 languages. Leave `--tts-lang`/`--tts-voice` out of the `llama-server` command: for an English-only voice model the pin buys nothing, and for LFM3 templates llama.cpp turns those flags (and per-session `audio.output.language`/`audio.output.voice`) into a `Speak in English using a female voice.` line prepended to the system prompt. An early single-session repro blamed that line for making the model parrot your words back, but a controlled re-test on the same build (b12359, `Q8_0 --temp 0`, clean TTS and noisy mic inputs) did **not** reproduce the parroting — with or without the flags; on noisy input the injected line degraded one reply into a rambling run-on. Treat the flags as unnecessary for voice chat, not as a proven echo cause. Leave the *transcription* language alone too — the default auto-detect is measurably better than pinning it.
-> **Context:** the model supports 32K tokens. If you pass `-c/--ctx-size` explicitly, use at least 8192 — a realtime conversation that overflows its slot fails with "the conversation does not fit in the context".
-> **How `-hf` works:** `-hf` (`--hf-repo`) is a built-in `llama-server` flag — you do **not** need the `huggingface-cli` / `hf` command-line tool installed. On first run, `llama-server` downloads the GGUF model weights and audio projector directly from Hugging Face into its local cache (`~/Library/Caches/llama.cpp` on macOS or `~/.cache/llama.cpp` on Linux) and starts listening on `http://localhost:8001`.
-> *(If you prefer to build `llama-server` from source or download a pre-built release binary, see the [llama.cpp installation guide](https://github.com/ggml-org/llama.cpp#usage).)*
+*(If you prefer to build `llama-server` from source or download a pre-built release binary, see the [llama.cpp installation guide](https://github.com/ggml-org/llama.cpp#usage).)*
 
-### 2. Install and run `vaice`
+### 2. Install and run `vaice up`
 
-In a second terminal, clone this repository, install the locked environment with [uv](https://docs.astral.sh/uv/), and launch `vaice`:
+Clone this repository, install the locked environment with [uv](https://docs.astral.sh/uv/), and run `vaice up`:
 
 ```bash
 git clone https://github.com/ranacseruet/vaice.git && cd vaice
 uv sync --extra dev
-.venv/bin/vaice
+.venv/bin/vaice up
 ```
+
+`vaice up` makes sure a `llama-server` is running, then starts the UI and opens it in your browser:
+
+- If something already answers `GET /health` at `VAICE_LLAMACPP_URL` (the default is `http://localhost:8001`), it is used as it is and never stopped.
+- Otherwise it starts `llama-server -hf LiquidAI/LFM3-Audio-2B-GGUF:Q4_K_M --temp 0 --host localhost --port 8001` (host and port come from `VAICE_LLAMACPP_URL`, which must be a local address for this; the model from `VAICE_LLAMACPP_MODEL`; add flags such as `--tools get_info,read_file` with `VAICE_LLAMACPP_SERVER_ARGS`) and waits for it to load. The first run downloads about 1 GB of model weights, so the wait can be long (`VAICE_LLAMACPP_START_TIMEOUT`, default 900 s); a progress line appears every 10 s.
+- It checks that `llama-server` is installed and is build 11960 or newer, and tells you how to install or upgrade it. It never installs anything itself.
+- The server's output goes to `~/.vaice/llama-server.log` (`$VAICE_DATA_DIR/llama-server.log`; a temporary directory when `VAICE_DATA_DIR` is empty). Open it if the start fails or takes long.
+- When `vaice` stops (Ctrl+C or any error), the `llama-server` it started is stopped too: terminated, then killed if it does not exit within 5 s.
+
+Plain `vaice` (no `up`) never starts or stops a server, never opens the browser, and works as before.
 
 ### 3. Talk in the browser
 
 When you see `Running on local URL: http://127.0.0.1:7860`:
 
-1. Open `http://127.0.0.1:7860` in Chrome.
+1. Open `http://127.0.0.1:7860` in Chrome (`vaice up` opens it for you).
 2. Put on **headphones** (otherwise speaker audio feeds back into the microphone).
 3. Allow microphone access, click **Record**, ask a question, and pause when done.
 
 For each reply, the terminal logs `[llamacpp] time to first audio: N.NNs` and `[llamacpp] reply finished in N.NNs`.
+
+### Manual alternative: run `llama-server` yourself
+
+To control the server directly, run it in one terminal and plain `vaice` in a second one:
+
+```bash
+llama-server -hf LiquidAI/LFM3-Audio-2B-GGUF:Q4_K_M --temp 0 --port 8001
+```
+
+```bash
+.venv/bin/vaice
+```
+
+> **Sampling:** the LFM3-Audio model card recommends **greedy decoding (temperature 0) for text output** — hence `--temp 0` above (and in the command `vaice up` builds). The `/v1/realtime` API has no temperature field, so reply text is sampled with the server's own setting; at the default 0.8 a 2B audio model drifts off-topic and loses the conversation thread (`vaice` warns about this at startup — and logs a distinct hint when it cannot verify the temperature at all, e.g. a router-style `/props`). Speech sampling is separate and comes from the GGUF (audio temperature 1.0, top_k 128, repetition penalty 1.1), so no audio flags are needed.
+> **Language & voice:** voice chat is English-only for now; ASR and TTS cover 18 languages. Leave `--tts-lang`/`--tts-voice` out of the `llama-server` command: for an English-only voice model the pin buys nothing, and for LFM3 templates llama.cpp turns those flags (and per-session `audio.output.language`/`audio.output.voice`) into a `Speak in English using a female voice.` line prepended to the system prompt. An early single-session repro blamed that line for making the model parrot your words back, but a controlled re-test on the same build (b12359, `Q8_0 --temp 0`, clean TTS and noisy mic inputs) did **not** reproduce the parroting — with or without the flags; on noisy input the injected line degraded one reply into a rambling run-on. Treat the flags as unnecessary for voice chat, not as a proven echo cause. Leave the *transcription* language alone too — the default auto-detect is measurably better than pinning it.
+> **Context:** the model supports 32K tokens. If you pass `-c/--ctx-size` explicitly, use at least 8192 — a realtime conversation that overflows its slot fails with "the conversation does not fit in the context".
+> **How `-hf` works:** `-hf` (`--hf-repo`) is a built-in `llama-server` flag — you do **not** need the `huggingface-cli` / `hf` command-line tool installed. On first run, `llama-server` downloads the GGUF model weights and audio projector directly from Hugging Face into its local cache (`~/Library/Caches/llama.cpp` on macOS or `~/.cache/llama.cpp` on Linux) and starts listening on `http://localhost:8001`.
 
 ---
 
@@ -91,6 +113,9 @@ Precedence: variables already in the environment (e.g. `set -a; source .env; set
 | `VAICE_VAD_SPEECH_PAD_MS` | `30` | Padding added around detected speech |
 | `VAICE_CAN_INTERRUPT` | `1` | Set `0` to disable barge-in: a reply always runs to the end |
 | `VAICE_LLAMACPP_URL` | `http://localhost:8001` | `llama-server` URL; only scheme, host and port are used (`/health`, `/v1/models` and `ws://…/v1/realtime` hang off it) |
+| `VAICE_LLAMACPP_MODEL` | `LiquidAI/LFM3-Audio-2B-GGUF:Q4_K_M` | `vaice up` only: the `-hf` model of the `llama-server` it starts |
+| `VAICE_LLAMACPP_SERVER_ARGS` | *(empty)* | `vaice up` only: extra arguments for the `llama-server` it starts, split like a shell would (e.g. `--tools get_info,read_file`) |
+| `VAICE_LLAMACPP_START_TIMEOUT` | `900` | `vaice up` only: seconds to wait for the started `llama-server` to become ready; the first run downloads about 1 GB |
 | `VAICE_LLAMACPP_PROMPT` | `Reply naturally and concisely in 1 to 2 spoken sentences.` | Reply instructions; `vaice` prepends `Respond with interleaved text and audio.` |
 | `VAICE_LLAMACPP_TIMEOUT` | `120` | Seconds to open a connection or the longest silence from `llama-server` before a reply fails. It is also the total bound for a tool call: when it passes — or the reply is stopped — vaice stops waiting for the call and discards the result (the underlying request is not cancelled; the server may still run/finish the tool). The parallel transcription session's silence budget is this setting too, but its connection **handshake** uses a fixed 2 s (transcription is best-effort and degrades to `(inaudible)`), so raising this cannot extend a slow-handshake server |
 | `VAICE_LLAMACPP_MAX_OUTPUT_TOKENS` | `1024` | Reply cap sent as the realtime session's `max_output_tokens`; text tokens and audio frames count together. Raise it for longer spoken replies |
@@ -260,6 +285,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for contributor guidelines and how the fa
 src/vaice/
   app.py            CLI + Gradio/WebRTC UI; wraps a Responder, logs time to first audio, transcript + reset
   interruptible.py  ReplyOnPause subclass fixing fastrtc 0.0.34 barge-in races, VAD tuning, pre-roll buffer, reset silencing, and idle CPU polling
+  server.py         `vaice up`: reuse a running llama-server or start one (log in the data dir), wait for /health, stop it at exit
   lifecycle.py      Stop signal handler: Ctrl+C asks the app and its responders to abandon in-flight calls
   config.py         Environment-driven settings (.env.example lists them with defaults)
   conversation.py   Turn / Conversation: history windowing, barge-in trimming, atomic JSON persistence, error notes
