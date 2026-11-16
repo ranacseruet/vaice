@@ -186,3 +186,40 @@ def test_an_empty_or_blank_vaice_data_dir_is_not_the_default(monkeypatch):
     finally:
         monkeypatch.undo()
         importlib.reload(config)
+
+
+def test_the_server_start_settings_have_defaults(monkeypatch):
+    for name in ("VAICE_LLAMACPP_MODEL", "VAICE_LLAMACPP_SERVER_ARGS", "VAICE_LLAMACPP_START_TIMEOUT"):
+        monkeypatch.delenv(name, raising=False)
+    try:
+        reloaded = importlib.reload(config)
+        assert reloaded.LLAMACPP_MODEL == "LiquidAI/LFM3-Audio-2B-GGUF:Q4_K_M"
+        assert reloaded.LLAMACPP_SERVER_ARGS == []
+        assert reloaded.LLAMACPP_START_TIMEOUT == 900.0
+    finally:
+        monkeypatch.undo()
+        importlib.reload(config)
+
+
+def test_the_server_start_settings_can_be_overridden(monkeypatch):
+    monkeypatch.setenv("VAICE_LLAMACPP_MODEL", "me/other-GGUF:Q8_0")
+    monkeypatch.setenv("VAICE_LLAMACPP_SERVER_ARGS", "--tools get_info,read_file --alias 'my model'")
+    monkeypatch.setenv("VAICE_LLAMACPP_START_TIMEOUT", "30")
+    try:
+        reloaded = importlib.reload(config)
+        assert reloaded.LLAMACPP_MODEL == "me/other-GGUF:Q8_0"
+        assert reloaded.LLAMACPP_SERVER_ARGS == ["--tools", "get_info,read_file", "--alias", "my model"]
+        assert reloaded.LLAMACPP_START_TIMEOUT == 30.0
+    finally:
+        monkeypatch.undo()
+        importlib.reload(config)
+
+
+def test_server_args_that_shlex_cannot_parse_name_the_variable(monkeypatch):
+    monkeypatch.setenv("VAICE_LLAMACPP_SERVER_ARGS", "--alias 'unclosed")
+    try:
+        with pytest.raises(SystemExit, match="VAICE_LLAMACPP_SERVER_ARGS must be a shell-style argument list"):
+            importlib.reload(config)
+    finally:
+        monkeypatch.undo()
+        importlib.reload(config)
