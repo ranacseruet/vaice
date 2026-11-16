@@ -1,5 +1,6 @@
 """Settings, overridable through environment variables."""
 import os
+import shlex
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -94,6 +95,23 @@ def _tools(name: str) -> bool | None:
 
 
 LLAMACPP_TOOLS = _tools("VAICE_LLAMACPP_TOOLS")
+
+# `vaice up` starts llama-server when none answers at LLAMACPP_URL: the `-hf` model, extra command-line
+# arguments (e.g. `--tools get_info,read_file`), and how long to wait for it (the first run downloads
+# about 1 GB). Plain `vaice` never starts a server.
+LLAMACPP_MODEL = _env("VAICE_LLAMACPP_MODEL", default="LiquidAI/LFM3-Audio-2B-GGUF:Q4_K_M")
+
+
+def _arguments(name: str) -> list[str]:
+    raw = os.getenv(name, "")
+    try:
+        return shlex.split(raw)
+    except ValueError as exc:
+        raise SystemExit(f"vaice: {name} must be a shell-style argument list ({exc}), got {raw!r}") from None
+
+
+LLAMACPP_SERVER_ARGS = _arguments("VAICE_LLAMACPP_SERVER_ARGS")
+LLAMACPP_START_TIMEOUT = _number("VAICE_LLAMACPP_START_TIMEOUT", default="900", kind=float)
 
 PORT = _number("VAICE_PORT", default="7860", kind=int)
 

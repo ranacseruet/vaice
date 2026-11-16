@@ -183,12 +183,17 @@ def test_two_questions_through_the_app_and_the_llamacpp_backend(tmp_path, realti
     assert conversation._turns[1].complete
 
 
-def test_cli_takes_no_positional_or_flag_arguments(capsys):
-    assert vars(parse_args([])) == {}
+def test_cli_takes_an_optional_up_command_and_nothing_else(capsys):
+    assert vars(parse_args([])) == {"command": None}
+    assert vars(parse_args(["up"])) == {"command": "up"}
     with pytest.raises(SystemExit) as exc:
         parse_args(["--unknown"])
     assert exc.value.code == 2
     assert "unrecognized arguments: --unknown" in capsys.readouterr().err
+    with pytest.raises(SystemExit) as exc:
+        parse_args(["down"])
+    assert exc.value.code == 2
+    assert "invalid choice: 'down'" in capsys.readouterr().err
 
 
 def test_ui_has_the_transcript_a_reset_button_and_loads_the_stored_conversation():
@@ -535,10 +540,10 @@ def test_main_installs_the_stop_handler_and_asks_the_app_to_stop_when_the_server
         class ui:  # a stand-in for the gradio app
 
             @staticmethod
-            def launch(server_port, pwa):
-                launched.append((server_port, pwa))
+            def launch(server_port, pwa, inbrowser):
+                launched.append((server_port, pwa, inbrowser))
 
-    monkeypatch.setattr(app, "parse_args", lambda: argparse.Namespace())
+    monkeypatch.setattr(app, "parse_args", lambda: argparse.Namespace(command=None))
     monkeypatch.setattr(app, "check_server", lambda: startup.append("check"))
     monkeypatch.setattr(app, "LlamaCppResponder", lambda **_: startup.append("construct") or FakeResponder())
     monkeypatch.setattr(app, "build_stream", lambda responder, conversation: FakeStream())
@@ -549,7 +554,8 @@ def test_main_installs_the_stop_handler_and_asks_the_app_to_stop_when_the_server
 
         assert signal.getsignal(signal.SIGINT) is not previous  # Ctrl+C is handled
         assert startup == ["check", "construct"]
-        assert launched == [(app.config.PORT, True)]  # pwa on, or the browser 404s on /manifest.json
+        # pwa on, or the browser 404s on /manifest.json; plain vaice does not open the browser
+        assert launched == [(app.config.PORT, True, False)]
         assert lifecycle.stopping.is_set()  # the server is gone: the responders may give up
     finally:
         signal.signal(signal.SIGINT, previous)
@@ -561,15 +567,15 @@ def _fake_stream_class(launched=None):
         class ui:  # a stand-in for the gradio app
 
             @staticmethod
-            def launch(server_port, pwa):
+            def launch(server_port, pwa, inbrowser):
                 if launched is not None:
-                    launched.append((server_port, pwa))
+                    launched.append((server_port, pwa, inbrowser))
 
     return FakeStream
 
 
 def _main_with(monkeypatch, tmp_path, fetch_tools=None, write_capable_tools=None, tools=True,
-               conversation_file="default"):
+               conversation_file="default", command=None):
     launched = []
     if tools is not None:
         monkeypatch.setattr(app.config, "LLAMACPP_TOOLS", tools)
@@ -577,7 +583,7 @@ def _main_with(monkeypatch, tmp_path, fetch_tools=None, write_capable_tools=None
         monkeypatch.setattr(app, "fetch_tools", fetch_tools)
     if write_capable_tools is not None:
         monkeypatch.setattr(app, "write_capable_tools", write_capable_tools)
-    monkeypatch.setattr(app, "parse_args", lambda: argparse.Namespace())
+    monkeypatch.setattr(app, "parse_args", lambda: argparse.Namespace(command=command))
     monkeypatch.setattr(app, "check_server", lambda: None)
     monkeypatch.setattr(app, "LlamaCppResponder", lambda **_: FakeResponder())
     monkeypatch.setattr(app, "build_stream", lambda responder, conversation: _fake_stream_class(launched)())
@@ -640,7 +646,7 @@ def test_main_warns_when_the_server_advertises_no_tools(monkeypatch, tmp_path, c
 
 def test_main_reports_a_keyboard_interrupt_and_still_requests_stop(monkeypatch, tmp_path, caplog):
     """Ctrl+C while the server is loading: 'stopped' is logged and the responders are told to give up."""
-    monkeypatch.setattr(app, "parse_args", lambda: argparse.Namespace())
+    monkeypatch.setattr(app, "parse_args", lambda: argparse.Namespace(command=None))
 
     def interrupt():
         raise KeyboardInterrupt
@@ -667,3 +673,94 @@ def test_main_keeps_the_conversation_in_memory_when_vaice_data_dir_is_empty(monk
 
     assert "in memory only" in caplog.text
     assert not (tmp_path / "conversation.json").exists()
+
+
+class FakeManagedServer:
+    def __init__(self, events):
+        self.events = events
+
+    def stop(self):
+        self.events.append("stop")
+
+
+def test_plain_main_never_manages_a_server_and_does_not_open_the_browser(monkeypatch, tmp_path):
+    monkeypatch.setattr(app, "ensure_server", lambda: pytest.fail("plain vaice must not start a server"))
+
+    assert _main_with(monkeypatch, tmp_path) == [(app.config.PORT, True, False)]
+
+
+def test_vaice_up_ensures_the_server_before_the_startup_check_and_opens_the_browser(monkeypatch, tmp_path):
+    events = []
+    launched = []
+    monkeypatch.setattr(app, "ensure_server", lambda: events.append("ensure") or FakeManagedServer(events))
+    monkeypatch.setattr(app, "parse_args", lambda: argparse.Namespace(command="up"))
+    monkeypatch.setattr(app, "check_server", lambda: events.append("check"))
+    monkeypatch.setattr(app, "LlamaCppResponder", lambda **_: FakeResponder())
+    monkeypatch.setattr(app, "build_stream", lambda responder, conversation: _fake_stream_class(launched)())
+    monkeypatch.setattr(app.config, "CONVERSATION_FILE", tmp_path / "conversation.json")
+    previous = signal.getsignal(signal.SIGINT)
+    try:
+        app.main()
+    finally:
+        signal.signal(signal.SIGINT, previous)
+
+    assert launched == [(app.config.PORT, True, True)]
+    assert events == ["ensure", "check", "stop"]  # the child is stopped once the UI is over
+
+
+def test_vaice_up_stops_the_server_it_started_when_a_later_startup_step_raises(monkeypatch, tmp_path):
+    events = []
+    monkeypatch.setattr(app, "ensure_server", lambda: FakeManagedServer(events))
+
+    def boom():
+        raise RuntimeError("the model cannot speak")
+
+    monkeypatch.setattr(app, "parse_args", lambda: argparse.Namespace(command="up"))
+    monkeypatch.setattr(app, "check_server", boom)
+    previous = signal.getsignal(signal.SIGINT)
+    try:
+        with pytest.raises(RuntimeError, match="cannot speak"):
+            app.main()
+    finally:
+        signal.signal(signal.SIGINT, previous)
+
+    assert events == ["stop"]
+
+
+def test_vaice_up_stops_the_server_on_ctrl_c(monkeypatch, tmp_path):
+    events = []
+    monkeypatch.setattr(app, "ensure_server", lambda: FakeManagedServer(events))
+
+    def interrupt():
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(app, "parse_args", lambda: argparse.Namespace(command="up"))
+    monkeypatch.setattr(app, "check_server", interrupt)
+    previous = signal.getsignal(signal.SIGINT)
+    try:
+        app.main()  # must not raise
+    finally:
+        signal.signal(signal.SIGINT, previous)
+
+    assert events == ["stop"]
+
+
+def test_vaice_up_does_not_stop_a_server_it_reused(monkeypatch, tmp_path):
+    monkeypatch.setattr(app, "ensure_server", lambda: None)  # a running server: nothing to stop
+
+    assert _main_with(monkeypatch, tmp_path, command="up") == [(app.config.PORT, True, True)]
+
+
+def test_vaice_up_exits_with_the_servers_message_and_starts_nothing_else(monkeypatch, tmp_path):
+    def refuse():
+        raise SystemExit("vaice: llama-server was not found")
+
+    monkeypatch.setattr(app, "ensure_server", refuse)
+    monkeypatch.setattr(app, "parse_args", lambda: argparse.Namespace(command="up"))
+    monkeypatch.setattr(app, "check_server", lambda: pytest.fail("startup went on without a server"))
+    previous = signal.getsignal(signal.SIGINT)
+    try:
+        with pytest.raises(SystemExit, match="not found"):
+            app.main()
+    finally:
+        signal.signal(signal.SIGINT, previous)
