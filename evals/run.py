@@ -1,12 +1,15 @@
 """Live eval: how reliably do spoken commands turn into the right tool call?
 
 Run by hand against a real llama-server with an audio model (see evals/README.md); not imported by
-the app, not run in CI. Two paths are measured with repeats:
+the app, not run in CI. Three paths are measured with repeats:
 
 - interleaved: the app's own path, LlamaCppResponder over /v1/realtime with the tools declared
   (the stub tools in tools.json; nothing is executed for real);
 - text: transcribe the audio with a realtime `transcription` session, then route the transcript
-  through POST /v1/chat/completions with the same tools (routing only: no tool result is fed back).
+  through POST /v1/chat/completions with the same tools (routing only: no tool result is fed back);
+- assistant (opt-in, with its own cases and skills): assistant mode's real code up to the answer, without
+  /tts: transcribe, then the brain/skills loop of AssistantResponder with the real skill definitions
+  and canned results (nothing is executed on this machine).
 """
 import argparse
 import json
@@ -17,6 +20,7 @@ import tempfile
 import threading
 import time
 import wave
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -25,11 +29,15 @@ import requests
 import scoring
 
 from vaice import config
+from vaice.brain import ChatBrain
 from vaice.conversation import Turn
+from vaice.responders.assistant import NOT_HEARD, build_messages, decide
 from vaice.responders.llamacpp import LlamaCppResponder, _transcribe
+from vaice.skills import SkillResult, Skills, default_skills
 
 HERE = Path(__file__).parent
-PATHS = ("interleaved", "text")
+PATHS = ("interleaved", "text", "assistant")
+DEFAULT_PATHS = ("interleaved", "text")  # the assistant path has its own skills and cases: ask for it
 TEXT_PROMPT = ("You are a voice assistant on the user's Mac. Your reply is spoken aloud: "
                "answer in one or two short plain sentences.")
 HISTORY = [
@@ -42,6 +50,14 @@ CHECK_TIMEOUT = 5  # seconds for the health and props requests
 SAY_TIMEOUT = 30
 SAY_ATTEMPTS = 3  # `say` sometimes hangs; see synthesize()
 ROUTE_TIMEOUT = 120
+# What the stubbed skills answer, in the wording of the real ones; nothing is executed
+SKILL_STUBS = {
+    "disk_space": "160 gigabytes free of 460 gigabytes",
+    "battery_status": "battery at 78 percent, running on battery power, about 4 hours and 12 minutes left",
+    "system_info": "macOS 15.6 on Ranas-MacBook, up 3 days and 4 hours, 48 gigabytes of memory",
+    "top_processes": "Google Chrome 12 percent of memory, Xcode 9 percent, Slack 4 percent",
+    "find_files": "3 files: report.pdf, report-final.pdf, old report.docx",
+}
 TRANSCRIPT_WAIT = 5.0  # the interleaved path's transcript is reported after the reply; wait this long for it
 
 
@@ -180,6 +196,36 @@ def run_text(url: str, prompt: str, tools: list[dict], audio, history) -> dict:
     return record
 
 
+def stub_skills() -> Skills:
+    """The real skills' definitions with canned results: the model sees what the app offers, and nothing
+    runs on this machine (the stubs replace each skill's `run`; Skills.run still checks the arguments)."""
+    return Skills([replace(skill, run=lambda _args, text=SKILL_STUBS[skill.name]: SkillResult(text))
+                   for skill in default_skills().skills])
+
+
+def run_assistant(url: str, prompt: str, skills: Skills, audio, history, brain: ChatBrain | None = None) -> dict:
+    record: dict = {"error": None, "calls": [], "transcript": None, "answer": None, "latency_s": None}
+    brain = brain or ChatBrain(url, ROUTE_TIMEOUT)
+    start = time.perf_counter()
+    try:
+        transcript = _transcribe(url, config.LLAMACPP_TIMEOUT, audio)
+        record["transcribe_s"] = time.perf_counter() - start
+        record["transcript"] = transcript
+        if transcript:
+            decided = time.perf_counter()
+            decision = decide(brain, skills, build_messages(prompt, history, transcript), lambda: False)
+            record["decide_s"] = time.perf_counter() - decided
+            record["brain_s"] = decision.brain_seconds
+            record["calls"] = [[call.name, call.arguments] for call in decision.calls]
+            record["answer"] = decision.answer
+        else:  # as in the app: nothing is asked of the brain
+            record["answer"] = NOT_HEARD
+        record["latency_s"] = time.perf_counter() - start
+    except Exception as exc:  # noqa: BLE001 - a failed run is recorded with its error, never aborts the eval
+        record["error"] = f"{type(exc).__name__}: {exc}"
+    return record
+
+
 def server_info(url: str) -> dict:
     try:
         health = requests.get(f"{url}/health", timeout=CHECK_TIMEOUT)
@@ -205,11 +251,15 @@ def server_info(url: str) -> dict:
 def parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Eval spoken-command tool calling against a live llama-server.")
     parser.add_argument("--url", default=config.LLAMACPP_URL, help="llama-server URL (default: VAICE_LLAMACPP_URL)")
-    parser.add_argument("--paths", default=",".join(PATHS), help="comma-separated: interleaved,text (default: both)")
+    parser.add_argument("--paths", default=",".join(DEFAULT_PATHS),
+                        help="comma-separated: interleaved,text,assistant (default: interleaved,text)")
     parser.add_argument("--repeats", type=int, default=5, help="runs per case and path (default: 5)")
     parser.add_argument("--cases", help="comma-separated case ids (default: all)")
-    parser.add_argument("--prompt", help="reply instructions (interleaved) and system prompt (text); "
-                                         "default: VAICE_LLAMACPP_PROMPT, and a spoken-assistant prompt for text")
+    parser.add_argument("--cases-file", help="the cases: a file in evals/ or a path (default: cases.json, or "
+                                             "assistant_cases.json when --paths is assistant alone)")
+    parser.add_argument("--prompt", help="reply instructions (interleaved) and system prompt (text, assistant); "
+                                         "default: VAICE_LLAMACPP_PROMPT, a spoken-assistant prompt for text, "
+                                         "VAICE_ASSISTANT_PROMPT for assistant")
     parser.add_argument("--history", action=argparse.BooleanOptionalAction, default=True,
                         help="send two fixed earlier exchanges (default: on)")
     parser.add_argument("--out", type=Path, help="results file (default: evals/results/<UTC timestamp>.json)")
@@ -220,7 +270,9 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     args.paths = [p.strip() for p in args.paths.split(",") if p.strip()]
     unknown = [p for p in args.paths if p not in PATHS]
     if unknown or not args.paths:
-        parser.error(f"--paths takes {' and '.join(PATHS)}, got {unknown or 'nothing'}")
+        parser.error(f"--paths takes {', '.join(PATHS)}, got {unknown or 'nothing'}")
+    if not args.cases_file:
+        args.cases_file = "assistant_cases.json" if args.paths == ["assistant"] else "cases.json"
     return args
 
 
@@ -245,7 +297,8 @@ def print_summary(runs: list[dict], paths: list[str], case_ids: list[str]) -> di
         records = [r for r in runs if r["path"] == path]
         agg = scoring.aggregate(records)
         summary[path] = agg
-        latency = "time to first audio" if path == "interleaved" else "time to decision"
+        latency = {"interleaved": "time to first audio", "assistant": "time to answer text"}.get(
+            path, "time to decision")
         print(f"\n== {path}: {agg['runs']} runs ==")
         for outcome in scoring.OUTCOMES:
             print(f"  {outcome:<11}{agg['counts'][outcome]:>4}  {agg['percent'][outcome]:>5.1f}%")
@@ -261,7 +314,7 @@ def print_summary(runs: list[dict], paths: list[str], case_ids: list[str]) -> di
             correct, total = cells[path].get(case_id, (0, 0))
             row.append(f"{correct}/{total}" if total else "-")
         print(f"{case_id:<{width}}  " + "  ".join(f"{cell:>12}" for cell in row))
-    heard = [r for r in runs if r["path"] == "text" and r.get("transcript") is not None]
+    heard = [r for r in runs if r["path"] in ("text", "assistant") and r.get("transcript") is not None]
     wrong = [r for r in heard if scoring.misheard(r["say"], r["transcript"])]
     if heard:
         print(f"\ntranscripts differing from the sentence (case, punctuation ignored): {len(wrong)} of {len(heard)}")
@@ -273,13 +326,15 @@ def print_summary(runs: list[dict], paths: list[str], case_ids: list[str]) -> di
 
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
-    cases = select_cases(load_json("cases.json"), args.cases)
+    cases = select_cases(load_json(args.cases_file), args.cases)
     tool_entries = load_json("tools.json")
     tools = [entry["definition"] for entry in tool_entries]
     results = {entry["definition"]["name"]: entry["result"] for entry in tool_entries}
     url = config.server_base(args.url)
     info = server_info(url)
-    prompts = {"interleaved": args.prompt or config.LLAMACPP_PROMPT, "text": args.prompt or TEXT_PROMPT}
+    prompts = {"interleaved": args.prompt or config.LLAMACPP_PROMPT, "text": args.prompt or TEXT_PROMPT,
+               "assistant": args.prompt or config.ASSISTANT_PROMPT}
+    skills = stub_skills()
     history = HISTORY if args.history else []
     out = args.out or HERE / "results" / f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.json"
 
@@ -296,6 +351,8 @@ def main(argv: list[str] | None = None) -> None:
                     for path in args.paths:
                         if path == "interleaved":
                             record = run_interleaved(url, prompts[path], tools, results, audio[case["id"]], history)
+                        elif path == "assistant":
+                            record = run_assistant(url, prompts[path], skills, audio[case["id"]], history)
                         else:
                             record = run_text(url, prompts[path], tools, audio[case["id"]], history)
                         record.update(case=case["id"], say=case["say"], path=path, repeat=repeat)
@@ -308,8 +365,8 @@ def main(argv: list[str] | None = None) -> None:
         print("\ninterrupted: reporting the runs so far", file=sys.stderr)
     summary = print_summary(runs, args.paths, [c["id"] for c in cases])
 
-    config_used = {"paths": args.paths, "repeats": args.repeats, "history": history, "prompts": prompts,
-                   "cases": [c["id"] for c in cases], "platform": platform.platform()}
+    config_used = {"paths": args.paths, "cases_file": args.cases_file, "repeats": args.repeats, "history": history,
+                   "prompts": prompts, "cases": [c["id"] for c in cases], "platform": platform.platform()}
     document = {"label": args.label, "started": started, "config": config_used, "server": info,
                 "summary": summary, "runs": runs}
     out.parent.mkdir(parents=True, exist_ok=True)

@@ -14,6 +14,7 @@ from vaice import config
 from vaice.conversation import Conversation, Turn
 from vaice.interruptible import InterruptSafeReplyOnPause, stop_playing_reply
 from vaice.lifecycle import install_stop_handler, request_stop
+from vaice.responders.assistant import AssistantResponder
 from vaice.responders.base import Responder
 from vaice.responders.llamacpp import LlamaCppResponder, check_server, fetch_tools, write_capable_tools
 from vaice.server import ensure_server
@@ -29,7 +30,7 @@ UI_TITLE = "vaice"  # the heading above the mic
 
 def _subtitle() -> str:
     """The line under the heading names the voice service."""
-    return "llama-server · speech-to-speech"
+    return "llama-server · assistant" if config.MODE == "assistant" else "llama-server · speech-to-speech"
 
 
 def _error_text(exc: Exception) -> str:
@@ -144,6 +145,34 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def _chat_responder() -> LlamaCppResponder:
+    """Chat mode: the interleaved responder, with llama-server's built-in tools when VAICE_LLAMACPP_TOOLS asks."""
+    tools: list[dict] = []
+    if config.LLAMACPP_TOOLS:
+        try:
+            tools = fetch_tools(config.LLAMACPP_URL)
+        except requests.RequestException as exc:
+            log.warning("tools requested, but llama-server's /tools is unavailable (%s); continuing without", exc)
+        if tools:
+            log.info("tools enabled: %s", ", ".join(str(tool.get("name")) for tool in tools))
+            try:
+                risky = write_capable_tools(config.LLAMACPP_URL)
+            except (requests.RequestException, ValueError, AttributeError, TypeError) as exc:
+                log.warning("could not check whether the advertised tools can modify this machine (%s)", exc)
+            else:
+                if risky:
+                    log.warning(
+                        "llama-server advertises tools that can change this machine (%s); they run with "
+                        "the server's permissions. Start llama-server with a read-only set, e.g. "
+                        "--tools get_info,read_file", ", ".join(risky))
+        else:
+            log.warning(
+                "tools requested (VAICE_LLAMACPP_TOOLS), but llama-server advertises none; start it with "
+                "--tools (see README)"
+            )
+    return LlamaCppResponder(tools=tools or None)
+
+
 def main() -> None:
     up = parse_args().command == "up"
 
@@ -154,30 +183,14 @@ def main() -> None:
         if up:
             managed = ensure_server()
         check_server()
-        tools: list[dict] = []
-        if config.LLAMACPP_TOOLS:
-            try:
-                tools = fetch_tools(config.LLAMACPP_URL)
-            except requests.RequestException as exc:
-                log.warning("tools requested, but llama-server's /tools is unavailable (%s); continuing without", exc)
-            if tools:
-                log.info("tools enabled: %s", ", ".join(str(tool.get("name")) for tool in tools))
-                try:
-                    risky = write_capable_tools(config.LLAMACPP_URL)
-                except (requests.RequestException, ValueError, AttributeError, TypeError) as exc:
-                    log.warning("could not check whether the advertised tools can modify this machine (%s)", exc)
-                else:
-                    if risky:
-                        log.warning(
-                            "llama-server advertises tools that can change this machine (%s); they run with "
-                            "the server's permissions. Start llama-server with a read-only set, e.g. "
-                            "--tools get_info,read_file", ", ".join(risky))
-            else:
-                log.warning(
-                    "tools requested (VAICE_LLAMACPP_TOOLS), but llama-server advertises none; start it with "
-                    "--tools (see README)"
-                )
-        responder = LlamaCppResponder(tools=tools or None)
+        if config.MODE == "assistant":
+            if config.LLAMACPP_TOOLS:
+                log.warning("VAICE_LLAMACPP_TOOLS is ignored in assistant mode: the skills run in vaice, "
+                            "not on llama-server")
+            responder = AssistantResponder()
+            log.info("assistant mode: skills %s", ", ".join(responder.skills.names))
+        else:
+            responder = _chat_responder()
         log.info("using llama-server at %s", config.LLAMACPP_URL)
 
         if config.CONVERSATION_FILE is None:  # VAICE_DATA_DIR="": the conversation is in memory only

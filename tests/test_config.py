@@ -223,3 +223,45 @@ def test_server_args_that_shlex_cannot_parse_name_the_variable(monkeypatch):
     finally:
         monkeypatch.undo()
         importlib.reload(config)
+
+
+def test_the_mode_is_chat_unless_set_and_the_assistant_settings_have_defaults(monkeypatch):
+    for name in ("VAICE_MODE", "VAICE_ASSISTANT_PROMPT", "VAICE_VOICE"):
+        monkeypatch.delenv(name, raising=False)
+    try:
+        reloaded = importlib.reload(config)
+        assert reloaded.MODE == "chat"
+        assert reloaded.VOICE == "female"
+        assert reloaded.ASSISTANT_PROMPT.startswith("You are a voice assistant on the user's Mac.")
+        assert "Use a tool only when the question is about this computer" in reloaded.ASSISTANT_PROMPT
+    finally:
+        monkeypatch.undo()
+        importlib.reload(config)
+
+
+def test_the_assistant_settings_can_be_overridden(monkeypatch):
+    monkeypatch.setenv("VAICE_MODE", "assistant")
+    monkeypatch.setenv("VAICE_ASSISTANT_PROMPT", "Be terse.")
+    monkeypatch.setenv("VAICE_VOICE", "male")
+    try:
+        reloaded = importlib.reload(config)
+        assert (reloaded.MODE, reloaded.ASSISTANT_PROMPT, reloaded.VOICE) == ("assistant", "Be terse.", "male")
+    finally:
+        monkeypatch.undo()
+        importlib.reload(config)
+
+
+@pytest.mark.parametrize(("name", "value", "choices"), [
+    ("VAICE_MODE", "voice", "chat or assistant"),
+    ("VAICE_MODE", "", "chat or assistant"),
+    ("VAICE_MODE", "Assistant", "chat or assistant"),
+    ("VAICE_VOICE", "robot", "female or male"),
+])
+def test_a_bad_choice_names_the_variable_and_the_values(monkeypatch, name, value, choices):
+    monkeypatch.setenv(name, value)
+    try:
+        with pytest.raises(SystemExit, match=f"vaice: {name} must be {choices}, got {value!r}"):
+            importlib.reload(config)
+    finally:
+        monkeypatch.undo()
+        importlib.reload(config)
