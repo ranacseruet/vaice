@@ -240,7 +240,8 @@ def test_definitions_use_the_chat_completions_tool_shape():
     definitions = default_skills().definitions()
 
     assert [d["function"]["name"] for d in definitions] == [
-        "disk_space", "battery_status", "system_info", "top_processes", "find_files"]
+        "disk_space", "battery_status", "system_info", "top_processes", "find_files",
+        "open_app", "quit_app", "set_volume", "volume_up", "volume_down", "mute_sound"]
     for definition in definitions:
         assert definition["type"] == "function"
         assert definition["function"]["description"].endswith(".")

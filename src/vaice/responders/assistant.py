@@ -3,6 +3,10 @@
 audio -> transcribe (realtime ASR session) -> brain (chat completions + tools) <-> skills (run by vaice)
       -> voice.speakable() -> llama-server /tts, one sentence at a time -> audio frames
 
+A skill that cannot be undone (`kind="confirm"`) does not run when the brain asks: the reply speaks a
+question and the request waits in `confirm.Confirmations`. The next reply (the user's answer) or a click
+in the UI settles it; the brain never interprets the answer.
+
 Threading follows `LlamaCppResponder`: `respond()` starts one daemon thread that does all the blocking
 work and hands frames to the generator through a queue, so fastrtc may resume the generator from any
 worker thread and a server that never answers cannot keep the process alive.
@@ -20,10 +24,11 @@ import requests
 from vaice import config, lifecycle, voice
 from vaice.audio import from_pcm16
 from vaice.brain import ChatBrain
+from vaice.confirm import Confirmations, Pending, spoken_answer
 from vaice.conversation import Message, Turn
 from vaice.responders.base import AudioFrame
-from vaice.responders.llamacpp import ABANDONED, _clock_line, _Stopped, _transcribe
-from vaice.skills import SkillResult, Skills, default_skills
+from vaice.responders.llamacpp import ABANDONED, _clock_line, _MarkupStripper, _Stopped, _transcribe
+from vaice.skills import Question, SkillResult, Skills, default_skills
 
 log = logging.getLogger(__name__)
 
@@ -32,8 +37,21 @@ MAX_SKILL_ROUNDS = 3  # brain calls per reply; the last one is made without tool
 TTS_CHUNK_BYTES = 8192  # read size of the streamed /tts body (about 0.17 s of speech)
 NOT_HEARD = "Sorry, I didn't catch that."
 NO_ANSWER = "Sorry, I couldn't work that out."
+CANCELLED = "Okay, I won't."  # spoken when the user says no to a confirmation
 _DONE = object()
 _RATE = re.compile(r"\brate=(\d+)")
+
+
+def _spoken_text(text: str) -> str:
+    """The brain's answer without the tool-call markup the model sometimes writes as prose (seen live in the
+    round made without tools: `<tool_call><function=open_web>...`), which would otherwise be spoken. The same
+    stripper chat mode uses: `<tool_call>` / `<function=...>` blocks go through their close tag, an unterminated
+    one to the end, stray `<think>`/`<answer>` tags and `<|...|>` control tokens with them. Empty when nothing
+    is left."""
+    cleaned = _MarkupStripper().feed(text).strip()
+    if cleaned != text.strip():
+        log.warning("assistant answer carried model markup, removed: %r", text[:200])
+    return cleaned
 
 
 @dataclass(frozen=True)
@@ -45,11 +63,14 @@ class SkillCall:
 
 @dataclass
 class Decision:
-    """What the brain made of the question: the text to speak, the skills it ran, seconds per brain call."""
+    """What the brain made of the question: the text to speak, the skills it ran, seconds per brain call.
+
+    `pending`: the brain asked for a `confirm` skill, which has not run; `answer` is then its question."""
 
     answer: str
     calls: list[SkillCall] = field(default_factory=list)
     brain_seconds: list[float] = field(default_factory=list)
+    pending: Pending | None = None
 
 
 def build_messages(prompt: str, history: Sequence[Message], transcript: str) -> list[dict]:
@@ -84,12 +105,16 @@ def build_messages(prompt: str, history: Sequence[Message], transcript: str) -> 
 
 
 def decide(brain: ChatBrain, skills: Skills, messages: list[dict], stop: Callable[[], bool],
-           on_call: Callable[[SkillCall], None] | None = None) -> Decision:
+           on_call: Callable[[SkillCall], None] | None = None, *, turn: Turn) -> Decision:
     """The brain/skills loop: ask the brain, run the skills it asks for, let it answer from their results.
 
     Appends to `messages`. The last of the `MAX_SKILL_ROUNDS` brain calls is made without tools, so the
     loop always ends with an answer. `on_call` is told of each skill as it has run. Raises `_Stopped` when
     `stop()` turns true between steps; a brain failure propagates.
+
+    A `confirm` skill does not run: the loop ends there with `Decision.pending` (asked by `turn`) and its
+    question as the answer. Calls the brain made after it in the same message are dropped, so `messages`
+    (kept in the `Pending`) is a valid chat that only needs the skill's result appended.
     """
     decision = Decision("")
     tools = skills.definitions()
@@ -103,20 +128,31 @@ def decide(brain: ChatBrain, skills: Skills, messages: list[dict], stop: Callabl
         if final and reply.calls:
             log.warning("assistant ignored a skill call in the final round (%s)", reply.calls[0].name)
         if final or not reply.calls:
-            decision.answer = reply.text
+            decision.answer = _spoken_text(reply.text)
             break
         messages.append({**reply.message, "content": reply.message.get("content") or ""})
-        for call in reply.calls:
+        asking = len(messages) - 1  # the assistant message; the tool results of earlier calls follow it
+        for index, call in enumerate(reply.calls):
             if stop():
                 raise _Stopped
             log.info("assistant skill %s(%s)", call.name, call.arguments)
-            result = skills.run(call.name, call.arguments)
+            prepared = skills.prepare(call.name, call.arguments)
+            if isinstance(prepared, Question):
+                if index + 1 < len(reply.calls):
+                    log.warning("assistant dropped %d skill call(s) requested after %s, which waits for confirmation",
+                                len(reply.calls) - index - 1, call.name)
+                    kept = messages[asking].get("tool_calls") or []
+                    messages[asking] = {**messages[asking], "tool_calls": kept[: index + 1]}
+                decision.pending = Pending(call.name, call.arguments, prepared.text, call.id, messages, turn)
+                decision.answer = prepared.text
+                return decision
+            result = prepared if prepared is not None else skills.run(call.name, call.arguments)
             skill_call = SkillCall(call.name, call.arguments, result)
             decision.calls.append(skill_call)
             if on_call is not None:
                 on_call(skill_call)
             messages.append({"role": "tool", "tool_call_id": call.id, "content": result.speech})
-    decision.answer = decision.answer.strip() or NO_ANSWER
+    decision.answer = decision.answer or NO_ANSWER
     return decision
 
 
@@ -166,9 +202,45 @@ def _speak(url: str, timeout: float, voice_name: str, answer: str, out: queue.Qu
     return first
 
 
+def _approved(pending: Pending, skills: Skills, brain: ChatBrain, turn: Turn, stop: Callable[[], bool]) -> Decision:
+    """The user said yes: run what was asked (the stored name and arguments, nothing the brain says now),
+    record it on `turn`, and let the brain say in one tool-less call how it went."""
+    if stop():
+        raise _Stopped
+    log.info("assistant skill %s(%s) approved by voice", pending.name, pending.arguments)
+    result = skills.run(pending.name, pending.arguments)
+    turn.add_tool_event(pending.name, pending.arguments, result.detail or result.speech)
+    messages = [*pending.messages, {"role": "tool", "tool_call_id": pending.call_id, "content": result.speech}]
+    started = time.perf_counter()
+    reply = brain.complete(messages, None)
+    return Decision(_spoken_text(reply.text) or result.speech, [SkillCall(pending.name, pending.arguments, result)],
+                    [time.perf_counter() - started])
+
+
+def _decision(prompt: str, history: Sequence[Message], transcript: str, skills: Skills, brain: ChatBrain,
+              confirmations: Confirmations, turn: Turn, stop: Callable[[], bool]) -> Decision:
+    """What to say to `transcript`. A request waiting for confirmation is settled first, and only by the
+    exact words of `spoken_answer`: yes runs it (that utterance is no question for the brain), no cancels
+    it, anything else drops it and is an ordinary question."""
+    pending = confirmations.take()
+    if pending is not None:
+        answer = spoken_answer(transcript) if pending.armed_at is not None else None
+        if answer == "yes":
+            return _approved(pending, skills, brain, turn, stop)
+        if answer == "no":
+            turn.add_tool_event(pending.name, pending.arguments, "cancelled")
+            return Decision(CANCELLED)
+        log.info("assistant dropped the request to run %s: not confirmed (armed: %s)", pending.name,
+                 pending.armed_at is not None)
+        pending.turn.add_tool_event(pending.name, pending.arguments, "not confirmed")
+    return decide(brain, skills, build_messages(prompt, history, transcript), stop,
+                  lambda call: turn.add_tool_event(call.name, call.arguments, call.result.detail or call.result.speech),
+                  turn=turn)
+
+
 def _work(url: str, timeout: float, prompt: str, voice_name: str, skills: Skills, brain: ChatBrain,
-          audio: AudioFrame, history: Sequence[Message], turn: Turn, out: queue.Queue,
-          cancelled: threading.Event) -> None:
+          confirmations: Confirmations, audio: AudioFrame, history: Sequence[Message], turn: Turn,
+          out: queue.Queue, cancelled: threading.Event) -> None:
     """Daemon thread: one reply. Puts `(rate, frame, text so far)` tuples, then an exception if the reply
     failed, and finally `_DONE` on `out`. The question's transcript is reported on `turn` exactly once,
     whatever happens. Takes only plain data and its helpers, never the responder."""
@@ -187,12 +259,21 @@ def _work(url: str, timeout: float, prompt: str, voice_name: str, skills: Skills
         if stop():
             raise _Stopped
         if transcript:
-            decision = decide(brain, skills, build_messages(prompt, history, transcript), stop,
-                              lambda call: turn.add_tool_event(call.name, call.arguments,
-                                                               call.result.detail or call.result.speech))
+            decision = _decision(prompt, history, transcript, skills, brain, confirmations, turn, stop)
         else:
             decision = Decision(NOT_HEARD)
-        first = _speak(url, timeout, voice_name, decision.answer, out, stop, started)
+        pending = decision.pending
+        if pending is not None:  # on the screen at once; answerable by voice only once the question was spoken
+            confirmations.ask(pending)
+            turn.add_tool_event(pending.name, pending.arguments, "waiting for confirmation")
+        try:
+            first = _speak(url, timeout, voice_name, decision.answer, out, stop, started)
+        except BaseException:  # stopped or failed before the question was out: nobody heard it, nobody can say yes
+            if pending is not None:
+                confirmations.take(pending.id)
+            raise
+        if pending is not None:
+            confirmations.arm(pending.id)  # not before: the question's own audio can echo into the mic
         if first is not None:
             thinking = "+".join(f"{seconds:.2f}s" for seconds in decision.brain_seconds) or "none"
             log.info("assistant timings: transcript %.2fs, brain %s, first audio %.2fs", transcribed, thinking, first)
@@ -223,6 +304,7 @@ class AssistantResponder:
         voice: str = config.VOICE,
         skills: Skills | None = None,
         brain: ChatBrain | None = None,
+        confirmations: Confirmations | None = None,
     ):
         self._url = url
         self._timeout = timeout
@@ -230,14 +312,41 @@ class AssistantResponder:
         self._voice = voice
         self.skills = skills or default_skills()
         self._brain = brain or ChatBrain(url, timeout)
+        self._confirmations = Confirmations() if confirmations is None else confirmations
+
+    # The UI's side of a confirmation (see Responder). These run on the caller's thread (a Gradio worker),
+    # not on a reply's: there is no reply in flight to carry audio, so nothing is spoken on this path; the
+    # outcome lands on the asking turn's tool events, which the Tool activity panel shows.
+
+    def pending(self) -> Pending | None:
+        """The request waiting for the user, if any."""
+        return self._confirmations.current()
+
+    def approve(self, pending_id: str) -> str | None:
+        """Run the request `pending_id` names, if it is still the current one; its result text, else None."""
+        pending = self._confirmations.take(pending_id)
+        if pending is None:
+            return None
+        result = self.skills.run(pending.name, pending.arguments)
+        pending.turn.add_tool_event(pending.name, pending.arguments, result.detail or result.speech)
+        return result.speech
+
+    def cancel(self, pending_id: str) -> None:
+        pending = self._confirmations.take(pending_id)
+        if pending is not None:
+            pending.turn.add_tool_event(pending.name, pending.arguments, "cancelled")
+
+    def clear_pending(self) -> None:
+        """"New conversation": a request from the old one must not be approvable."""
+        self._confirmations.clear()
 
     def respond(self, audio: AudioFrame, history: Sequence[Message], turn: Turn) -> Iterator[AudioFrame]:
         chunks: queue.Queue = queue.Queue()
         cancelled = threading.Event()
         threading.Thread(
             target=_work,
-            args=(self._url, self._timeout, self._prompt, self._voice, self.skills, self._brain, audio,
-                  list(history), turn, chunks, cancelled),
+            args=(self._url, self._timeout, self._prompt, self._voice, self.skills, self._brain,
+                  self._confirmations, audio, list(history), turn, chunks, cancelled),
             name="vaice-assistant",
             daemon=True,
         ).start()

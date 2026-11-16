@@ -219,16 +219,50 @@ assistant can answer questions about your Mac from real data:
    sentences, and each sentence is spoken through llama-server's `POST /tts` (`pcm16`, streamed;
    `VAICE_VOICE=female|male`).
 
-The skills are read-only and run on your machine with vaice's own permissions, not through llama-server
-(its `--tools` and `VAICE_LLAMACPP_TOOLS` are unused in this mode and vaice warns if the latter is set):
+The skills run on your machine with vaice's own permissions, not through llama-server (its `--tools` and
+`VAICE_LLAMACPP_TOOLS` are unused in this mode and vaice warns if the latter is set). They never go through
+a shell: each runs a fixed command with its arguments as separate values.
 
-| Skill | Answers |
+| Skill | What it does |
 |---|---|
-| `disk_space` | free and total disk space |
-| `battery_status` | charge, whether it is plugged in or charging, time left |
-| `system_info` | macOS version, uptime, memory |
-| `top_processes` | the apps using the most memory or CPU (`by`, `count`) |
-| `find_files` | files whose name contains a word, in your home, desktop, documents or downloads folder |
+| `disk_space` | answers: free and total disk space |
+| `battery_status` | answers: charge, whether it is plugged in or charging, time left |
+| `system_info` | answers: macOS version, uptime, memory |
+| `top_processes` | answers: the apps using the most memory or CPU (`by`, `count`) |
+| `find_files` | answers: files whose name contains a word, in your home, desktop, documents or downloads folder |
+| `open_app` | opens an app by name (`open -a`); runs at once |
+| `quit_app` | quits a running app by name; **asks first** (see below) |
+| `set_volume` | sets the output volume to a `level` from 0 to 100; runs at once |
+| `volume_up`, `volume_down` | turn the output volume up or down by 10 points; no arguments; run at once |
+| `mute_sound` | mutes or unmutes the sound; runs at once |
+
+Each action's result names what it did (`opened Safari`, `volume set to 40 percent`, `quit Safari`). Earlier
+calls come back into the prompt without their arguments, so a follow-up such as "now close it" is answered from
+those words.
+
+There is deliberately no web search skill: with one, the small model searched for questions it could answer
+itself ("why is the sky blue") and the eval fell from 170/175 to 185/245. It is planned to return with the
+helper model.
+
+**Confirmation.** A skill that cannot be undone (today only `quit_app`) does not run when the model asks for
+it. vaice speaks a question it builds itself from the checked arguments (`Shall I quit Safari?`; a
+name that is not running is refused, nothing is asked), and the request waits in vaice, not in the model:
+
+- **By voice:** say `yes`, `yes please`, `yeah`, `yep`, `go ahead`, `do it`, `please do`, `confirm` (a few
+  more are listed in `src/vaice/confirm.py`). Only the whole utterance counts: "yes, and open Notes" is
+  not an approval. `no`, `cancel`, `stop`, `never mind` and similar cancel it ("Okay, I won't."). Anything
+  else drops the request and is treated as a new question. The question contains none of the yes words
+  and cannot be answered before all its audio has been handed out, so hearing itself through the
+  speakers does not approve it (it can drop the request, though: use headphones, see #36).
+- **By click:** while a request waits, a panel above *Tool activity* shows the question, the skill and its
+  arguments exactly as they will run, with **Run** and **Cancel** buttons. Nothing is spoken for a click;
+  the outcome shows in *Tool activity* and in later prompts. A panel left on screen cannot approve a newer
+  request: the buttons pass the id of the request they showed.
+- A request expires 60 seconds after its question was spoken, and *New conversation* drops it.
+
+The first time `quit_app` runs, macOS may ask whether your terminal (or the app that started vaice) may
+control the app it is quitting (Automation permission); allow it in System Settings, Privacy & Security,
+Automation. Until then `quit_app` fails with a spoken error. `open_app` and the volume and mute skills need no permission.
 
 Earlier skill results stay in the conversation's prompt (each capped at 300 characters), so a follow-up such as "and how much memory does it have?" is answered from the real result. Process names are spoken in a cleaned form (`Google Chrome Helper (Renderer)` counts as `Google Chrome`). Long paths are left out of the spoken answer (only a file's name is spoken); the full detail of every
 skill call lands in the collapsed *Tool activity* panel. Limits: the skills use macOS commands, so
@@ -338,7 +372,8 @@ src/vaice/
   config.py         Environment-driven settings (.env.example lists them with defaults)
   conversation.py   Turn / Conversation: history windowing, barge-in trimming, atomic JSON persistence, error notes
   brain.py          Assistant mode: ChatBrain, one /v1/chat/completions call with tools (no server-side tool execution)
-  skills.py         Assistant mode: the read-only skills (disk, battery, system, processes, files) and the Skills registry
+  skills.py         Assistant mode: the skills (read-only answers, plus open/quit app, volume, mute) and the Skills registry
+  confirm.py        Assistant mode: the one pending request of a confirm skill, the spoken yes/no test and its 60 s expiry
   voice.py          Assistant mode: speakable() cleans text for speech, sentences() splits it for /tts
   audio.py          Mic frame → mono PCM16 at the model's rate (resampled via scipy) and back to float32
   responders/

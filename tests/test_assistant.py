@@ -2,6 +2,7 @@
 import logging
 import threading
 import time
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -10,11 +11,12 @@ from threads import next_on_fresh_thread, start_thread
 from vaice import lifecycle
 from vaice.audio import from_pcm16
 from vaice.brain import BrainReply, ToolCall
-from vaice.conversation import Turn
+from vaice.confirm import CONFIRM_SECONDS, Confirmations, Pending
+from vaice.conversation import Conversation, Turn
 from vaice.responders import assistant
 from vaice.responders.assistant import AssistantResponder, decide
 from vaice.responders.llamacpp import _Stopped
-from vaice.skills import Skill, SkillResult, Skills
+from vaice.skills import Skill, SkillError, SkillResult, Skills
 
 AUDIO = (48000, np.zeros((1, 480), dtype=np.int16))
 CONTENT_TYPE = "audio/pcm;rate=24000;encoding=signed-int;bits=16"
@@ -552,7 +554,8 @@ def test_decide_returns_the_answer_the_calls_and_the_timings(tts):
     brain = FakeBrain(ask(("disk_space", "{}")), answer("About 160 gigabytes."))
     seen = []
 
-    decision = decide(brain, disk_skills(), [{"role": "user", "content": "space?"}], lambda: False, seen.append)
+    decision = decide(brain, disk_skills(), [{"role": "user", "content": "space?"}], lambda: False, seen.append,
+                      turn=Turn())
 
     assert decision.answer == "About 160 gigabytes."
     assert [(c.name, c.arguments, c.result.speech) for c in decision.calls] == [
@@ -565,7 +568,7 @@ def test_decide_gives_a_failed_skill_to_the_brain_as_plain_words():
     brain = FakeBrain(ask(("nope", "{}")), answer("I could not check that."))
     messages = [{"role": "user", "content": "x"}]
 
-    decide(brain, disk_skills(), messages, lambda: False)
+    decide(brain, disk_skills(), messages, lambda: False, turn=Turn())
 
     assert messages[-1] == {"role": "tool", "tool_call_id": "call_0", "content": "there is no skill called nope"}
 
@@ -575,27 +578,77 @@ def test_decide_backfills_the_content_of_the_assistant_message():
     reply = BrainReply("", [call], {"role": "assistant", "content": None, "tool_calls": []})
     messages = [{"role": "user", "content": "x"}]
 
-    decide(FakeBrain(reply, answer("ok then, fine.")), disk_skills(), messages, lambda: False)
+    decide(FakeBrain(reply, answer("ok then, fine.")), disk_skills(), messages, lambda: False, turn=Turn())
 
     assert messages[1]["content"] == ""
 
 
+TOOL_CALL_MARKUP = ("<tool_call>\n<function=open_web>\n<parameter=query>\nwhy is the sky blue\n</parameter>\n"
+                    "</function>\n</tool_call>")
+
+
+@pytest.mark.parametrize(("written", "spoken"), [
+    (f"Let me check. {TOOL_CALL_MARKUP}", "Let me check."),
+    (f"{TOOL_CALL_MARKUP} Because of scattering.", "Because of scattering."),
+    ("Sure. <tool_call>\n<function=open_web>\n<parameter=query>\nwhy is the sky bl", "Sure."),  # never closed
+    ("<function=open_web><parameter=query>x</parameter></function> Done.", "Done."),
+    ("<answer>The sky is blue.</answer><|im_end|>", "The sky is blue."),  # stray delimiters, as in chat mode
+    ("Two is less than three, so 2 < 3.", "Two is less than three, so 2 < 3."),  # ordinary text is untouched
+])
+def test_decide_never_lets_tool_call_markup_into_the_answer(caplog, written, spoken):
+    with caplog.at_level(logging.WARNING, logger="vaice.responders.assistant"):
+        decision = decide(FakeBrain(answer(written)), disk_skills(), [{"role": "user", "content": "x"}],
+                          lambda: False, turn=Turn())
+
+    assert decision.answer == spoken
+    assert ("carried model markup" in caplog.text) == (written.strip() != spoken)
+
+
+def test_an_answer_that_is_only_markup_becomes_the_no_answer_sentence(caplog):
+    with caplog.at_level(logging.WARNING, logger="vaice.responders.assistant"):
+        decision = decide(FakeBrain(answer(TOOL_CALL_MARKUP)), disk_skills(), [{"role": "user", "content": "x"}],
+                          lambda: False, turn=Turn())
+
+    assert decision.answer == assistant.NO_ANSWER
+    assert "carried model markup" in caplog.text
+
+
+def test_the_forced_final_round_cannot_speak_its_tool_call_markup():
+    brain = FakeBrain(ask(("disk_space", "{}")), ask(("disk_space", "{}")), answer(f"Checking. {TOOL_CALL_MARKUP}"))
+
+    decision = decide(brain, disk_skills(), [{"role": "user", "content": "x"}], lambda: False, turn=Turn())
+
+    assert decision.answer == "Checking."
+
+
+def test_an_approved_skills_answer_is_cleaned_and_falls_back_to_its_result():
+    for written, spoken in [(f"Safari is closed. {TOOL_CALL_MARKUP}", "Safari is closed."),
+                            (TOOL_CALL_MARKUP, "quit Safari")]:
+        s = confirming(answer(written))
+        request = Pending("quit_app", QUIT[1], QUESTION, "call_0", [], Turn())
+
+        decision = assistant._approved(request, s.resp.skills, s.brain, Turn(), lambda: False)
+
+        assert decision.answer == spoken
+
+
 def test_decide_stops_before_a_brain_call_and_between_skills():
     with pytest.raises(_Stopped):
-        decide(FakeBrain(), disk_skills(), [], lambda: True)
+        decide(FakeBrain(), disk_skills(), [], lambda: True, turn=Turn())
 
     stops = iter([False, False, True])  # before round 1, before the first skill, before the second
     brain = FakeBrain(ask(("disk_space", "{}"), ("disk_space", "{}")))
     ran = []
     with pytest.raises(_Stopped):
-        decide(brain, disk_skills(ran), [], lambda: next(stops))
+        decide(brain, disk_skills(ran), [], lambda: next(stops), turn=Turn())
     assert ran == [{}]
 
 
 def test_the_default_responder_offers_the_default_skills():
     resp = AssistantResponder("http://server")
     assert resp.name == "assistant"
-    assert resp.skills.names == ["disk_space", "battery_status", "system_info", "top_processes", "find_files"]
+    assert resp.skills.names == ["disk_space", "battery_status", "system_info", "top_processes", "find_files",
+                                 "open_app", "quit_app", "set_volume", "volume_up", "volume_down", "mute_sound"]
 
 
 def test_the_recorded_text_never_includes_what_was_not_handed_out_even_when_the_worker_ran_ahead(tts):
@@ -707,3 +760,379 @@ def test_tool_call_ids_are_unique_across_turns_and_output_may_hold_colons():
     assert [m["content"] for m in messages if m["role"] == "tool"] == ["a: b", "c"]
     assert [m["role"] for m in messages] == [
         "system", "user", "assistant", "tool", "assistant", "user", "assistant", "tool", "assistant", "user"]
+
+
+# --- confirmation of a skill that cannot be undone
+
+QUIT = ("quit_app", '{"name": "Safari"}')
+QUESTION = "Shall I quit Safari?"
+
+
+class Clock:
+    def __init__(self):
+        self.now = 100.0
+
+    def __call__(self):
+        return self.now
+
+
+def skills_with_quit(ran, disk_ran):
+    """disk_space (a read skill) and quit_app (confirm): `ran` collects what quit_app was run with."""
+
+    def quit_run(args):
+        ran.append(args)
+        return SkillResult("quit Safari")
+
+    def question(args):
+        if args["name"] == "Ghost":
+            raise SkillError("Ghost is not running")
+        return f"Shall I quit {args['name']}?"
+
+    def disk(_args):
+        disk_ran.append(1)
+        return SkillResult("160 gigabytes free of 926 gigabytes")
+
+    name = {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}
+    return Skills([Skill("disk_space", "Report free disk space.", {"type": "object", "properties": {}}, disk),
+                   Skill("quit_app", "Quit an app.", name, quit_run, kind="confirm", ask=question)])
+
+
+def confirming(*replies, clock=None):
+    ran, disk_ran, brain = [], [], FakeBrain(*replies)
+    confirmations = Confirmations(clock or Clock())
+    resp = AssistantResponder("http://server", 5.0, "Be brief.", "female", skills_with_quit(ran, disk_ran), brain,
+                              confirmations)
+    return SimpleNamespace(resp=resp, brain=brain, confirmations=confirmations, ran=ran, disk_ran=disk_ran)
+
+
+def asked(*more, clock=None, request=QUIT):
+    """A reply in which the brain asks for `request`, driven to its end; `more` are the brain's later replies."""
+    s = confirming(ask(request), *more, clock=clock)
+    s.turn = Turn()
+    drive(s.resp, turn=s.turn)
+    return s
+
+
+def tool_events(turn):
+    return [(e["name"], e["output"]) for e in turn.tool_events]
+
+
+def test_a_confirm_skill_does_not_run_its_question_is_spoken_and_only_then_armed(tts):
+    s = asked()
+
+    assert s.ran == []
+    assert [b["input"] for b in tts.bodies] == [QUESTION]
+    assert s.turn.assistant_text == QUESTION
+    assert len(s.brain.calls) == 1  # the loop ended at the question
+    assert tool_events(s.turn) == [("quit_app", "waiting for confirmation")]
+    assert s.turn.tool_events[0]["arguments"] == QUIT[1]
+    pending = s.confirmations.current()
+    assert (pending.name, pending.arguments, pending.question, pending.call_id) == (
+        "quit_app", QUIT[1], QUESTION, "call_0")
+    assert pending.turn is s.turn
+    assert pending.armed_at == 100.0
+
+
+def test_the_request_is_on_the_screen_while_its_question_is_spoken_but_cannot_be_answered_yet(monkeypatch):
+    gate = threading.Event()
+    monkeypatch.setattr(assistant.requests, "post",
+                        FakeTTS(lambda text: FakeResponse([pcm_bytes(50), pcm_bytes(50)], gate=gate)))
+    s = confirming(ask(QUIT))
+    gen = s.resp.respond(AUDIO, [], Turn())
+
+    next_on_fresh_thread(gen)  # the first chunk of the question is out; the worker waits at the gate
+
+    pending = s.resp.pending()
+    assert pending is not None and pending.armed_at is None
+    gate.set()
+    while not isinstance(next_on_fresh_thread(gen), StopIteration):
+        pass
+    wait_until(lambda: s.resp.pending().armed_at is not None)
+
+
+def test_a_question_cut_off_before_its_audio_was_all_out_is_dropped(monkeypatch):
+    gate = threading.Event()
+    monkeypatch.setattr(assistant.requests, "post",
+                        FakeTTS(lambda text: FakeResponse([pcm_bytes(50), pcm_bytes(50)], gate=gate)))
+    s = confirming(ask(QUIT))
+    gen = s.resp.respond(AUDIO, [], Turn())
+
+    next_on_fresh_thread(gen)
+    assert s.resp.pending() is not None
+    gen.close()  # the user talked over it
+    gate.set()
+
+    wait_until(lambda: s.resp.pending() is None)
+    wait_until(lambda: not threads_named("vaice-assistant"))
+    assert s.ran == []
+
+
+def test_a_question_whose_audio_failed_is_dropped_too(monkeypatch):
+    monkeypatch.setattr(assistant.requests, "post", FakeTTS(lambda text: FakeResponse([], status=503)))
+    s = confirming(ask(QUIT))
+
+    with pytest.raises(RuntimeError, match="HTTP 503"):
+        drive(s.resp)
+
+    assert s.resp.pending() is None
+
+
+def test_calls_after_the_confirm_skill_are_dropped_and_calls_before_it_are_answered(tts, caplog):
+    s = confirming(ask(("disk_space", "{}"), QUIT, ("disk_space", "{}")))
+    turn = Turn()
+
+    with caplog.at_level(logging.WARNING, logger="vaice.responders.assistant"):
+        drive(s.resp, turn=turn)
+
+    assert s.disk_ran == [1]  # the call before ran, the one after did not
+    assert "dropped 1 skill call(s) requested after quit_app" in caplog.text
+    messages = s.resp.pending().messages
+    assert [c["id"] for c in messages[2]["tool_calls"]] == ["call_0", "call_1"]
+    assert messages[3] == {"role": "tool", "tool_call_id": "call_0", "content": "160 gigabytes free of 926 gigabytes"}
+    assert len(messages) == 4  # a valid chat: the result of the confirm call is all that is missing
+    assert tool_events(turn) == [("disk_space", "160 gigabytes free of 926 gigabytes"),
+                                 ("quit_app", "waiting for confirmation")]
+
+
+def test_a_confirm_skill_that_cannot_be_asked_about_is_an_ordinary_failed_call(tts):
+    s = confirming(ask(("quit_app", '{"name": "Ghost"}')), answer("Ghost is not running, so nothing to quit."))
+    turn = Turn()
+
+    drive(s.resp, turn=turn)
+
+    assert s.resp.pending() is None
+    assert s.brain.calls[1][0][-1] == {"role": "tool", "tool_call_id": "call_0",
+                                       "content": "the quit app skill failed: Ghost is not running"}
+    assert tool_events(turn) == [("quit_app", "the quit app skill failed: Ghost is not running")]
+    assert turn.assistant_text == "Ghost is not running, so nothing to quit."
+
+
+def test_decide_stops_at_the_confirm_skill_with_its_question_as_the_answer():
+    s = confirming(ask(QUIT))
+    messages = [{"role": "user", "content": "quit Safari"}]
+    turn = Turn()
+
+    decision = decide(s.brain, s.resp.skills, messages, lambda: False, turn=turn)
+
+    assert decision.answer == QUESTION and decision.calls == []
+    assert decision.pending.turn is turn and decision.pending.messages is messages
+    assert messages[-1]["tool_calls"][0]["function"] == {"name": "quit_app", "arguments": QUIT[1]}
+    assert s.ran == []
+
+
+def test_yes_runs_the_stored_call_makes_one_tool_less_brain_call_and_is_not_a_question(tts, heard):
+    s = asked(answer("Safari is closed now."))
+    heard.text = "Yes, please!"
+    second = CountingTurn()
+
+    drive(s.resp, turn=second)
+
+    assert s.ran == [{"name": "Safari"}]  # the stored arguments
+    assert len(s.brain.calls) == 2
+    messages, tools = s.brain.calls[1]
+    assert tools is None  # the brain only has to say how it went
+    assert messages[-1] == {"role": "tool", "tool_call_id": "call_0", "content": "quit Safari"}
+    assert messages[-2]["tool_calls"][0]["id"] == "call_0"
+    assert not any(m.get("content") == "Yes, please!" for m in messages)  # "yes" never reaches the brain
+    assert [b["input"] for b in tts.bodies] == [QUESTION, "Safari is closed now."]
+    assert second.assistant_text == "Safari is closed now."
+    assert second.user_texts == ["Yes, please!"]
+    assert tool_events(second) == [("quit_app", "quit Safari")]  # on this turn
+    assert tool_events(s.turn) == [("quit_app", "waiting for confirmation")]
+    assert s.resp.pending() is None
+
+
+def test_a_stop_before_the_approved_skill_runs_runs_nothing():
+    s = confirming()
+    request = Pending("quit_app", QUIT[1], QUESTION, "call_0", [], Turn())
+
+    with pytest.raises(_Stopped):
+        assistant._approved(request, s.resp.skills, s.brain, Turn(), lambda: True)
+
+    assert s.ran == [] and s.brain.calls == []
+
+
+def test_an_empty_answer_after_the_skill_ran_speaks_its_result(tts, heard):
+    s = asked(answer(""))
+    heard.text = "yes"
+    turn = Turn()
+
+    drive(s.resp, turn=turn)
+
+    assert turn.assistant_text == "quit Safari"
+
+
+def test_no_cancels_and_says_so_without_asking_the_brain(tts, heard):
+    s = asked()
+    heard.text = "No, thanks."
+    turn = Turn()
+
+    drive(s.resp, turn=turn)
+
+    assert s.ran == []
+    assert len(s.brain.calls) == 1
+    assert turn.assistant_text == "Okay, I won't."
+    assert tool_events(turn) == [("quit_app", "cancelled")]
+    assert tool_events(s.turn) == [("quit_app", "waiting for confirmation")]
+    assert s.resp.pending() is None
+
+
+@pytest.mark.parametrize("utterance", ["What's the weather like?", "yes, and open Notes too", "Maybe later",
+                                       "I said no"])
+def test_anything_else_drops_the_request_and_is_an_ordinary_question(tts, heard, utterance):
+    s = asked(answer("It is sunny today."))
+    heard.text = utterance
+    turn = Turn()
+
+    drive(s.resp, turn=turn)
+
+    assert s.ran == []
+    assert s.brain.calls[1][0][-1] == {"role": "user", "content": utterance}  # asked as a new question
+    assert turn.assistant_text == "It is sunny today."
+    assert tool_events(s.turn) == [("quit_app", "waiting for confirmation"), ("quit_app", "not confirmed")]
+    assert s.resp.pending() is None
+
+
+def test_a_yes_cannot_approve_a_request_whose_question_was_not_fully_out(tts, heard):
+    s = confirming(answer("Okay, sure thing."))
+    request = Pending("quit_app", QUIT[1], QUESTION, "call_0", [], Turn())
+    s.confirmations.ask(request)  # asked, never armed
+    heard.text = "yes"
+
+    drive(s.resp)
+
+    assert s.ran == []
+    assert s.brain.calls[0][0][-1] == {"role": "user", "content": "yes"}
+    assert tool_events(request.turn) == [("quit_app", "not confirmed")]
+
+
+def test_a_request_expires_a_minute_after_its_question_was_spoken(tts, heard):
+    clock = Clock()
+    s = asked(answer("I am not sure what you mean."), clock=clock)
+    clock.now += CONFIRM_SECONDS + 1
+    heard.text = "yes"
+
+    drive(s.resp)
+
+    assert s.ran == []
+    assert s.brain.calls[1][0][-1] == {"role": "user", "content": "yes"}
+
+
+def test_a_request_is_still_answerable_just_inside_the_minute(tts, heard):
+    clock = Clock()
+    s = asked(answer("Safari is closed now."), clock=clock)
+    clock.now += CONFIRM_SECONDS - 1
+    heard.text = "yes"
+
+    drive(s.resp)
+
+    assert s.ran == [{"name": "Safari"}]
+
+
+def test_a_plain_question_with_nothing_waiting_leaves_no_request(tts):
+    s = confirming(answer("About 160 gigabytes."))
+
+    drive(s.resp)
+
+    assert s.resp.pending() is None and len(s.brain.calls) == 1
+
+
+def test_a_click_on_the_current_request_runs_it_and_records_the_result_on_the_asking_turn(tts):
+    s = asked()
+    pending = s.resp.pending()
+
+    assert s.resp.approve(pending.id) == "quit Safari"
+
+    assert s.ran == [{"name": "Safari"}]
+    assert tool_events(s.turn) == [("quit_app", "waiting for confirmation"), ("quit_app", "quit Safari")]
+    assert s.resp.pending() is None
+    assert s.resp.approve(pending.id) is None  # once only
+    assert s.ran == [{"name": "Safari"}]
+    assert len(s.brain.calls) == 1  # nothing is spoken or asked of the brain on a click
+
+
+def test_a_click_on_a_stale_panel_changes_nothing(tts):
+    s = asked()
+    pending = s.resp.pending()
+
+    assert s.resp.approve("0" * 32) is None
+    s.resp.cancel("0" * 32)
+
+    assert s.resp.pending() is pending and s.ran == []
+    assert tool_events(s.turn) == [("quit_app", "waiting for confirmation")]
+
+
+def test_an_old_panels_id_cannot_approve_a_newer_request(tts, heard):
+    s = asked(ask(("quit_app", '{"name": "Mail"}')))
+    old = s.resp.pending().id
+    heard.text = "Quit Mail."
+    drive(s.resp)  # a second request replaces the first (which was "not confirmed")
+    assert s.resp.pending().id != old
+
+    assert s.resp.approve(old) is None
+
+    assert s.ran == []
+    assert s.resp.pending() is not None
+
+
+def test_cancel_by_click_drops_the_request_and_records_it(tts):
+    s = asked()
+
+    s.resp.cancel(s.resp.pending().id)
+
+    assert s.resp.pending() is None and s.ran == []
+    assert tool_events(s.turn) == [("quit_app", "waiting for confirmation"), ("quit_app", "cancelled")]
+
+
+def test_a_voice_yes_after_a_click_is_an_ordinary_question_and_the_skill_ran_once(tts, heard):
+    s = asked(answer("Hello to you too."))
+    s.resp.approve(s.resp.pending().id)
+    heard.text = "yes"
+
+    drive(s.resp)
+
+    assert s.ran == [{"name": "Safari"}]
+    assert s.brain.calls[1][0][-1] == {"role": "user", "content": "yes"}
+
+
+def test_new_conversation_clears_a_waiting_request(tts):
+    s = asked()
+
+    s.resp.clear_pending()
+
+    assert s.resp.pending() is None
+    assert s.resp.approve("anything") is None
+
+
+def test_a_follow_up_after_a_click_sees_what_the_action_did(tts):
+    s = confirming(ask(QUIT))
+    conversation = Conversation()
+    first = conversation.start_turn()
+    drive(s.resp, turn=first)
+    first.finish()  # as the app does when the reply ran to its end
+    s.resp.approve(s.resp.pending().id)
+
+    history = conversation.history(before=conversation.start_turn(), tools=True)
+
+    assert history == [("user", "How much disk space is free?"),
+                       ("tool", "quit_app: waiting for confirmation"), ("tool", "quit_app: quit Safari"),
+                       ("assistant", QUESTION)]
+    messages = assistant.build_messages("Be brief.", history, "Now start it again.")
+    assert [m["content"] for m in messages if m["role"] == "tool"] == ["waiting for confirmation", "quit Safari"]
+
+
+def test_a_follow_up_after_a_spoken_yes_sees_the_result_on_the_yes_turn(tts, heard):
+    s = confirming(ask(QUIT), answer("Safari is closed now."))
+    conversation = Conversation()
+    first = conversation.start_turn()
+    drive(s.resp, turn=first)
+    first.finish()
+    heard.text = "yes"
+    second = conversation.start_turn()
+    drive(s.resp, turn=second)
+    second.finish()
+
+    history = conversation.history(before=conversation.start_turn(), tools=True)
+
+    assert history[-3:] == [("user", "yes"), ("tool", "quit_app: quit Safari"),
+                            ("assistant", "Safari is closed now.")]

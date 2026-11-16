@@ -1,9 +1,15 @@
-"""Skills: small read-only checks of this Mac that the assistant path runs itself.
+"""Skills: small checks of and actions on this Mac that the assistant path runs itself.
 
 The brain (a chat model) asks for a skill by name; vaice runs it with vaice's own permissions and hands
-the model a short plain-text result to answer from. A skill never changes anything, never goes through a
-shell (argv lists only), and never raises: whatever goes wrong comes back as a `SkillResult` that says so
-in plain words, which is what the model then tells the user. macOS only, except `disk_space`.
+the model a short plain-text result to answer from. A skill never goes through a shell (argv lists only)
+and never raises: whatever goes wrong comes back as a `SkillResult` that says so in plain words, which is
+what the model then tells the user. macOS only, except `disk_space`.
+
+A skill has a `kind`: `read` checks something, `action` changes something that is easy to undo (an app
+opens, the volume moves) and runs at once, `confirm` changes something that is not (an app quits) and runs
+only after the user approved the question its `ask` built, which vaice holds (see `confirm.py`). The result
+of an action names its object ("opened Safari"): history replays past calls without their arguments, so a
+follow-up such as "now close it" can only be answered from the result's text.
 """
 import json
 import logging
@@ -24,6 +30,9 @@ GIB = 1024**3
 MAX_FILES = 20  # find_files stops listing here
 SPOKEN_FILES = 3  # file names put into the spoken answer
 MAX_PROCESSES = 5
+MAX_APP_NAME = 60
+APP_NAME_PUNCTUATION = " .&+'-"  # besides letters and digits: enough for "Google Chrome", "AT&T", "Notes 2"
+VOLUME_STEP = 10  # points for volume_up / volume_down
 
 
 @dataclass(frozen=True)
@@ -36,11 +45,22 @@ class SkillResult:
 
 
 @dataclass(frozen=True)
+class Question:
+    """What to ask the user before a `confirm` skill runs: built only from the skill's validated arguments."""
+
+    text: str
+
+
+@dataclass(frozen=True)
 class Skill:
     name: str
     description: str  # one sentence: when to use it
     parameters: dict  # JSON schema of the arguments
     run: Callable[[dict], SkillResult]
+    kind: str = "read"  # "read" | "action" (runs at once, easy to undo) | "confirm" (asks first)
+    # confirm only: validates the arguments and returns the question to speak, or raises SkillError. The
+    # question must not hold a word the user answers with (see confirm.py): the speakers' echo can reach the mic.
+    ask: Callable[[dict], str] | None = None
 
 
 class SkillError(Exception):
@@ -64,8 +84,8 @@ class Skills:
                  "function": {"name": s.name, "description": s.description, "parameters": s.parameters}}
                 for s in self.skills]
 
-    def run(self, name: str, arguments: str) -> SkillResult:
-        """Run skill `name` with `arguments` (the model's JSON string). Never raises."""
+    def _resolve(self, name: str, arguments: str) -> tuple[Skill, dict, str] | SkillResult:
+        """The skill, its parsed arguments and its label; or the result that says why that is not possible."""
         skill = self._by_name.get(name)
         if skill is None:
             return SkillResult(f"there is no skill called {name}")
@@ -79,6 +99,37 @@ class Skills:
         for key in skill.parameters.get("required", []):
             if key not in args:
                 return SkillResult(f"{label} failed: the argument {key} is missing")
+        return skill, args, label
+
+    def prepare(self, name: str, arguments: str) -> Question | SkillResult | None:
+        """The checks that come before a `confirm` skill runs: the `Question` to ask the user, or the
+        `SkillResult` that says why it cannot be done. None for any other skill (and an unknown one): `run`
+        it, which reports its failures the same way. Never raises."""
+        skill = self._by_name.get(name)
+        if skill is None or skill.kind != "confirm":
+            return None
+        resolved = self._resolve(name, arguments)
+        if isinstance(resolved, SkillResult):
+            return resolved
+        skill, args, label = resolved
+        try:
+            if skill.ask is None:
+                raise SkillError("it has no question to ask")
+            return Question(skill.ask(args))
+        except SkillError as exc:
+            log.warning("skill %s cannot be asked about: %s", name, exc)
+            return SkillResult(f"{label} failed: {exc}")
+        except Exception as exc:
+            log.exception("skill %s could not be asked about", name)
+            return SkillResult(f"{label} failed: {type(exc).__name__}: {exc}")
+
+    def run(self, name: str, arguments: str) -> SkillResult:
+        """Run skill `name` with `arguments` (the model's JSON string). Never raises. A `confirm` skill runs
+        here too: the caller holds the user's approval (see `prepare`)."""
+        resolved = self._resolve(name, arguments)
+        if isinstance(resolved, SkillResult):
+            return resolved
+        skill, args, label = resolved
         try:
             return skill.run(args)
         except SkillError as exc:
@@ -309,9 +360,134 @@ def _find_files(args: dict) -> SkillResult:
     return describe_files(output)
 
 
+# --- open_app, quit_app
+
+
+def _app_name(args: dict) -> str:
+    """The validated app name. It reaches `open -a` and (as an argument, never as source) osascript, so
+    nothing that could read as an option, a path or AppleScript gets through."""
+    name = str(args.get("name", "")).strip()
+    if not name:
+        raise SkillError("no app name was given")
+    if len(name) > MAX_APP_NAME:
+        raise SkillError(f"that app name is longer than {MAX_APP_NAME} characters")
+    if name.startswith("-") or not all(c.isalnum() or c in APP_NAME_PUNCTUATION for c in name):
+        raise SkillError(f"{name!r} is not an app name I can use")
+    return name
+
+
+def _open_app(args: dict) -> SkillResult:
+    _require_macos("opening an app")
+    name = _app_name(args)
+    try:
+        _command(["open", "-a", name])
+    except SkillError as exc:
+        if "Unable to find application" in str(exc):
+            raise SkillError(f"there is no app called {name}") from None
+        raise
+    return SkillResult(f"opened {name}")
+
+
+_APP_HEADER = re.compile(r'^\s*\d+\) "(.*)" ASN:')
+
+
+def parse_foreground_apps(output: str) -> list[str]:
+    """The names of the running apps with a Dock icon, from `lsappinfo list` (one block per process, its
+    header line `38) "Google Chrome" ASN:0x0-...:`, a `type="Foreground"` line inside)."""
+    names: list[str] = []
+    current: str | None = None
+    for line in output.splitlines():
+        header = _APP_HEADER.match(line)
+        if header:
+            current = header.group(1)
+        elif current is not None and 'type="Foreground"' in line:
+            names.append(current)
+            current = None
+    return names
+
+
+def _running_app(name: str) -> str:
+    """The running app's own name for `name` (case ignored). `lsappinfo` rather than AppleScript's `is running`:
+    asked about an app that does not exist, that hangs on a "Where is <name>?" chooser (checked on macOS 26)."""
+    for running in parse_foreground_apps(_command(["lsappinfo", "list"])):
+        if running.casefold() == name.casefold():
+            return running
+    raise SkillError(f"{name} is not running")
+
+
+def _ask_quit(args: dict) -> str:
+    _require_macos("quitting an app")
+    return f"Shall I quit {_running_app(_app_name(args))}?"
+
+
+def _quit_app(args: dict) -> SkillResult:
+    _require_macos("quitting an app")
+    name = _running_app(_app_name(args))  # `quit` on an app that is not running would launch it first
+    _command(["osascript", "-e", "on run argv", "-e", "tell application (item 1 of argv) to quit",
+              "-e", "end run", name])
+    return SkillResult(f"quit {name}")
+
+
+# --- set_volume, mute_sound
+
+
+def _whole_number(value, what: str) -> int:
+    """`value` as an int (a bool, a fraction or text that is not a whole number is refused)."""
+    if isinstance(value, bool):
+        raise SkillError(f"{what} must be a whole number")
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value)
+    raise SkillError(f"{what} must be a whole number, not {value!r}")
+
+
+def _output_volume() -> int:
+    output = _command(["osascript", "-e", "output volume of (get volume settings)"]).strip()
+    try:
+        return int(output)
+    except ValueError:  # "missing value": a display or other output with no volume of its own
+        raise SkillError("the volume of this output cannot be read") from None
+
+
+def _apply_volume(volume: int) -> SkillResult:
+    _command(["osascript", "-e", f"set volume output volume {volume}"])  # an int: safe to interpolate
+    return SkillResult(f"volume set to {volume} percent")
+
+
+def _set_volume(args: dict) -> SkillResult:
+    _require_macos("changing the volume")
+    volume = _whole_number(args.get("level"), "the level")
+    if not 0 <= volume <= 100:
+        raise SkillError(f"the level must be from 0 to 100, not {volume}")
+    return _apply_volume(volume)
+
+
+def _step_volume(step: int) -> SkillResult:
+    _require_macos("changing the volume")
+    return _apply_volume(max(0, min(100, _output_volume() + step)))
+
+
+def _mute_sound(args: dict) -> SkillResult:
+    _require_macos("changing the sound")
+    muted = args.get("muted", True)
+    if isinstance(muted, str) and muted.strip().lower() in ("true", "false"):  # a small model may quote it
+        muted = muted.strip().lower() == "true"
+    if not isinstance(muted, bool):
+        raise SkillError(f"muted must be true or false, not {muted!r}")
+    _command(["osascript", "-e", f"set volume output muted {'true' if muted else 'false'}"])
+    return SkillResult("sound muted" if muted else "sound unmuted")
+
+
 def default_skills() -> Skills:
-    """The read-only skills the assistant path offers."""
+    """The skills the assistant path offers: five read-only checks, then the actions."""
     nothing = {"type": "object", "properties": {}}
+    app_name = {"type": "object",
+                "properties": {"name": {"type": "string",
+                                        "description": "The app's name, such as Safari, Notes or Calculator."}},
+                "required": ["name"]}
     return Skills([
         Skill("disk_space", "Report how much disk space is free on this Mac.", nothing, _disk_space),
         Skill("battery_status", "Report the battery level and whether this Mac is charging or plugged in.",
@@ -333,4 +509,23 @@ def default_skills() -> Skills:
                               "description": "Where to look (default home)."}},
                "required": ["name"]},
               _find_files),
+        Skill("open_app", "Open an app on this Mac by name.", app_name, _open_app, kind="action"),
+        Skill("quit_app", "Quit a running app by name. The user is asked to confirm first.", app_name, _quit_app,
+              kind="confirm", ask=_ask_quit),
+        Skill("set_volume", "Set the speaker volume to the number the user said, from 0 to 100.",
+              {"type": "object",
+               "properties": {"level": {"type": "integer", "minimum": 0, "maximum": 100,
+                                        "description": "The new volume, 0 to 100."}},
+               "required": ["level"]},
+              _set_volume, kind="action"),
+        # Up and down are skills of their own, without arguments: as a `direction` argument of set_volume the
+        # 2B model set a guessed level instead, or asked how much (live eval, 0 of 5 either way)
+        Skill("volume_up", "Turn the speaker volume up (louder).", nothing,
+              lambda _args: _step_volume(VOLUME_STEP), kind="action"),
+        Skill("volume_down", "Turn the speaker volume down (quieter).", nothing,
+              lambda _args: _step_volume(-VOLUME_STEP), kind="action"),
+        Skill("mute_sound", "Mute the sound, or unmute it.",
+              {"type": "object",
+               "properties": {"muted": {"type": "boolean", "description": "true to mute, false to unmute."}}},
+              _mute_sound, kind="action"),
     ])
