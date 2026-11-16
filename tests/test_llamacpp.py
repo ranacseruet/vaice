@@ -1319,3 +1319,48 @@ def test_the_realtime_probe_runs_after_the_model_check(monkeypatch):
 def test_a_secure_server_url_means_a_wss_socket():
     assert llamacpp._ws_url("http://h:1") == "ws://h:1/v1/realtime"
     assert llamacpp._ws_url("https://h:1") == "wss://h:1/v1/realtime"
+
+
+def test_closing_the_socket_does_not_hold_up_the_caller(monkeypatch):
+    """#90: llama-server never completes the close handshake, so close() waits out CLOSE_TIMEOUT.
+    The transcript and the reply's end must not wait for it: the close runs on a thread of its own."""
+    release = threading.Event()
+    closing = threading.Event()
+
+    class SlowToClose:
+        def close(self):
+            closing.set()
+            release.wait(5)
+
+    monkeypatch.setattr(llamacpp, "connect", lambda *args, **kwargs: SlowToClose())
+    started = time.monotonic()
+    with llamacpp._open("http://localhost:1", 1):
+        pass
+    elapsed = time.monotonic() - started
+    try:
+        assert closing.wait(2), "the socket was never closed"
+        assert elapsed < 1, f"leaving the session waited {elapsed:.2f}s for the close"
+    finally:
+        release.set()
+
+
+def test_a_close_that_fails_is_not_raised_anywhere(monkeypatch, caplog):
+    """The session is over when the socket is closed; a failing close is logged, not raised."""
+    done = threading.Event()
+
+    class FailsToClose:
+        def close(self):
+            try:
+                raise OSError("broken pipe")
+            finally:
+                done.set()
+
+    monkeypatch.setattr(llamacpp, "connect", lambda *args, **kwargs: FailsToClose())
+    with caplog.at_level("DEBUG", logger=llamacpp.log.name), llamacpp._open("http://localhost:1", 1):
+        pass
+    assert done.wait(2)
+    for _ in range(100):  # the log line is written just after close() raises, on the closing thread
+        if "closing the llama-server websocket failed" in caplog.text:
+            break
+        time.sleep(0.01)
+    assert "closing the llama-server websocket failed: OSError: broken pipe" in caplog.text
