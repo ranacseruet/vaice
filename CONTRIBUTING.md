@@ -23,7 +23,7 @@ uv sync --extra dev
 Before opening a pull request, run both the test suite and Ruff:
 
 ```bash
-.venv/bin/ruff check src tests
+.venv/bin/ruff check src tests evals
 .venv/bin/pytest --cov=vaice --cov-report=term-missing
 ```
 
@@ -51,6 +51,8 @@ Unit tests run completely offline without a real `llama-server` or microphone by
    `src/vaice/interruptible.py` works around `fastrtc` 0.0.34 races and idle CPU polling. `tests/test_interruptible.py` tests against the real `ReplyOnPause` class and checks `ReplyOnPause.__init__`'s signature so any upstream `fastrtc` change fails loudly in tests.
 5. **Manual audio verification:**
    When changing audio resampling (`audio.py`), WebSocket session handling (`responders/llamacpp.py`), or WebRTC stream setup (`app.py`, `interruptible.py`), verify the real audio path by running `vaice` against a live `llama-server` (`LiquidAI/LFM3-Audio-2B-GGUF`), speaking into the browser mic in Chrome (with headphones), and checking the `[llamacpp] time to first audio` log line.
+6. **Live evals for model behavior:**
+   `evals/` is a hand-run harness that measures how reliably spoken commands become the right tool call against a real `llama-server` (`.venv/bin/python evals/run.py`, with repeats). Use it before claiming anything about the model's behavior, a prompt change or a tool-set change, and quote the results with the build, model and quantization. CI does not run it; `tests/test_eval_scoring.py` covers its scoring logic and checks that `evals/cases.json` and `evals/tools.json` are consistent, so run it when you add a case. See [evals/README.md](evals/README.md).
 
 ## Keeping Documentation in Sync
 

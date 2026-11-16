@@ -1,0 +1,321 @@
+"""Live eval: how reliably do spoken commands turn into the right tool call?
+
+Run by hand against a real llama-server with an audio model (see evals/README.md); not imported by
+the app, not run in CI. Two paths are measured with repeats:
+
+- interleaved: the app's own path, LlamaCppResponder over /v1/realtime with the tools declared
+  (the stub tools in tools.json; nothing is executed for real);
+- text: transcribe the audio with a realtime `transcription` session, then route the transcript
+  through POST /v1/chat/completions with the same tools (routing only: no tool result is fed back).
+"""
+import argparse
+import json
+import platform
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import wave
+from datetime import datetime, timezone
+from pathlib import Path
+
+import numpy as np
+import requests
+import scoring
+
+from vaice import config
+from vaice.conversation import Turn
+from vaice.responders.llamacpp import LlamaCppResponder, _transcribe
+
+HERE = Path(__file__).parent
+PATHS = ("interleaved", "text")
+TEXT_PROMPT = ("You are a voice assistant on the user's Mac. Your reply is spoken aloud: "
+               "answer in one or two short plain sentences.")
+HISTORY = [
+    ("user", "Hey, are you there?"),
+    ("assistant", "Yes, I'm here."),
+    ("user", "What day is it?"),
+    ("assistant", "It's Monday."),
+]
+CHECK_TIMEOUT = 5  # seconds for the health and props requests
+SAY_TIMEOUT = 30
+SAY_ATTEMPTS = 3  # `say` sometimes hangs; see synthesize()
+ROUTE_TIMEOUT = 120
+TRANSCRIPT_WAIT = 5.0  # the interleaved path's transcript is reported after the reply; wait this long for it
+
+
+def fail(message: str) -> None:
+    sys.exit(f"evals: {message}")
+
+
+def load_json(name: str):
+    return json.loads((HERE / name).read_text())
+
+
+def read_wav(path: Path) -> tuple[int, np.ndarray]:
+    """A 16-bit PCM WAV as the (sample_rate, int16 array shaped (1, n)) frame the responder takes."""
+    with wave.open(str(path), "rb") as wav:
+        if wav.getsampwidth() != 2:
+            fail(f"{path} is not 16-bit PCM")
+        rate, channels = wav.getframerate(), wav.getnchannels()
+        raw = np.frombuffer(wav.readframes(wav.getnframes()), dtype="<i2")
+    if channels > 1:  # recordings should be mono; fold anything else rather than refuse it
+        raw = raw.reshape(-1, channels).mean(axis=1).astype("<i2")
+    return rate, raw.reshape(1, -1)
+
+
+def _say(sentence: str, out: Path) -> bool:
+    """One `say` run; False when it hung. Any other failure ends the eval with its reason."""
+    try:
+        subprocess.run(["say", "-o", str(out), "--data-format=LEI16@16000", sentence],
+                       check=True, capture_output=True, stdin=subprocess.DEVNULL, timeout=SAY_TIMEOUT)
+    except FileNotFoundError:
+        fail(f"no recording and no macOS `say` for {sentence!r}: put a 16-bit PCM mono WAV in "
+             f"{HERE / 'recordings'} named <case id>.wav")
+    except subprocess.CalledProcessError as exc:
+        fail(f"`say` failed for {sentence!r}: {exc.stderr.decode(errors='replace').strip()}")
+    except subprocess.TimeoutExpired:
+        return False
+    return True
+
+
+def synthesize(sentence: str, out: Path) -> None:
+    # `say` occasionally hangs (seen in a full run, on a sentence that worked before and after)
+    for attempt in range(1, SAY_ATTEMPTS + 1):
+        if _say(sentence, out):
+            return
+        print(f"`say` did not finish within {SAY_TIMEOUT}s for {sentence!r} (attempt {attempt} of {SAY_ATTEMPTS})",
+              file=sys.stderr)
+    fail(f"`say` hung {SAY_ATTEMPTS} times for {sentence!r}: record it instead "
+         f"({HERE / 'recordings'}/<case id>.wav) or run again")
+
+
+def audio_for(case: dict, scratch: Path) -> tuple[int, np.ndarray]:
+    recording = HERE / "recordings" / f"{case['id']}.wav"
+    if recording.exists():
+        return read_wav(recording)
+    synthesized = scratch / f"{case['id']}.wav"
+    synthesize(case["say"], synthesized)
+    return read_wav(synthesized)
+
+
+class StubTools:
+    """Records the calls a run makes and answers with each tool's canned result; nothing is executed."""
+
+    def __init__(self, results: dict[str, str]):
+        self._results = results
+        self.calls: list[tuple[str, str]] = []
+        self._lock = threading.Lock()  # the responder calls this from its session thread
+
+    def __call__(self, name: str, arguments: str) -> str:
+        with self._lock:
+            self.calls.append((name, arguments))
+        return self._results.get(name, f"tool {name} failed: no such tool")
+
+    def received(self) -> list[tuple[str, str]]:
+        with self._lock:
+            return list(self.calls)
+
+
+def run_interleaved(url: str, prompt: str, tools: list[dict], results: dict[str, str], audio, history) -> dict:
+    stub = StubTools(results)
+    responder = LlamaCppResponder(url=url, prompt=prompt, tools=tools, executor=stub)
+    turn = Turn()
+    record: dict = {"error": None}
+    first = None
+    seconds = 0.0
+    start = time.perf_counter()
+    try:
+        for rate, frame in responder.respond(audio, history, turn):
+            if first is None:
+                first = time.perf_counter() - start
+            seconds += len(frame) / rate
+    except Exception as exc:  # noqa: BLE001 - a failed run is recorded with its error, never aborts the eval
+        record["error"] = f"{type(exc).__name__}: {exc}"
+    total = time.perf_counter() - start
+    turn.finish()
+    turn.transcribed.wait(TRANSCRIPT_WAIT)  # keeps the transcription session out of the next run
+    record.update(calls=[list(c) for c in stub.received()], first_audio_s=first, total_s=total, audio_s=seconds,
+                  assistant_text=turn.assistant_text, transcript=turn.user_text, latency_s=first)
+    return record
+
+
+def chat_tools(tools: list[dict]) -> list[dict]:
+    """The flat definitions in the chat-completions nesting."""
+    return [{"type": "function", "function": {k: v for k, v in tool.items() if k != "type"}} for tool in tools]
+
+
+def route(url: str, system: str, history, transcript: str, tools: list[dict]) -> tuple[list[tuple[str, str]], str]:
+    messages = [{"role": "system", "content": system}]
+    messages += [{"role": role, "content": text} for role, text in history]
+    messages.append({"role": "user", "content": transcript})
+    body = {"messages": messages, "tools": chat_tools(tools), "temperature": 0, "max_tokens": 300}
+    r = requests.post(f"{url}/v1/chat/completions", json=body, timeout=ROUTE_TIMEOUT)
+    if not r.ok:
+        raise RuntimeError(f"chat completions answered HTTP {r.status_code}: {r.text[:200]}")
+    message = r.json()["choices"][0]["message"]
+    calls = []
+    for call in message.get("tool_calls") or []:
+        arguments = call["function"].get("arguments", "")
+        calls.append((call["function"]["name"], arguments if isinstance(arguments, str) else json.dumps(arguments)))
+    return calls, message.get("content") or ""
+
+
+def run_text(url: str, prompt: str, tools: list[dict], audio, history) -> dict:
+    record: dict = {"error": None, "calls": [], "transcript": None, "content": None, "latency_s": None}
+    start = time.perf_counter()
+    try:
+        transcript = _transcribe(url, config.LLAMACPP_TIMEOUT, audio)
+        record["transcribe_s"] = time.perf_counter() - start
+        record["transcript"] = transcript
+        routed = time.perf_counter()
+        calls, content = route(url, prompt, history, transcript, tools)
+        record["route_s"] = time.perf_counter() - routed
+        record["calls"] = [list(c) for c in calls]
+        record["content"] = content
+        record["latency_s"] = record["transcribe_s"] + record["route_s"]
+    except Exception as exc:  # noqa: BLE001 - a failed run is recorded with its error, never aborts the eval
+        record["error"] = f"{type(exc).__name__}: {exc}"
+    return record
+
+
+def server_info(url: str) -> dict:
+    try:
+        health = requests.get(f"{url}/health", timeout=CHECK_TIMEOUT)
+    except requests.RequestException as exc:
+        fail(f"llama-server is not reachable at {url}/health ({type(exc).__name__}: {exc})")
+    if not health.ok:
+        fail(f"llama-server at {url} answered /health with HTTP {health.status_code}: {health.text[:200]}")
+    info: dict = {"url": url}
+    try:
+        r = requests.get(f"{url}/props", timeout=CHECK_TIMEOUT)
+        r.raise_for_status()
+        props = r.json()
+    except (requests.RequestException, ValueError) as exc:
+        info["props_error"] = f"{type(exc).__name__}: {exc}"
+        return info
+    params = (props.get("default_generation_settings") or {}).get("params") or {}
+    model_path = props.get("model_path")
+    info.update(build_info=props.get("build_info"), model_alias=props.get("model_alias"),
+                model_file=Path(model_path).name if model_path else None, temperature=params.get("temperature"))
+    return info
+
+
+def parse_args(argv: list[str] | None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Eval spoken-command tool calling against a live llama-server.")
+    parser.add_argument("--url", default=config.LLAMACPP_URL, help="llama-server URL (default: VAICE_LLAMACPP_URL)")
+    parser.add_argument("--paths", default=",".join(PATHS), help="comma-separated: interleaved,text (default: both)")
+    parser.add_argument("--repeats", type=int, default=5, help="runs per case and path (default: 5)")
+    parser.add_argument("--cases", help="comma-separated case ids (default: all)")
+    parser.add_argument("--prompt", help="reply instructions (interleaved) and system prompt (text); "
+                                         "default: VAICE_LLAMACPP_PROMPT, and a spoken-assistant prompt for text")
+    parser.add_argument("--history", action=argparse.BooleanOptionalAction, default=True,
+                        help="send two fixed earlier exchanges (default: on)")
+    parser.add_argument("--out", type=Path, help="results file (default: evals/results/<UTC timestamp>.json)")
+    parser.add_argument("--label", default="", help="free text stored in the results, e.g. the quantization")
+    args = parser.parse_args(argv)
+    if args.repeats < 1:
+        parser.error("--repeats must be at least 1")
+    args.paths = [p.strip() for p in args.paths.split(",") if p.strip()]
+    unknown = [p for p in args.paths if p not in PATHS]
+    if unknown or not args.paths:
+        parser.error(f"--paths takes {' and '.join(PATHS)}, got {unknown or 'nothing'}")
+    return args
+
+
+def select_cases(cases: list[dict], wanted: str | None) -> list[dict]:
+    if not wanted:
+        return cases
+    ids = [i.strip() for i in wanted.split(",") if i.strip()]
+    by_id = {c["id"]: c for c in cases}
+    missing = [i for i in ids if i not in by_id]
+    if missing:
+        fail(f"unknown case id(s): {', '.join(missing)}")
+    return [by_id[i] for i in ids]
+
+
+def fmt(seconds: float | None) -> str:
+    return "-" if seconds is None else f"{seconds:.2f}s"
+
+
+def print_summary(runs: list[dict], paths: list[str], case_ids: list[str]) -> dict:
+    summary = {}
+    for path in paths:
+        records = [r for r in runs if r["path"] == path]
+        agg = scoring.aggregate(records)
+        summary[path] = agg
+        latency = "time to first audio" if path == "interleaved" else "time to decision"
+        print(f"\n== {path}: {agg['runs']} runs ==")
+        for outcome in scoring.OUTCOMES:
+            print(f"  {outcome:<11}{agg['counts'][outcome]:>4}  {agg['percent'][outcome]:>5.1f}%")
+        print(f"  {'duplicate':<11}{agg['duplicate']:>4}  {agg['duplicate_percent']:>5.1f}%  (same tool and arguments "
+              "twice; also counted above)")
+        print(f"  {latency}: median {fmt(agg['latency_median_s'])}, max {fmt(agg['latency_max_s'])}")
+    cells = {path: scoring.per_case([r for r in runs if r["path"] == path]) for path in paths}
+    width = max([len("case"), *(len(c) for c in case_ids)])
+    print(f"\n{'case':<{width}}  " + "  ".join(f"{p:>12}" for p in paths))
+    for case_id in case_ids:
+        row = []
+        for path in paths:
+            correct, total = cells[path].get(case_id, (0, 0))
+            row.append(f"{correct}/{total}" if total else "-")
+        print(f"{case_id:<{width}}  " + "  ".join(f"{cell:>12}" for cell in row))
+    heard = [r for r in runs if r["path"] == "text" and r.get("transcript") is not None]
+    wrong = [r for r in heard if scoring.misheard(r["say"], r["transcript"])]
+    if heard:
+        print(f"\ntranscripts differing from the sentence (case, punctuation ignored): {len(wrong)} of {len(heard)}")
+        for r in wrong:
+            print(f"  {r['case']} #{r['repeat']}: said {r['say']!r}, heard {r['transcript']!r}")
+        summary["misheard"] = {"differing": len(wrong), "transcribed": len(heard)}
+    return summary
+
+
+def main(argv: list[str] | None = None) -> None:
+    args = parse_args(argv)
+    cases = select_cases(load_json("cases.json"), args.cases)
+    tool_entries = load_json("tools.json")
+    tools = [entry["definition"] for entry in tool_entries]
+    results = {entry["definition"]["name"]: entry["result"] for entry in tool_entries}
+    url = config.server_base(args.url)
+    info = server_info(url)
+    prompts = {"interleaved": args.prompt or config.LLAMACPP_PROMPT, "text": args.prompt or TEXT_PROMPT}
+    history = HISTORY if args.history else []
+    out = args.out or HERE / "results" / f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.json"
+
+    print(f"server {url}: {info.get('model_alias')} {info.get('build_info')} temperature={info.get('temperature')}")
+    runs: list[dict] = []
+    started = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    total = len(cases) * len(args.paths) * args.repeats
+    try:
+        with tempfile.TemporaryDirectory(prefix="vaice-evals-") as scratch:
+            audio = {case["id"]: audio_for(case, Path(scratch)) for case in cases}
+            # repeats outermost: a drifting server (thermals, cache) spreads over the cases instead of one
+            for repeat in range(1, args.repeats + 1):
+                for case in cases:
+                    for path in args.paths:
+                        if path == "interleaved":
+                            record = run_interleaved(url, prompts[path], tools, results, audio[case["id"]], history)
+                        else:
+                            record = run_text(url, prompts[path], tools, audio[case["id"]], history)
+                        record.update(case=case["id"], say=case["say"], path=path, repeat=repeat)
+                        if not record["error"]:
+                            record["score"] = scoring.score(case["expect"], [tuple(c) for c in record["calls"]])
+                        runs.append(record)
+                        outcome = f"error: {record['error']}" if record["error"] else record["score"]["verdict"]
+                        print(f"[{len(runs)}/{total}] {path} {case['id']} #{repeat}: {outcome}", file=sys.stderr)
+    except KeyboardInterrupt:
+        print("\ninterrupted: reporting the runs so far", file=sys.stderr)
+    summary = print_summary(runs, args.paths, [c["id"] for c in cases])
+
+    config_used = {"paths": args.paths, "repeats": args.repeats, "history": history, "prompts": prompts,
+                   "cases": [c["id"] for c in cases], "platform": platform.platform()}
+    document = {"label": args.label, "started": started, "config": config_used, "server": info,
+                "summary": summary, "runs": runs}
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(document, indent=2) + "\n")
+    print(f"\nresults written to {out}")
+
+
+if __name__ == "__main__":
+    main()
