@@ -73,3 +73,11 @@ Synthesized speech is clean; a real microphone is not, and the two can differ a 
 ## Caveats
 
 Results are per llama.cpp build, model and quantization, and they move with the prompt and the history. Even at `--temp 0` a 2B model is not perfectly repeatable across audio, so one run proves nothing: compare `k/N` over repeats, and record the `--label` and the server info with any number you quote. The interleaved path also runs a transcription session in parallel, as the app does, which loads the server a little more than the text path's sequential requests do.
+
+## Known measurement caveat
+
+The text path's `transcribe_s` (and so its time to decision) includes about 1 s that is not
+transcription: `vaice.responders.llamacpp._transcribe` returns only after its WebSocket has closed,
+and llama-server (b12359) does not complete the close handshake, so the close waits out the 1 s
+`CLOSE_TIMEOUT`. The transcript itself arrives after about 0.2 s. Subtract 1 s when comparing the two
+paths' latency until that is fixed in the app.

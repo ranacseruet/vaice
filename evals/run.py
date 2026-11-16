@@ -40,6 +40,7 @@ HISTORY = [
 ]
 CHECK_TIMEOUT = 5  # seconds for the health and props requests
 SAY_TIMEOUT = 30
+SAY_ATTEMPTS = 3  # `say` sometimes hangs; see synthesize()
 ROUTE_TIMEOUT = 120
 TRANSCRIPT_WAIT = 5.0  # the interleaved path's transcript is reported after the reply; wait this long for it
 
@@ -64,15 +65,30 @@ def read_wav(path: Path) -> tuple[int, np.ndarray]:
     return rate, raw.reshape(1, -1)
 
 
-def synthesize(sentence: str, out: Path) -> None:
+def _say(sentence: str, out: Path) -> bool:
+    """One `say` run; False when it hung. Any other failure ends the eval with its reason."""
     try:
         subprocess.run(["say", "-o", str(out), "--data-format=LEI16@16000", sentence],
-                       check=True, capture_output=True, timeout=SAY_TIMEOUT)
+                       check=True, capture_output=True, stdin=subprocess.DEVNULL, timeout=SAY_TIMEOUT)
     except FileNotFoundError:
         fail(f"no recording and no macOS `say` for {sentence!r}: put a 16-bit PCM mono WAV in "
              f"{HERE / 'recordings'} named <case id>.wav")
     except subprocess.CalledProcessError as exc:
         fail(f"`say` failed for {sentence!r}: {exc.stderr.decode(errors='replace').strip()}")
+    except subprocess.TimeoutExpired:
+        return False
+    return True
+
+
+def synthesize(sentence: str, out: Path) -> None:
+    # `say` occasionally hangs (seen in a full run, on a sentence that worked before and after)
+    for attempt in range(1, SAY_ATTEMPTS + 1):
+        if _say(sentence, out):
+            return
+        print(f"`say` did not finish within {SAY_TIMEOUT}s for {sentence!r} (attempt {attempt} of {SAY_ATTEMPTS})",
+              file=sys.stderr)
+    fail(f"`say` hung {SAY_ATTEMPTS} times for {sentence!r}: record it instead "
+         f"({HERE / 'recordings'}/<case id>.wav) or run again")
 
 
 def audio_for(case: dict, scratch: Path) -> tuple[int, np.ndarray]:
