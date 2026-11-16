@@ -14,3 +14,4 @@ tasks/
 .claude/
 graft/
 .ignore
+evals/results/

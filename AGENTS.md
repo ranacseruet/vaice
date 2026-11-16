@@ -14,9 +14,10 @@ uv sync --extra dev                              # setup: .venv from the committ
 .venv/bin/pytest --cov=vaice --cov-report=term-missing  # tests with line coverage
 .venv/bin/pytest tests/test_llamacpp.py -k history      # single test
 .venv/bin/vaice                                   # run; UI at http://127.0.0.1:7860
+.venv/bin/python evals/run.py --repeats 1 --cases open-safari,know-sky   # live tool-calling eval (needs llama-server; see evals/README.md)
 ```
 
-Ruff is configured (`pyproject.toml`: line length 120, lint rules in `[tool.ruff.lint]`); it is not a formatter, so no formatting step. Unit tests use fakes for the server and model responses. There is **no automated test against a real model or the browser mic**: verify the audio path by hand (run vaice with a compatible llama-server, ask a question, and check the `[llamacpp] time to first audio` log line).
+Ruff is configured (`pyproject.toml`: line length 120, lint rules in `[tool.ruff.lint]`); it is not a formatter, so no formatting step. Unit tests use fakes for the server and model responses. There is **no automated test against a real model or the browser mic**: verify the audio path by hand (run vaice with a compatible llama-server, ask a question, and check the `[llamacpp] time to first audio` log line). Claims about how the model behaves (tool-call rate, a prompt's effect) come from the live eval in `evals/` with repeats, per build/model/quantization, not from single runs; only its scoring logic is unit-tested and CI does not run it.
 
 ## Architecture
 

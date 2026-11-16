@@ -58,6 +58,7 @@ packages = ["src/vaice"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["evals"]  # tests/test_eval_scoring.py imports evals/scoring.py
 addopts = "--cov=vaice --cov-report=term-missing"
 
 [tool.ruff]

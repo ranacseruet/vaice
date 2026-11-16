@@ -1,0 +1,79 @@
+[
+  {
+    "definition": {
+      "type": "function",
+      "name": "run_shell",
+      "description": "Run a shell command on the user's Mac and return its output",
+      "parameters": {
+        "type": "object",
+        "properties": {"command": {"type": "string", "description": "The shell command to run"}},
+        "required": ["command"]
+      }
+    },
+    "result": "ok"
+  },
+  {
+    "definition": {
+      "type": "function",
+      "name": "open_app",
+      "description": "Open a macOS application by name",
+      "parameters": {
+        "type": "object",
+        "properties": {"name": {"type": "string", "description": "The application name, e.g. Safari"}},
+        "required": ["name"]
+      }
+    },
+    "result": "ok, done"
+  },
+  {
+    "definition": {
+      "type": "function",
+      "name": "web_search",
+      "description": "Search the web",
+      "parameters": {
+        "type": "object",
+        "properties": {"query": {"type": "string", "description": "What to search for"}},
+        "required": ["query"]
+      }
+    },
+    "result": "The top result says the topic is trending today, with coverage from several major outlets."
+  },
+  {
+    "definition": {
+      "type": "function",
+      "name": "set_volume",
+      "description": "Set the system volume 0-100",
+      "parameters": {
+        "type": "object",
+        "properties": {"level": {"type": "integer", "description": "Volume level from 0 (mute) to 100"}},
+        "required": ["level"]
+      }
+    },
+    "result": "ok, done"
+  },
+  {
+    "definition": {
+      "type": "function",
+      "name": "disk_space",
+      "description": "Report free disk space",
+      "parameters": {"type": "object", "properties": {}}
+    },
+    "result": "160 gigabytes free of 460"
+  },
+  {
+    "definition": {
+      "type": "function",
+      "name": "create_reminder",
+      "description": "Create a reminder",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "title": {"type": "string", "description": "What to be reminded of"},
+          "when": {"type": "string", "description": "When to remind, e.g. tomorrow at 9am"}
+        },
+        "required": ["title"]
+      }
+    },
+    "result": "ok, done"
+  }
+]

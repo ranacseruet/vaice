@@ -247,10 +247,12 @@ Known compatibility bounds in `pyproject.toml`:
 ```bash
 .venv/bin/pytest                                         # run all unit tests
 .venv/bin/pytest --cov=vaice --cov-report=term-missing   # run with line coverage
-.venv/bin/ruff check src tests                           # run linter
+.venv/bin/ruff check src tests evals                     # run linter
 ```
 
 CI (`.github/workflows/ci.yml`) runs Ruff and `pytest --cov=vaice` with `uv sync --locked` across Python 3.10 and 3.12 on macOS for every push to `main` and every pull request.
+
+The unit tests never touch a real model. To measure how reliably spoken commands turn into the right tool call (with repeats, on both the interleaved and a transcribe-then-route path), run the live eval in [`evals/`](evals/README.md) against a real `llama-server`: `.venv/bin/python evals/run.py`. It is run by hand, not in CI.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for contributor guidelines and how the fake `/v1/realtime` server and multi-threaded `fastrtc` test harnesses work.
 
@@ -270,6 +272,11 @@ src/vaice/
     llamacpp.py     llama-server /v1/realtime: parallel reply and transcription sessions on daemon threads, startup check
 tests/
   fake_realtime.py  Fake /v1/realtime WebSocket + HTTP server for testing LlamaCppResponder end to end
+evals/
+  run.py            Live tool-calling eval against a real llama-server (run by hand; see evals/README.md)
+  scoring.py        Pure scoring and aggregation for the eval (unit-tested)
+  cases.json        Spoken commands and expected tool calls; tools.json holds the stub tool set
+  recordings/       Optional real-mic clips, <case id>.wav
 ```
 
 ## License
