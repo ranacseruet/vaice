@@ -3,6 +3,7 @@ import importlib
 import itertools
 import logging
 import signal
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -472,7 +473,7 @@ def test_a_failure_before_the_reply_starts_is_reported_in_the_ui_and_does_not_es
 def test_a_failure_reading_the_history_is_recorded_on_the_turn(monkeypatch, caplog):
     conversation = Conversation()
 
-    def boom(before):
+    def boom(before, tools=False):
         raise RuntimeError("history exploded")
 
     monkeypatch.setattr(conversation, "history", boom)
@@ -764,3 +765,109 @@ def test_vaice_up_exits_with_the_servers_message_and_starts_nothing_else(monkeyp
             app.main()
     finally:
         signal.signal(signal.SIGINT, previous)
+
+
+# -- assistant mode
+
+
+class FakeAssistant:
+    name = "assistant"
+    skills = SimpleNamespace(names=("disk_space", "battery_status"))  # the one attribute main() reads
+
+
+def _assistant_main(monkeypatch, tmp_path, tools=None):
+    def no_tools(url):
+        raise AssertionError("assistant mode must not read llama-server's /tools")
+
+    monkeypatch.setattr(app.config, "MODE", "assistant")
+    monkeypatch.setattr(app, "AssistantResponder", FakeAssistant)
+    monkeypatch.setattr(app, "fetch_tools", no_tools)
+    monkeypatch.setattr(app, "write_capable_tools", no_tools)
+    return _main_with(monkeypatch, tmp_path, tools=tools)
+
+
+def test_assistant_mode_uses_the_assistant_responder_and_skips_the_tools_block(monkeypatch, tmp_path, caplog):
+    with caplog.at_level(logging.INFO, logger="vaice.app"):
+        launched = _assistant_main(monkeypatch, tmp_path)
+
+    assert launched  # the UI started
+    assert "assistant mode: skills disk_space, battery_status" in caplog.text
+    assert "ignored in assistant mode" not in caplog.text  # VAICE_LLAMACPP_TOOLS is unset
+
+
+def test_assistant_mode_never_builds_the_chat_responder(monkeypatch, tmp_path):
+    monkeypatch.setattr(app, "_chat_responder", lambda: pytest.fail("chat responder built in assistant mode"))
+    assert _assistant_main(monkeypatch, tmp_path)
+
+
+def test_assistant_mode_warns_that_the_server_tools_setting_is_ignored(monkeypatch, tmp_path, caplog):
+    with caplog.at_level(logging.WARNING, logger="vaice.app"):
+        _assistant_main(monkeypatch, tmp_path, tools=True)
+
+    assert "VAICE_LLAMACPP_TOOLS is ignored in assistant mode" in caplog.text
+
+
+def test_chat_mode_is_unchanged_by_the_assistant_responder_existing(monkeypatch, tmp_path, caplog):
+    fetched = []
+    monkeypatch.setattr(app, "AssistantResponder", lambda: pytest.fail("assistant built in chat mode"))
+    monkeypatch.setattr(app.config, "MODE", "chat")
+
+    with caplog.at_level(logging.INFO, logger="vaice.app"):
+        _main_with(monkeypatch, tmp_path, fetch_tools=lambda url: fetched.append(url) or [{"name": "get_info"}],
+                   write_capable_tools=lambda url: [])
+
+    assert fetched and "tools enabled: get_info" in caplog.text
+    assert "assistant mode" not in caplog.text
+
+
+def test_the_subtitle_names_the_mode(monkeypatch):
+    monkeypatch.setattr(app.config, "MODE", "chat")
+    assert app._subtitle() == "llama-server · speech-to-speech"
+    monkeypatch.setattr(app.config, "MODE", "assistant")
+    assert app._subtitle() == "llama-server · assistant"
+
+    stream = build_stream(FakeResponder(), Conversation())
+    subtitles = [c for c in stream.ui.get_config_file()["components"]
+                 if c["type"] == "markdown" and "assistant" in str(c["props"].get("value", ""))]
+    assert len(subtitles) == 1
+
+
+# --- tool history reaches only the responders that ask for it
+
+
+def _conversation_with_a_skill_turn():
+    conversation = Conversation()
+    first = conversation.start_turn()
+    first.set_user_text("how long has it been on?")
+    first.add_tool_event("system_info", "{}", "up 3 days")
+    first.set_assistant_text("Three days.")
+    first.finish()
+    return conversation
+
+
+def test_a_responder_with_tool_history_gets_the_tool_results_in_its_history():
+    responder = FakeResponder()
+    responder.tool_history = True
+
+    list(make_handler(responder, _conversation_with_a_skill_turn())(AUDIO))
+
+    assert responder.calls[0][0] == [("user", "how long has it been on?"), ("tool", "system_info: up 3 days"),
+                                     ("assistant", "Three days.")]
+
+
+def test_a_responder_without_tool_history_never_gets_tool_entries():
+    responder = FakeResponder()
+
+    list(make_handler(responder, _conversation_with_a_skill_turn())(AUDIO))
+
+    assert responder.calls[0][0] == [("user", "how long has it been on?"), ("assistant", "Three days.")]
+
+
+def test_the_llamacpp_responder_never_receives_tool_entries(monkeypatch):
+    seen = []
+    responder = LlamaCppResponder("http://127.0.0.1:9", "Be brief.")
+    monkeypatch.setattr(responder, "respond", lambda audio, history, turn: iter(seen.append(list(history)) or []))
+
+    list(make_handler(responder, _conversation_with_a_skill_turn())(AUDIO))
+
+    assert seen == [[("user", "how long has it been on?"), ("assistant", "Three days.")]]

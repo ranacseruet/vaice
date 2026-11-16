@@ -4,10 +4,12 @@ A live harness that measures how reliably spoken commands turn into the right to
 
 ## What it measures
 
-Each case is a spoken sentence and an expectation (see [Cases](#cases)). Every case runs `--repeats` times on two paths:
+Each case is a spoken sentence and an expectation (see [Cases](#cases)). Every case runs `--repeats` times on two paths (default), plus an opt-in third, `assistant`:
 
 - **interleaved**: the app's own path. `LlamaCppResponder` sends the audio over `/v1/realtime` with the stub tools declared, the model answers in text and audio, and the tool calls it makes are recorded. Time to first audio is measured. Tool results are fed back, so a call is followed by a spoken answer, as in the app.
 - **text**: the audio is transcribed by a realtime `transcription` session, then the transcript is routed through `POST /v1/chat/completions` with the same tools (`temperature` 0). Routing only: no tool result is fed back. Time to decision is transcription plus routing.
+
+- **assistant** (opt-in: `--paths assistant`): assistant mode's own code up to the answer text, without `/tts`. The audio is transcribed, then `build_messages` and `decide` (the brain/skills loop of `AssistantResponder`, `POST /v1/chat/completions`) run with the real skill definitions and the prompt `VAICE_ASSISTANT_PROMPT`. The skills are stubbed with canned results (`disk_space` says `160 gigabytes free of 460 gigabytes`, and so on; nothing is executed), so the calls are scored like the other paths, and the final answer text is recorded. Time to answer text is transcription plus the brain rounds. It has its own cases (`assistant_cases.json`, 35 cases, 14 of them must-not-call), used automatically when `assistant` is the only path; `--cases-file` picks another file. It is not in the default `--paths` because its tools are the app's skills, not `tools.json`.
 
 The tools in `tools.json` are stubs with canned results (`disk_space` says `160 gigabytes free of 460`, and so on); nothing is ever executed on your machine.
 
@@ -37,7 +39,11 @@ A run is `correct`, or one of:
 .venv/bin/python evals/run.py --prompt "Use the available tools to answer questions about this system."
 ```
 
-Options: `--url`, `--paths interleaved,text`, `--repeats N` (default 5), `--cases id,id`, `--prompt TEXT` (the reply instructions on the interleaved path and the system prompt on the text path; the default is `VAICE_LLAMACPP_PROMPT` for interleaved and a short spoken-assistant prompt for text), `--history/--no-history` (default on: two fixed earlier exchanges, `Hey, are you there?` / `Yes, I'm here.` and `What day is it?` / `It's Monday.`), `--out FILE` (default `evals/results/<UTC timestamp>.json`, which is gitignored) and `--label TEXT`. Ctrl+C stops the run and reports the runs so far.
+```bash
+.venv/bin/python evals/run.py --paths assistant --repeats 1      # assistant mode: its own cases and skills
+```
+
+Options: `--url`, `--paths interleaved,text,assistant` (default `interleaved,text`), `--cases-file FILE` (a file in `evals/` or a path; default `cases.json`, or `assistant_cases.json` when `--paths` is `assistant` alone), `--repeats N` (default 5), `--cases id,id`, `--prompt TEXT` (the reply instructions on the interleaved path and the system prompt on the text path; the default is `VAICE_LLAMACPP_PROMPT` for interleaved and a short spoken-assistant prompt for text), `--history/--no-history` (default on: two fixed earlier exchanges, `Hey, are you there?` / `Yes, I'm here.` and `What day is it?` / `It's Monday.`), `--out FILE` (default `evals/results/<UTC timestamp>.json`, which is gitignored) and `--label TEXT`. Ctrl+C stops the run and reports the runs so far.
 
 The full set is about 33 cases x 2 paths x 5 repeats, around 330 runs; use `--cases` and `--repeats 1` while iterating.
 
@@ -63,6 +69,8 @@ The results file holds the config, server info, label, and every run's raw recor
 - `tools`: exactly these tools are called (order and repeated calls do not matter; an extra different tool is a `missed`). `args` is optional and matches per tool as a subset: strings compare case-insensitively after stripping, numbers by value (`20`, `20.0` and `"20"` agree), and a list is a set of accepted alternatives (`"name": ["Notes", "Notes app"]`). If a tool is called more than once, one matching call is enough.
 - `{"tools": []}`: no tool may be called (chit-chat, general knowledge).
 - `any_of`: at least one call, and every call is to a tool in the list. Arguments are not checked.
+
+`assistant_cases.json` has the same shape; its `tools` name the skills in `src/vaice/skills.py` (`disk_space`, `battery_status`, `system_info`, `top_processes`, `find_files`), `any_of` is not used, and its must-not-call cases (`{"tools": []}`) include things a skill might wrongly match (the time, opening an app, the weather, a timer, volume). `tests/test_eval_scoring.py` checks that every expected tool is a real skill and every skill is exercised.
 
 To add a case: append an entry with a unique `id` (a slug, also the recording's file name) and an expectation using the tools in `tools.json`, then run `.venv/bin/pytest tests/test_eval_scoring.py` to check the files are consistent. To add a tool, add it to `tools.json` as `{"definition": <flat Responses API definition>, "result": "<canned result>"}`.
 

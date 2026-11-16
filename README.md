@@ -22,6 +22,17 @@ browser mic ─WebRTC─▶ fastrtc (VAD: detects you stopped talking)
                   Conversation (~/.vaice/conversation.json) ──▶ transcript in the UI
 ```
 
+That is the default (chat) mode. With `VAICE_MODE=assistant`, the same front end drives an
+`AssistantResponder` instead: transcribe, a chat-completions brain that may call skills, then
+speech from `/tts` sentence by sentence (see [Assistant mode](#assistant-mode)).
+
+```
+fastrtc ─audio─▶ AssistantResponder ─▶ /v1/realtime transcription ─▶ ChatBrain /v1/chat/completions
+                       ▲                                               │ asks for a skill?
+                       │ PCM16 per sentence                            ▼
+                  llama-server /tts ◀── voice.sentences(speakable(answer)) ◀── skills (run in vaice)
+```
+
 ## Quickstart (From Scratch in 3 Steps)
 
 ### 1. Install `llama-server`
@@ -116,6 +127,9 @@ Precedence: variables already in the environment (e.g. `set -a; source .env; set
 | `VAICE_LLAMACPP_MODEL` | `LiquidAI/LFM3-Audio-2B-GGUF:Q4_K_M` | `vaice up` only: the `-hf` model of the `llama-server` it starts |
 | `VAICE_LLAMACPP_SERVER_ARGS` | *(empty)* | `vaice up` only: extra arguments for the `llama-server` it starts, split like a shell would (e.g. `--tools get_info,read_file`) |
 | `VAICE_LLAMACPP_START_TIMEOUT` | `900` | `vaice up` only: seconds to wait for the started `llama-server` to become ready; the first run downloads about 1 GB |
+| `VAICE_MODE` | `chat` | `chat` = speech-to-speech replies from the model; `assistant` = transcribe, a brain that can call vaice's own skills, then `/tts` (see *Assistant mode* below). Anything else exits at startup |
+| `VAICE_ASSISTANT_PROMPT` | `You are a voice assistant on the user's Mac. …` (answer in one or two short spoken sentences, use a tool only for questions about this computer) | Assistant mode only: the brain's system prompt (the current date and time is added) |
+| `VAICE_VOICE` | `female` | Assistant mode only: the `/tts` voice, `female` or `male` |
 | `VAICE_LLAMACPP_PROMPT` | `Reply naturally and concisely in 1 to 2 spoken sentences.` | Reply instructions; `vaice` prepends `Respond with interleaved text and audio.` |
 | `VAICE_LLAMACPP_TIMEOUT` | `120` | Seconds to open a connection or the longest silence from `llama-server` before a reply fails. It is also the total bound for a tool call: when it passes — or the reply is stopped — vaice stops waiting for the call and discards the result (the underlying request is not cancelled; the server may still run/finish the tool). The parallel transcription session's silence budget is this setting too, but its connection **handshake** uses a fixed 2 s (transcription is best-effort and degrades to `(inaudible)`), so raising this cannot extend a slow-handshake server |
 | `VAICE_LLAMACPP_MAX_OUTPUT_TOKENS` | `1024` | Reply cap sent as the realtime session's `max_output_tokens`; text tokens and audio frames count together. Raise it for longer spoken replies |
@@ -191,6 +205,38 @@ marker). The transcript that is recorded and shown is also cleaned of the model'
 no weather tool in llama-server — a question it cannot answer with the configured tools is refused
 (or, with `exec_shell_command` enabled, the model improvises a shell command, which is one more
 reason to keep that tool out).
+
+### Assistant mode
+`VAICE_MODE=assistant` (default `chat`) swaps the speech-to-speech reply for separate steps, so the
+assistant can answer questions about your Mac from real data:
+
+1. the realtime `transcription` session turns your audio into text;
+2. a **brain** (`llama-server`'s `POST /v1/chat/completions`, temperature 0) reads the transcript, the
+   earlier turns and the current date and time, and either answers or asks for a skill;
+3. **skills** run inside vaice and their result goes back to the brain, which then answers (at most
+   three rounds; the last one must answer);
+4. the answer is cleaned for speech (markdown, links, paths and units become words), split into
+   sentences, and each sentence is spoken through llama-server's `POST /tts` (`pcm16`, streamed;
+   `VAICE_VOICE=female|male`).
+
+The skills are read-only and run on your machine with vaice's own permissions, not through llama-server
+(its `--tools` and `VAICE_LLAMACPP_TOOLS` are unused in this mode and vaice warns if the latter is set):
+
+| Skill | Answers |
+|---|---|
+| `disk_space` | free and total disk space |
+| `battery_status` | charge, whether it is plugged in or charging, time left |
+| `system_info` | macOS version, uptime, memory |
+| `top_processes` | the apps using the most memory or CPU (`by`, `count`) |
+| `find_files` | files whose name contains a word, in your home, desktop, documents or downloads folder |
+
+Earlier skill results stay in the conversation's prompt (each capped at 300 characters), so a follow-up such as "and how much memory does it have?" is answered from the real result. Process names are spoken in a cleaned form (`Google Chrome Helper (Renderer)` counts as `Google Chrome`). Long paths are left out of the spoken answer (only a file's name is spoken); the full detail of every
+skill call lands in the collapsed *Tool activity* panel. Limits: the skills use macOS commands, so
+assistant mode is macOS only; a request can use one or two skills (the brain is told to use a tool
+only for questions about this computer, and answers everything else itself); and because each
+sentence is synthesized separately, prosody is less natural than the speech-to-speech path. The
+prompt is `VAICE_ASSISTANT_PROMPT`. `python evals/run.py --paths assistant` measures how reliably
+spoken questions reach the right skill (see `evals/README.md`).
 
 ### Startup & Shutdown
 At startup, `vaice` checks `llama-server`:
@@ -291,17 +337,22 @@ src/vaice/
   lifecycle.py      Stop signal handler: Ctrl+C asks the app and its responders to abandon in-flight calls
   config.py         Environment-driven settings (.env.example lists them with defaults)
   conversation.py   Turn / Conversation: history windowing, barge-in trimming, atomic JSON persistence, error notes
+  brain.py          Assistant mode: ChatBrain, one /v1/chat/completions call with tools (no server-side tool execution)
+  skills.py         Assistant mode: the read-only skills (disk, battery, system, processes, files) and the Skills registry
+  voice.py          Assistant mode: speakable() cleans text for speech, sentences() splits it for /tts
   audio.py          Mic frame → mono PCM16 at the model's rate (resampled via scipy) and back to float32
   responders/
     base.py         Responder protocol (audio + history in → audio chunks out; reports transcript and spoken text)
     __init__.py     Responder package
     llamacpp.py     llama-server /v1/realtime: parallel reply and transcription sessions on daemon threads, startup check
+    assistant.py    Assistant mode: transcribe, brain + skills loop, streamed /tts per sentence, on one daemon thread
 tests/
   fake_realtime.py  Fake /v1/realtime WebSocket + HTTP server for testing LlamaCppResponder end to end
 evals/
   run.py            Live tool-calling eval against a real llama-server (run by hand; see evals/README.md)
   scoring.py        Pure scoring and aggregation for the eval (unit-tested)
   cases.json        Spoken commands and expected tool calls; tools.json holds the stub tool set
+  assistant_cases.json  Spoken questions and expected skills for the assistant path (`--paths assistant`)
   recordings/       Optional real-mic clips, <case id>.wav
 ```
 

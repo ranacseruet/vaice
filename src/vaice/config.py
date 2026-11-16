@@ -38,6 +38,15 @@ def _flag(name: str, *, default: bool) -> bool:
     raise SystemExit(f"vaice: {name} must be a boolean (1/true/yes/on or 0/false/no/off), got {raw!r}")
 
 
+def _choice(name: str, *, default: str, choices: tuple[str, ...]) -> str:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    if raw not in choices:
+        raise SystemExit(f"vaice: {name} must be {' or '.join(choices)}, got {raw!r}")
+    return raw
+
+
 def server_base(url: str) -> str:
     """scheme://host:port of `url`: any path suffix is dropped. Raises ValueError if there is no host."""
     parts = urlsplit(url if "://" in url else f"http://{url}")
@@ -112,6 +121,18 @@ def _arguments(name: str) -> list[str]:
 
 LLAMACPP_SERVER_ARGS = _arguments("VAICE_LLAMACPP_SERVER_ARGS")
 LLAMACPP_START_TIMEOUT = _number("VAICE_LLAMACPP_START_TIMEOUT", default="900", kind=float)
+
+# "chat": one model hears, decides and speaks in one interleaved pass (responders/llamacpp.py).
+# "assistant": separate steps (transcribe, a chat-completions brain, skills run by vaice, llama-server's
+# /tts) — see responders/assistant.py. The prompt and voice below apply to assistant mode only.
+MODE = _choice("VAICE_MODE", default="chat", choices=("chat", "assistant"))
+ASSISTANT_PROMPT = _env(
+    "VAICE_ASSISTANT_PROMPT",
+    default="You are a voice assistant on the user's Mac. Your reply is spoken aloud: answer in one or two short "
+            "plain sentences, with no lists, symbols or file paths. Use a tool only when the question is about "
+            "this computer; answer everything else yourself.",
+)
+VOICE = _choice("VAICE_VOICE", default="female", choices=("female", "male"))
 
 PORT = _number("VAICE_PORT", default="7860", kind=int)
 

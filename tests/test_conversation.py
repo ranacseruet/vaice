@@ -511,3 +511,85 @@ def test_a_capped_output_is_capped_only_once():
     turn.add_tool_event("again", "{}", turn.tool_events[0]["output"])
 
     assert turn.tool_events[1]["output"] == once  # the marker is not doubled
+
+
+# --- tool results in the history (responders with `tool_history`)
+
+
+def exchange_with_tools(c, user, assistant, *events, finish=True):
+    turn = c.start_turn()
+    turn.set_user_text(user)
+    for name, output in events:
+        turn.add_tool_event(name, "{}", output)
+    turn.set_assistant_text(assistant)
+    if finish:
+        turn.finish()
+    return turn
+
+
+def test_history_without_tools_is_what_it_always_was_even_when_turns_have_tool_events():
+    c = Conversation()
+    exchange_with_tools(c, "memory?", "48 gigabytes.", ("system_info", "48 gigabytes of memory"))
+
+    expected = [("user", "memory?"), ("assistant", "48 gigabytes.")]
+    assert c.history(before=c.start_turn()) == expected
+    assert c.history(before=c.start_turn(), tools=False) == expected
+
+
+def test_history_with_tools_puts_each_result_between_the_user_and_assistant_messages():
+    c = Conversation()
+    exchange_with_tools(c, "up and memory?", "Three days, 48 gigabytes.",
+                        ("system_info", "up 3 days"), ("system_info", "48 gigabytes of memory"))
+    exchange(c, "thanks", "You are welcome.")
+
+    assert c.history(before=c.start_turn(), tools=True) == [
+        ("user", "up and memory?"),
+        ("tool", "system_info: up 3 days"),
+        ("tool", "system_info: 48 gigabytes of memory"),
+        ("assistant", "Three days, 48 gigabytes."),
+        ("user", "thanks"),
+        ("assistant", "You are welcome."),
+    ]
+
+
+def test_a_tool_result_in_history_is_capped_at_300_characters():
+    c = Conversation()
+    exchange_with_tools(c, "q", "a", ("find_files", "x" * 500))
+
+    history = c.history(before=c.start_turn(), tools=True)
+
+    role, text = history[1]
+    assert role == "tool"
+    assert len(text) == len("find_files: ") + 300
+    assert text.endswith("... (truncated)")
+
+
+def test_tool_results_follow_the_same_windowing_and_dropping_rules_as_the_turns():
+    c = Conversation(window=2)  # blocks of 2 turns
+    exchange_with_tools(c, "q0", "a0", ("disk_space", "r0"))
+    exchange_with_tools(c, "q1", "a1", ("disk_space", "r1"))
+    exchange_with_tools(c, "q2", "a2", ("disk_space", "r2"))
+    c.start_turn()  # its transcript never arrives: dropped
+    probe = c.start_turn()
+
+    assert c.history(before=probe, tools=True) == [
+        ("user", "q2"), ("tool", "disk_space: r2"), ("assistant", "a2")]
+
+
+def test_an_interrupted_turn_with_no_spoken_text_carries_no_tool_messages():
+    c = Conversation()
+    exchange_with_tools(c, "q", "", ("disk_space", "160 gigabytes free"), finish=False)
+
+    assert c.history(before=c.start_turn(), tools=True) == [("user", "q")]
+
+
+def test_tool_results_survive_a_reload_from_disk(tmp_path):
+    path = tmp_path / "c.json"
+    c = Conversation(path)
+    exchange_with_tools(c, "q", "a", ("battery_status", "80 percent"))
+    c.start_turn()
+
+    loaded = Conversation(path)
+
+    assert loaded.history(before=loaded.start_turn(), tools=True)[:3] == [
+        ("user", "q"), ("tool", "battery_status: 80 percent"), ("assistant", "a")]

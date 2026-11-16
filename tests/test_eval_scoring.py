@@ -288,3 +288,27 @@ def test_the_required_sentences_are_cases():
         "Why is the sky blue?",
         "Open the terminal and then set the volume to fifty.",
     } <= said
+
+
+def test_the_assistant_cases_are_consistent_with_the_skills():
+    from vaice.skills import default_skills
+
+    cases = load("assistant_cases.json")
+    skills = default_skills()
+    ids = [c["id"] for c in cases]
+    assert len(ids) == len(set(ids))
+    assert len(cases) >= 30
+    for c in cases:
+        assert c["say"].strip()
+        expected = c["expect"]["tools"]
+        assert isinstance(expected, list), c["id"]
+        assert set(expected) <= set(skills.names), c["id"]
+        assert set(c["expect"].get("args", {})) <= set(expected), c["id"]
+        for tool, wanted in c["expect"].get("args", {}).items():
+            properties = next(s for s in skills.skills if s.name == tool).parameters["properties"]
+            assert set(wanted) <= set(properties), c["id"]
+        scoring.score(c["expect"], [])  # the expectation is well formed
+
+    assert sum(1 for c in cases if c["expect"]["tools"] == []) >= 10
+    assert {name for c in cases for name in c["expect"]["tools"]} == set(skills.names)  # every skill is exercised
+    assert sum(1 for c in cases if len(c["expect"]["tools"]) == 2) >= 3
