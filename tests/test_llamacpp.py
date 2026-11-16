@@ -483,10 +483,12 @@ def test_a_tool_round_stopped_mid_way_skips_the_rest_and_hangs_up(realtime):
     assert drive(tool_responder(server, executor), turn=turn) == []
 
     conn = server.conversation()
+    # The reply ends before its socket is closed (the close runs in the background, #90), so the server
+    # may still be reading what was sent: its record is complete only once it has seen the hang-up.
+    assert conn.closed.wait(3)
     outputs = [e["item"]["call_id"] for e in conn.events
                if e["type"] == "conversation.item.create" and e.get("item", {}).get("type") == "function_call_output"]
     assert outputs == ["call_1"]  # the second call noticed the stop and never ran
-    assert conn.closed.wait(3)
     wait_for_threads_to_end()
 
 
