@@ -22,6 +22,7 @@ from vaice.skills import (
     parse_boot_time,
     parse_memory,
     parse_processes,
+    speakable_process_name,
     spoken_duration,
 )
 
@@ -150,16 +151,49 @@ def test_parse_processes_skips_the_header_and_keeps_names_with_spaces():
 def test_describe_processes_by_memory_and_by_cpu():
     rows = parse_processes(PS_OUTPUT)
     assert describe_processes(rows, "memory", 3) == (
-        "Google Chrome 10 percent of memory, Slack 4 percent, Xcode 4 percent")
+        "Google Chrome 12 percent of memory, Slack 4 percent, Xcode 4 percent")
     assert describe_processes(rows, "cpu", 2) == (
-        "Google Chrome 12 percent of the processor, Google Chrome Helper 9 percent")
-    assert describe_processes(rows, "memory", 1) == "Google Chrome 10 percent of memory"
+        "Google Chrome 21 percent of the processor, Slack 4 percent")  # the helper counts with its app
+    assert describe_processes(rows, "memory", 1) == "Google Chrome 12 percent of memory"
     assert describe_processes([], "memory", 3) == "no processes were listed"
 
 
 def test_describe_processes_adds_up_helpers_that_share_a_name():
     rows = [(1.0, 3.0, "Chrome Helper"), (1.0, 3.0, "Chrome Helper"), (1.0, 4.0, "Slack")]
-    assert describe_processes(rows, "memory", 2) == "Chrome Helper 6 percent of memory, Slack 4 percent"
+    assert describe_processes(rows, "memory", 2) == "Chrome 6 percent of memory, Slack 4 percent"
+
+
+@pytest.mark.parametrize(("raw", "spoken"), [
+    ("Google Chrome Helper (Aperitif Renderer)", "Google Chrome"),
+    ("Google Chrome Helper (GPU)", "Google Chrome"),
+    ("Google Chrome Helper", "Google Chrome"),
+    ("Google Chrome", "Google Chrome"),
+    ("com.apple.Virtualization.VirtualMachine", "VirtualMachine"),
+    ("com.apple.WebKit.Networking", "Networking"),
+    ("llama-server", "llama-server"),
+    ("opencode", "opencode"),
+    ("Helper", "Helper"),  # never emptied
+    ("(Renderer)", "(Renderer)"),
+    ("Python 3.12", "Python 3.12"),  # a version is not reverse DNS
+    ("a.b", "a.b"),  # two parts only
+    ("Slack Helper (Renderer) (GPU)", "Slack Helper (Renderer)"),  # one trailing group at a time
+])
+def test_a_process_name_is_made_speakable(raw, spoken):
+    assert speakable_process_name(raw) == spoken
+
+
+def test_top_processes_are_cleaned_aggregated_and_sorted():
+    rows = [(1.0, 3.0, "com.apple.Virtualization.VirtualMachine"), (0.1, 3.0, "opencode"),
+            (2.0, 11.0, "Google Chrome Helper (Aperitif Renderer)"), (3.0, 11.0, "Google Chrome Helper (GPU)"),
+            (0.5, 2.0, "Google Chrome"), (0.2, 2.5, "llama-server")]
+
+    spoken = describe_processes(rows, "memory", 5)
+
+    assert spoken == ("Google Chrome 24 percent of memory, VirtualMachine 3 percent, opencode 3 percent, "
+                      "llama-server 2 percent")
+    assert "Helper" not in spoken
+    assert "(" not in spoken
+    assert "com.apple" not in spoken
 
 
 def test_describe_files_without_results():
@@ -369,8 +403,8 @@ def test_top_processes_ranks_by_memory_by_default_and_by_cpu_on_request(commands
     by_cpu = skills.run("top_processes", '{"by": "CPU", "count": 2}')
 
     assert commands.ran == [["ps", "-Aceo", "pcpu,pmem,comm", "-m"], ["ps", "-Aceo", "pcpu,pmem,comm", "-r"]]
-    assert by_memory.speech == "Google Chrome 10 percent of memory, Slack 4 percent, Xcode 4 percent"
-    assert by_cpu.speech == "Google Chrome 12 percent of the processor, Google Chrome Helper 9 percent"
+    assert by_memory.speech == "Google Chrome 12 percent of memory, Slack 4 percent, Xcode 4 percent"
+    assert by_cpu.speech == "Google Chrome 21 percent of the processor, Slack 4 percent"
     assert "12.3% cpu  9.8% mem  Google Chrome" in by_memory.detail
 
 
@@ -378,7 +412,7 @@ def test_top_processes_clamps_the_count_and_refuses_what_it_cannot_read(commands
     commands.output["ps"] = PS_OUTPUT
     skills = default_skills()
 
-    assert skills.run("top_processes", '{"count": 99}').speech.count("percent") == 5  # capped at 5
+    assert skills.run("top_processes", '{"count": 99}').speech.count("percent") == 4  # all four names; the cap is 5
     assert skills.run("top_processes", '{"count": 0}').speech.count("percent") == 1
     assert "by must be memory or cpu" in skills.run("top_processes", '{"by": "disk"}').speech
     assert "count must be a whole number" in skills.run("top_processes", '{"count": "many"}').speech

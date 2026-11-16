@@ -58,7 +58,7 @@ def make_handler(responder: Responder, conversation: Conversation):
         turn: Turn | None = None
         try:
             turn = conversation.start_turn()
-            history = conversation.history(before=turn)
+            history = conversation.history(before=turn, tools=getattr(responder, "tool_history", False))
             first = True
             for chunk in responder.respond(audio, history, turn):
                 if first:

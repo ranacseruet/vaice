@@ -23,6 +23,10 @@ class Responder(Protocol):
       to the first audio; transcribing first is fine when the reply needs the text.
     `history` holds the earlier turns as text. `turn.closed` is set when the next turn starts;
     a responder may poll it to stop generating.
+
+    Optional attribute `tool_history: bool` (False when absent): a responder that sets it True also gets
+    the earlier turns' tool results in `history`, as `("tool", "<name>: <output>")` entries between a
+    turn's user and assistant messages (output capped). The others never see them.
     """
 
     name: str  # short label shown in logs, e.g. "llamacpp"

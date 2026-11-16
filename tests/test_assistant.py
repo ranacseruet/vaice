@@ -656,3 +656,54 @@ def test_an_app_stop_that_the_reply_thread_notices_first_is_still_logged_by_the_
         assert start_thread(lambda: next(gen, None), "fastrtc-app-stop").join() is None
 
     assert assistant.ABANDONED in caplog.text
+
+
+# --- earlier skill results in the prompt
+
+
+def test_the_assistant_asks_for_tool_history_and_the_chat_responder_does_not():
+    from vaice.responders.llamacpp import LlamaCppResponder
+
+    assert AssistantResponder.tool_history is True
+    assert not getattr(LlamaCppResponder, "tool_history", False)
+
+
+def test_a_tool_entry_becomes_a_tool_exchange_before_the_turns_answer():
+    history = [("user", "How long has it been on?"), ("tool", "system_info: up 3 days, 48 gigabytes of memory"),
+               ("assistant", "Three days.")]
+
+    messages = assistant.build_messages("Be brief.", history, "And memory?")
+
+    assert messages[1:] == [
+        {"role": "user", "content": "How long has it been on?"},
+        {"role": "assistant", "content": "", "tool_calls": [
+            {"id": "h1", "type": "function", "function": {"name": "system_info", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "h1", "content": "up 3 days, 48 gigabytes of memory"},
+        {"role": "assistant", "content": "Three days."},
+        {"role": "user", "content": "And memory?"},
+    ]
+
+
+def test_several_tool_entries_of_one_turn_are_one_assistant_message_with_several_calls():
+    history = [("user", "q"), ("tool", "disk_space: 160 free"), ("tool", "battery_status: 80%"),
+               ("assistant", "a")]
+
+    messages = assistant.build_messages("p", history, "next")[2:-2]
+
+    assert [m["role"] for m in messages] == ["assistant", "tool", "tool"]
+    assert [c["function"]["name"] for c in messages[0]["tool_calls"]] == ["disk_space", "battery_status"]
+    assert [m["tool_call_id"] for m in messages[1:]] == [c["id"] for c in messages[0]["tool_calls"]]
+    assert [m["content"] for m in messages[1:]] == ["160 free", "80%"]
+
+
+def test_tool_call_ids_are_unique_across_turns_and_output_may_hold_colons():
+    history = [("user", "q1"), ("tool", "disk_space: a: b"), ("assistant", "a1"),
+               ("user", "q2"), ("tool", "disk_space: c"), ("assistant", "a2")]
+
+    messages = assistant.build_messages("p", history, "q3")
+    ids = [c["id"] for m in messages for c in m.get("tool_calls", [])]
+
+    assert len(ids) == len(set(ids)) == 2
+    assert [m["content"] for m in messages if m["role"] == "tool"] == ["a: b", "c"]
+    assert [m["role"] for m in messages] == [
+        "system", "user", "assistant", "tool", "assistant", "user", "assistant", "tool", "assistant", "user"]

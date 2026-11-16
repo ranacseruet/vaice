@@ -473,7 +473,7 @@ def test_a_failure_before_the_reply_starts_is_reported_in_the_ui_and_does_not_es
 def test_a_failure_reading_the_history_is_recorded_on_the_turn(monkeypatch, caplog):
     conversation = Conversation()
 
-    def boom(before):
+    def boom(before, tools=False):
         raise RuntimeError("history exploded")
 
     monkeypatch.setattr(conversation, "history", boom)
@@ -830,3 +830,44 @@ def test_the_subtitle_names_the_mode(monkeypatch):
     subtitles = [c for c in stream.ui.get_config_file()["components"]
                  if c["type"] == "markdown" and "assistant" in str(c["props"].get("value", ""))]
     assert len(subtitles) == 1
+
+
+# --- tool history reaches only the responders that ask for it
+
+
+def _conversation_with_a_skill_turn():
+    conversation = Conversation()
+    first = conversation.start_turn()
+    first.set_user_text("how long has it been on?")
+    first.add_tool_event("system_info", "{}", "up 3 days")
+    first.set_assistant_text("Three days.")
+    first.finish()
+    return conversation
+
+
+def test_a_responder_with_tool_history_gets_the_tool_results_in_its_history():
+    responder = FakeResponder()
+    responder.tool_history = True
+
+    list(make_handler(responder, _conversation_with_a_skill_turn())(AUDIO))
+
+    assert responder.calls[0][0] == [("user", "how long has it been on?"), ("tool", "system_info: up 3 days"),
+                                     ("assistant", "Three days.")]
+
+
+def test_a_responder_without_tool_history_never_gets_tool_entries():
+    responder = FakeResponder()
+
+    list(make_handler(responder, _conversation_with_a_skill_turn())(AUDIO))
+
+    assert responder.calls[0][0] == [("user", "how long has it been on?"), ("assistant", "Three days.")]
+
+
+def test_the_llamacpp_responder_never_receives_tool_entries(monkeypatch):
+    seen = []
+    responder = LlamaCppResponder("http://127.0.0.1:9", "Be brief.")
+    monkeypatch.setattr(responder, "respond", lambda audio, history, turn: iter(seen.append(list(history)) or []))
+
+    list(make_handler(responder, _conversation_with_a_skill_turn())(AUDIO))
+
+    assert seen == [[("user", "how long has it been on?"), ("assistant", "Three days.")]]

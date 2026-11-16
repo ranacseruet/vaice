@@ -230,7 +230,7 @@ The skills are read-only and run on your machine with vaice's own permissions, n
 | `top_processes` | the apps using the most memory or CPU (`by`, `count`) |
 | `find_files` | files whose name contains a word, in your home, desktop, documents or downloads folder |
 
-Long paths are left out of the spoken answer (only a file's name is spoken); the full detail of every
+Earlier skill results stay in the conversation's prompt (each capped at 300 characters), so a follow-up such as "and how much memory does it have?" is answered from the real result. Process names are spoken in a cleaned form (`Google Chrome Helper (Renderer)` counts as `Google Chrome`). Long paths are left out of the spoken answer (only a file's name is spoken); the full detail of every
 skill call lands in the collapsed *Tool activity* panel. Limits: the skills use macOS commands, so
 assistant mode is macOS only; a request can use one or two skills (the brain is told to use a tool
 only for questions about this computer, and answers everything else itself); and because each

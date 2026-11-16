@@ -25,6 +25,7 @@ _VERSION = 1
 # conversation.json. The cap is idempotent: re-applying it to an already-capped value changes nothing.
 TOOL_EVENT_OUTPUT_CHARS = 800
 _TRUNCATED = "... (truncated)"
+TOOL_HISTORY_OUTPUT_CHARS = 300  # a past tool result in a prompt: enough to answer a follow-up, not to bloat it
 
 
 def _cap(text: str, limit: int) -> str:
@@ -201,8 +202,12 @@ def tool_activity_for_ui(turns: list[Turn], events: int = 10) -> str:
     return "\n\n".join(shown[-events:])
 
 
-def to_messages(turns: list[Turn]) -> list[Message]:
+def to_messages(turns: list[Turn], tools: bool = False) -> list[Message]:
     """The prompt messages for `turns`: what the user said and what was answered.
+
+    With `tools`, each answered turn's tool events come between its two messages as
+    `("tool", "<name>: <output>")` (output capped), so a follow-up can use an earlier result.
+    A turn with no assistant message carries none: there is no answer for them to explain.
 
     A turn whose transcript is still pending is dropped whole: the question has not been
     transcribed yet, so the answer to it would be a dangling reply, and `(inaudible)` would
@@ -216,6 +221,9 @@ def to_messages(turns: list[Turn]) -> list[Message]:
             continue
         messages.append(("user", turn.user_text or INAUDIBLE))
         if turn.assistant_text:
+            if tools:
+                messages.extend(("tool", f"{event['name']}: {_cap(event['output'], TOOL_HISTORY_OUTPUT_CHARS)}")
+                                for event in turn.tool_events)
             messages.append(("assistant", _spoken(turn)))
     return messages
 
@@ -243,15 +251,18 @@ class Conversation:
             self._save()
             return turn
 
-    def history(self, before: Turn) -> list[Message]:
-        """The (windowed) messages from the turns before `before`, ready for a model prompt."""
+    def history(self, before: Turn, tools: bool = False) -> list[Message]:
+        """The (windowed) messages from the turns before `before`, ready for a model prompt.
+
+        `tools=True` (for a responder with `tool_history`) adds each turn's tool results; see `to_messages`.
+        """
         with self._lock:
             turns = self._turns[: next((i for i, t in enumerate(self._turns) if t is before), 0)]
             turns = turns[window_start(len(turns), self._window) :]
         if turns:  # its transcript is produced off the critical path; don't leave a hole if it's close
             turns[-1].transcribed.wait(TRANSCRIPT_WAIT)
         with self._lock:
-            return to_messages(turns)
+            return to_messages(turns, tools)
 
     def messages_for_ui(self) -> list[dict]:
         """Every turn in Gradio's chatbot "messages" format, including ones still in progress."""

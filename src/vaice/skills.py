@@ -228,11 +228,27 @@ def parse_processes(output: str) -> list[tuple[float, float, str]]:
     return rows
 
 
+_TRAILING_PARENTHETICAL = re.compile(r"\s*\([^()]*\)\s*$")
+
+
+def speakable_process_name(name: str) -> str:
+    """A process name as it can be spoken: no trailing "(Renderer)", a helper counted with its app
+    ("Google Chrome Helper" -> "Google Chrome"), a reverse-DNS name as its last part
+    ("com.apple.Virtualization.VirtualMachine" -> "VirtualMachine"). The raw name stays in the detail."""
+    cleaned = _TRAILING_PARENTHETICAL.sub("", name).strip()
+    parts = cleaned.split(".")
+    if len(parts) >= 3 and not any(" " in part or not part for part in parts):
+        cleaned = parts[-1]
+    cleaned = re.sub(r"\s+Helper$", "", cleaned)
+    return cleaned or name
+
+
 def describe_processes(rows: list[tuple[float, float, str]], by: str, count: int) -> str:
     """The top `count` names by memory or cpu. Helper processes share a name (a browser runs dozens),
-    so rows with the same name are added up first."""
+    so rows are added up by their speakable name, then sorted by that total."""
     totals: dict[str, float] = {}
-    for cpu, memory, name in rows:
+    for cpu, memory, raw_name in rows:
+        name = speakable_process_name(raw_name)
         totals[name] = totals.get(name, 0.0) + (memory if by == "memory" else cpu)
     top = sorted(totals.items(), key=lambda item: item[1], reverse=True)[:count]
     if not top:

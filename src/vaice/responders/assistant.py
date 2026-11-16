@@ -53,9 +53,32 @@ class Decision:
 
 
 def build_messages(prompt: str, history: Sequence[Message], transcript: str) -> list[dict]:
-    """The chat for the brain: the system prompt with the clock, the earlier turns, the question."""
+    """The chat for the brain: the system prompt with the clock, the earlier turns, the question.
+
+    A `("tool", "<name>: <output>")` history entry (earlier skill results, see `tool_history`) becomes a
+    real tool exchange, so the brain can answer a follow-up from it: one assistant message holding the
+    turn's consecutive calls, then a tool message per call. Their ids (`h0`, `h1`, ...) are unique.
+    """
     messages = [{"role": "system", "content": f"{prompt}\n{_clock_line()}"}]
-    messages += [{"role": role, "content": text} for role, text in history]
+    entries = list(history)
+    index = 0
+    while index < len(entries):
+        role, text = entries[index]
+        if role != "tool":
+            messages.append({"role": role, "content": text})
+            index += 1
+            continue
+        end = index
+        while end < len(entries) and entries[end][0] == "tool":
+            end += 1
+        calls, results = [], []
+        for n, (_, entry) in enumerate(entries[index:end], start=index):
+            name, _, output = entry.partition(": ")
+            calls.append({"id": f"h{n}", "type": "function", "function": {"name": name, "arguments": "{}"}})
+            results.append({"role": "tool", "tool_call_id": f"h{n}", "content": output})
+        messages.append({"role": "assistant", "content": "", "tool_calls": calls})
+        messages += results
+        index = end
     messages.append({"role": "user", "content": transcript})
     return messages
 
@@ -190,6 +213,7 @@ class AssistantResponder:
     """
 
     name = "assistant"
+    tool_history = True  # earlier skill results come in `history` as ("tool", "<name>: <output>"); see Responder
 
     def __init__(
         self,
