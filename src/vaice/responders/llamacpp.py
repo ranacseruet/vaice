@@ -7,6 +7,7 @@ import re
 import threading
 import time
 from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager
 from datetime import datetime
 
 import requests
@@ -50,15 +51,32 @@ def _ws_url(base: str) -> str:
     return "ws" + base.removeprefix("http") + "/v1/realtime"  # http -> ws, https -> wss
 
 
-def _open(url: str, timeout: float):
+def _close(ws: ClientConnection) -> None:
+    try:
+        ws.close()
+    except (OSError, WebSocketException) as exc:  # the session is over either way; nothing waits for this
+        log.debug("closing the llama-server websocket failed: %s: %s", type(exc).__name__, exc)
+
+
+@contextmanager
+def _open(url: str, timeout: float) -> Iterator[ClientConnection]:
     """The websocket, as a context manager that closes it. `ping_interval=None`: the keep-alive
     pings would depend on llama-server's pong handling, and the idle timeout below already covers a
-    server that went quiet."""
+    server that went quiet.
+
+    The close runs on a daemon thread of its own: llama-server (b12359) does not complete the
+    close handshake, so `close()` waits out the whole `CLOSE_TIMEOUT`, and a caller that waited
+    for it reported every transcript and every reply's end one second late (#90). The close frame
+    itself is sent at once, so the server still cancels the reply and frees the slot promptly."""
     ws_url = _ws_url(url)
     try:
-        return connect(ws_url, open_timeout=timeout, close_timeout=CLOSE_TIMEOUT, max_size=None, ping_interval=None)
+        ws = connect(ws_url, open_timeout=timeout, close_timeout=CLOSE_TIMEOUT, max_size=None, ping_interval=None)
     except (OSError, WebSocketException) as exc:  # refused, timed out, or not a websocket server at all
         raise RuntimeError(f"cannot open {ws_url}: {type(exc).__name__}: {exc}") from exc
+    try:
+        yield ws
+    finally:
+        threading.Thread(target=_close, args=(ws,), name="vaice-llamacpp-close", daemon=True).start()
 
 
 class _Session:
