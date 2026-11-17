@@ -430,9 +430,10 @@ class McpTools:
         from mcp import MCPError, types
 
         label = f"the {tool} tool from {server.config.name}"
-        header = f"server: {server.config.name}\ntool: {tool}\narguments: {json.dumps(args, ensure_ascii=False)}"
+        # The detail is the result alone: the tool event already keeps the call's name and arguments, and its output
+        # is capped (800 characters, 300 in the next prompt), so arguments in front would push the result out
         if stop():  # stopped between the approval and here: nothing is sent
-            return SkillResult(f"{label} was stopped", f"{header}\n(stopped)")
+            return SkillResult(f"{label} was stopped")
         future = self._submit(server.client.call_tool(tool, args, read_timeout_seconds=self.timeout))
         deadline = time.monotonic() + self.timeout + CALL_GRACE
         while not future.done():
@@ -441,7 +442,7 @@ class McpTools:
                 break
             if stop():
                 future.cancel()
-                return SkillResult(f"{label} was stopped", f"{header}\n(stopped)")
+                return SkillResult(f"{label} was stopped")
             if time.monotonic() >= deadline:
                 future.cancel()
                 raise SkillError(f"{label} did not answer within {self.timeout:g} seconds")
@@ -457,9 +458,9 @@ class McpTools:
         if result.is_error:
             raise SkillError(_one_line(text, ERROR_CHARS) or f"{label} reported an error")
         if not text.strip():
-            return SkillResult(NOTHING, f"{header}\n{NOTHING}")
+            return SkillResult(NOTHING)
         speech = text if len(text) <= MCP_OUTPUT_CHARS else f"{text[:MCP_OUTPUT_CHARS]} {CUT}"
-        return SkillResult(speech, f"{header}\n{text[:DETAIL_CHARS]}")
+        return SkillResult(speech, text[:DETAIL_CHARS])
 
     # -- closing
 

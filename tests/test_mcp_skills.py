@@ -392,12 +392,23 @@ def test_a_server_is_started_and_only_the_listed_tools_it_offers_become_skills(b
     assert [skills[f"books__{n}"].kind for n in ("lookup_book", "add_todo", "slow")] == ["read", "confirm", "confirm"]
 
 
-def test_a_result_is_its_text_and_the_panel_detail_names_the_call(books):
+def test_a_result_is_its_text_and_the_panel_detail_is_the_result_alone(books):
     result = call(books, "books__lookup_book", '{"title": "Dune"}')
 
     assert result.speech == "Dune by Frank Herbert, 1965"
-    assert result.detail == ('server: books\ntool: lookup_book\narguments: {"title": "Dune"}\n'
-                             "Dune by Frank Herbert, 1965")
+    assert result.detail == "Dune by Frank Herbert, 1965"
+
+
+def test_long_arguments_never_push_the_result_out_of_the_stored_tool_event(books):
+    # The event keeps the name and the arguments on their own; its output is capped (800 characters, 300 in the
+    # next turn's prompt), so arguments in front of the result used to cut the result off (Codex on #104)
+    text = "milk " * 200
+    result = call(books, "books__add_todo", json.dumps({"text": text}))
+    turn = Turn()
+    turn.add_tool_event("books__add_todo", json.dumps({"text": text}), result.detail)
+
+    assert result.detail.startswith("added: milk")
+    assert turn.tool_events[0]["output"].startswith("added: milk")
 
 
 def test_a_tool_that_fails_is_a_spoken_failure_with_its_own_message(books, caplog):
