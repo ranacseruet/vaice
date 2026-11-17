@@ -8,11 +8,13 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+from fastrtc import AdditionalOutputs
 from threads import next_on_fresh_thread, start_thread
 
 from vaice import lifecycle, shell
+from vaice.app import make_handler
 from vaice.audio import from_pcm16
-from vaice.brain import BrainReply, ToolCall
+from vaice.brain import BUSY, BrainError, BrainReply, ToolCall
 from vaice.confirm import CONFIRM_SECONDS, Confirmations, Pending
 from vaice.conversation import Conversation, Turn
 from vaice.responders import assistant
@@ -374,6 +376,144 @@ def test_the_transcript_is_reported_exactly_once_when_all_goes_well(tts):
     turn = CountingTurn()
     drive(resp, turn=turn)
     assert turn.user_texts == ["How much disk space is free?"]
+
+
+# -- a brain failure is spoken and shown
+
+
+RATE_LIMITED = BrainError("the brain endpoint is rate limited (HTTP 429)", BUSY)
+
+
+def test_a_brain_failure_is_spoken_through_tts_and_then_raised_so_the_ui_shows_it(tts):
+    resp, _ = responder(RATE_LIMITED)
+    turn = CountingTurn()
+
+    gen = resp.respond(AUDIO, [], turn)
+    frames, error = [], None
+    while error is None:
+        item = next_on_fresh_thread(gen, f"fastrtc-{len(frames)}")
+        if isinstance(item, BaseException):
+            error = item
+        else:
+            frames.append(item)
+
+    assert error is RATE_LIMITED  # raised after the audio: the apology was heard first
+    assert " ".join(b["input"] for b in tts.bodies) == BUSY  # one /tts request per sentence
+    assert len(frames) == 2
+    assert turn.assistant_text == BUSY
+    assert turn.user_texts == ["How much disk space is free?"]
+    assert turn.tool_events == []
+    assert resp.pending() is None
+
+
+def test_the_handler_shows_the_apology_with_the_error_note_and_the_turn_records_the_failure(tts, caplog):
+    resp, _ = responder(RATE_LIMITED)
+    conversation = Conversation()
+    gen = make_handler(resp, conversation)(AUDIO)
+
+    with caplog.at_level(logging.WARNING):
+        outputs = []
+        while True:
+            item = next_on_fresh_thread(gen, f"fastrtc-{len(outputs)}")
+            if isinstance(item, StopIteration):
+                break
+            assert not isinstance(item, BaseException)
+            outputs.append(item)
+
+    assert isinstance(outputs[0], tuple) and isinstance(outputs[-1], AdditionalOutputs)  # audio, then the chatbot
+    shown = outputs[-1].args[0]
+    assert shown[-1] == {"role": "assistant", "content":
+                         f"{BUSY} (error: BrainError: the brain endpoint is rate limited (HTTP 429))"}
+    assert "assistant brain failed: the brain endpoint is rate limited (HTTP 429)" in caplog.text
+    (saved,) = conversation._turns
+    assert saved.assistant_text == BUSY and saved.error.startswith("BrainError: ")
+    assert saved.complete  # the turn is closed as a failed reply, like any reply error
+
+
+def test_a_failed_reply_leaves_no_request_waiting_and_drops_a_waiting_one(tts, heard):
+    s = asked(RATE_LIMITED)
+    assert s.resp.pending() is not None  # the quit question is armed
+    heard.text = "What is the weather like?"  # not an answer: the request is dropped, an ordinary question
+
+    with pytest.raises(BrainError):
+        drive(s.resp)
+
+    assert s.resp.pending() is None
+    assert s.ran == []
+
+
+def test_a_failure_after_a_read_skill_ran_creates_no_request(tts):
+    s = confirming(ask(("disk_space", "{}")), RATE_LIMITED)
+
+    with pytest.raises(BrainError):
+        drive(s.resp)
+
+    assert s.disk_ran == [1] and s.resp.pending() is None
+    assert " ".join(b["input"] for b in tts.bodies) == BUSY
+
+
+def test_after_a_yes_a_failed_follow_up_speaks_the_skill_result_and_logs_the_error(tts, heard, caplog):
+    s = asked(RATE_LIMITED)
+    heard.text = "Yes, please!"
+    second = CountingTurn()
+
+    with caplog.at_level(logging.WARNING):
+        drive(s.resp, turn=second)  # no error is raised: the action happened
+
+    assert s.ran == [{"name": "Safari"}]
+    assert [b["input"] for b in tts.bodies] == [QUESTION, "quit Safari"]
+    assert second.assistant_text == "quit Safari"
+    assert tool_events(second) == [("quit_app", "quit Safari")]
+    assert "assistant brain failed after quit_app ran: the brain endpoint is rate limited" in caplog.text
+
+
+# -- which brain
+
+
+def fake_brain_post(monkeypatch):
+    """Replaces requests.post for the brain; returns the list of (url, body, headers, timeout) it was given."""
+    sent = []
+
+    def post(url, json=None, headers=None, timeout=None):
+        sent.append((url, json, headers, timeout))
+        body = {"choices": [{"message": {"role": "assistant", "content": "ok"}}]}
+        return SimpleNamespace(status_code=200, ok=True, text="", json=lambda: body)
+
+    monkeypatch.setattr(assistant.requests, "post", post)
+    return sent
+
+
+def test_without_a_helper_the_local_llama_server_is_the_brain(monkeypatch):
+    monkeypatch.setattr(assistant.config, "BRAIN_URL", "")
+    sent = fake_brain_post(monkeypatch)
+
+    AssistantResponder("http://server:8001", 5.0, skills=disk_skills())._brain.complete([], None)
+
+    url, body, headers, timeout = sent[0]
+    assert url == "http://server:8001/v1/chat/completions"
+    assert body == {"messages": [], "temperature": 0, "max_tokens": 300}
+    assert headers == {} and timeout == 5.0
+
+
+def test_a_configured_helper_is_the_brain_with_its_own_model_key_and_timeout(monkeypatch):
+    monkeypatch.setattr(assistant.config, "BRAIN_URL", "http://localhost:1234/v1")
+    monkeypatch.setattr(assistant.config, "BRAIN_MODEL", "lfm2.5-24b-a2b")
+    monkeypatch.setattr(assistant.config, "BRAIN_API_KEY", "fake-key-123")
+    monkeypatch.setattr(assistant.config, "BRAIN_TIMEOUT", 33.0)
+    sent = fake_brain_post(monkeypatch)
+
+    AssistantResponder("http://server:8001", 5.0, skills=disk_skills())._brain.complete([], None)
+
+    url, body, headers, timeout = sent[0]
+    assert url == "http://localhost:1234/v1/chat/completions"
+    assert body == {"messages": [], "model": "lfm2.5-24b-a2b"}  # no temperature, no token cap
+    assert headers == {"Authorization": "Bearer fake-key-123"} and timeout == 33.0
+
+
+def test_an_injected_brain_wins_over_the_configuration(monkeypatch):
+    monkeypatch.setattr(assistant.config, "BRAIN_URL", "http://localhost:1234/v1")
+    brain = FakeBrain()
+    assert AssistantResponder(skills=disk_skills(), brain=brain)._brain is brain
 
 
 # -- /tts

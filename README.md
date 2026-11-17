@@ -131,6 +131,10 @@ Precedence: variables already in the environment (e.g. `set -a; source .env; set
 | `VAICE_ASSISTANT_PROMPT` | `You are a voice assistant on the user's Mac. …` (answer in one or two short spoken sentences, use a tool only for questions about this computer) | Assistant mode only: the brain's system prompt (the current date and time is added) |
 | `VAICE_ASSISTANT_SHELL` | `false` | Assistant mode only: adds the `run_shell` skill, which proposes a shell command that runs only after you approve it (see *Shell commands* below). Off: the skill does not exist. A boolean: `1/true/yes/on` or `0/false/no/off` |
 | `VAICE_VOICE` | `female` | Assistant mode only: the `/tts` voice, `female` or `male` |
+| `VAICE_BRAIN_URL` | *(empty: the local `llama-server` is the brain)* | Assistant mode only: an optional helper model, any OpenAI-compatible endpoint, as the **base URL OpenAI clients take, `/v1` included** (e.g. `http://localhost:1234/v1`, `https://api.openai.com/v1`); vaice posts to `<base>/chat/completions`. A URL that already ends in `/chat/completions`, or that holds credentials, a query or a fragment, exits at startup. Ignored in chat mode (one warning). What it receives: see *Helper model* below |
+| `VAICE_BRAIN_MODEL` | *(empty)* | The `model` sent to the helper. Most hosted endpoints require it: with a helper URL and no model, vaice warns at startup and goes on |
+| `VAICE_BRAIN_API_KEY` | *(empty)* | Sent to the helper as `Authorization: Bearer …`. A secret: never logged, never in an error message or the eval's results. Put it in `.env` or the environment, not on a command line |
+| `VAICE_BRAIN_TIMEOUT` | `60` | Seconds the helper may take for one request (the local brain keeps `VAICE_LLAMACPP_TIMEOUT`) |
 | `VAICE_LLAMACPP_PROMPT` | `Reply naturally and concisely in 1 to 2 spoken sentences.` | Reply instructions; `vaice` prepends `Respond with interleaved text and audio.` |
 | `VAICE_LLAMACPP_TIMEOUT` | `120` | Seconds to open a connection or the longest silence from `llama-server` before a reply fails. It is also the total bound for a tool call: when it passes — or the reply is stopped — vaice stops waiting for the call and discards the result (the underlying request is not cancelled; the server may still run/finish the tool). The parallel transcription session's silence budget is this setting too, but its connection **handshake** uses a fixed 2 s (transcription is best-effort and degrades to `(inaudible)`), so raising this cannot extend a slow-handshake server |
 | `VAICE_LLAMACPP_MAX_OUTPUT_TOKENS` | `1024` | Reply cap sent as the realtime session's `max_output_tokens`; text tokens and audio frames count together. Raise it for longer spoken replies |
@@ -212,8 +216,9 @@ reason to keep that tool out).
 assistant can answer questions about your Mac from real data:
 
 1. the realtime `transcription` session turns your audio into text;
-2. a **brain** (`llama-server`'s `POST /v1/chat/completions`, temperature 0) reads the transcript, the
-   earlier turns and the current date and time, and either answers or asks for a skill;
+2. a **brain** (`llama-server`'s `POST /v1/chat/completions`, temperature 0, unless you set a
+   [helper model](#helper-model)) reads the transcript, the earlier turns and the current date and time,
+   and either answers or asks for a skill;
 3. **skills** run inside vaice and their result goes back to the brain, which then answers (at most
    three rounds; the last one must answer);
 4. the answer is cleaned for speech (markdown, links, paths and units become words), split into
@@ -302,8 +307,8 @@ model, and so into the conversation file: a command that prints a file (`cat`) h
 model, which is why such commands need the button.
 
 The local 2B model writes poor commands (a first live check misheard `whoami` as `HUMI`, and asked for a
-command to answer "What does the ls command do?"), so this skill becomes useful mainly with the helper model
-planned next. Until then, read every command before you approve it, and keep the setting off if you do not
+command to answer "What does the ls command do?"), so this skill becomes useful mainly with a
+[helper model](#helper-model). Either way, read every command before you approve it, and keep the setting off if you do not
 need it. Starting vaice with it on logs a warning. `python evals/run.py --paths assistant --shell
 --cases-file assistant_shell_cases.json` measures how often spoken requests reach it (see `evals/README.md`).
 
@@ -318,6 +323,40 @@ only for questions about this computer, and answers everything else itself); and
 sentence is synthesized separately, prosody is less natural than the speech-to-speech path. The
 prompt is `VAICE_ASSISTANT_PROMPT`. `python evals/run.py --paths assistant` measures how reliably
 spoken questions reach the right skill (see `evals/README.md`).
+
+### Helper model
+The 2B model routes questions to the right skill well, but it writes poor shell commands, sometimes calls a
+skill when it should just answer, and sometimes answers past the result. A **helper model** takes over only
+the brain (step 2 above): any OpenAI-compatible chat-completions endpoint, whether a server on this machine
+(LM Studio, Ollama, another `llama-server`) or a hosted API. vaice does not tell them apart; it posts to
+`<VAICE_BRAIN_URL>/chat/completions` and reads normal `tool_calls`. Speech recognition and speech output stay on
+the local `llama-server`.
+
+```bash
+# A server on this machine (LM Studio; Ollama is http://localhost:11434/v1), no key needed
+VAICE_MODE=assistant VAICE_BRAIN_URL=http://localhost:1234/v1 VAICE_BRAIN_MODEL=<model id> .venv/bin/vaice
+
+# A hosted endpoint: keep the key in .env or the environment (VAICE_BRAIN_API_KEY=your-key-here)
+VAICE_MODE=assistant VAICE_BRAIN_URL=https://openrouter.ai/api/v1 VAICE_BRAIN_MODEL=<model id> .venv/bin/vaice
+```
+
+- **What is sent to the endpoint**, on every brain call: the transcript of what you say, the earlier turns of
+  the conversation (your words, the spoken replies, and earlier skill results), the system prompt, the
+  current date and time, the skills' definitions, and the results of the skills it asks for: file names,
+  process names, the computer's name (`system_info`), and, with `VAICE_ASSISTANT_SHELL` on, the output of any
+  command you approved. **Audio is never sent.** Startup logs the endpoint's host and model, and a warning
+  when the host is not `localhost`, `127.0.0.1` or `::1`.
+- **The request holds only `messages`, `tools` and `model`.** vaice sends no `temperature` and no token cap to
+  a helper: hosted models differ in which they accept, and a cap would cut a reasoning model's answer short.
+  Its replies may carry a separate `reasoning_content`; that is never spoken and never sent back.
+- **Latency is seconds per decision**: a question that needs a skill is two brain calls. A 24B model on this
+  machine took 1.2 to 5.6 s per call in a live check.
+- **Failures are spoken** (and shown in the chatbot as `(error: …)`): a refused key, a busy endpoint (HTTP
+  429), an unreachable or too slow one each get a short fixed sentence. After you approved an action, a brain
+  failure does not hide that it ran: vaice speaks the skill's own result. Nothing checks the endpoint at
+  startup; an unreachable helper is found out at the first question.
+- Results of the live eval vary from run to run without temperature 0, so measure a helper with repeats
+  (`--brain-url`, `--brain-model`; see `evals/README.md`).
 
 ### Startup & Shutdown
 At startup, `vaice` checks `llama-server`:
@@ -350,7 +389,7 @@ At startup, `vaice` checks `llama-server`:
 ## Privacy
 - `~/.vaice/conversation.json` is written with mode **0600** (owner read/write only) via a temporary file and `os.replace`, so a reader never sees a half-written file; the `~/.vaice` directory itself is created with the usual 0755 permissions, meaning other local users can see that the file exists (not what it holds).
 - The transcript is retained **indefinitely**, until you click **New conversation** (which clears it) or delete the file while `vaice` is stopped. New conversation is the way to forget everything, including any embarrassing questions.
-- `vaice` talks to one server: the `llama-server` at `VAICE_LLAMACPP_URL` (local by default, e.g. `http://localhost:8001`) over HTTP and WebSocket. The microphone audio, the transcripts, the tool results and the model's replies go there; nothing else leaves the machine through `vaice` (the model's tools run on that server and run with *its* permissions; in assistant mode the skills run in vaice with *vaice's* permissions, and with `VAICE_ASSISTANT_SHELL` on that includes any shell command you approve, with the same access to your files as you have, and its output goes to the model and into the conversation file). If you point `VAICE_LLAMACPP_URL` at a remote host, your audio and conversation go there instead.
+- By default `vaice` talks to one server: the `llama-server` at `VAICE_LLAMACPP_URL` (local by default, e.g. `http://localhost:8001`) over HTTP and WebSocket. The microphone audio, the transcripts, the tool results and the model's replies go there; nothing else leaves the machine through `vaice`. The one exception is opt-in: with a [helper model](#helper-model) (`VAICE_BRAIN_URL`, assistant mode), a second server also receives the text of what you say, the earlier turns and the skills' results (file names, process names, the computer's name, shell command output), but never audio, which stays with `llama-server`; if that endpoint is a hosted API, all of that leaves your machine (startup warns). The model's tools run on that server with *its* permissions; in assistant mode the skills run in vaice with *vaice's* permissions, and with `VAICE_ASSISTANT_SHELL` on that includes any shell command you approve, with the same access to your files as you have, and its output goes to the model and into the conversation file. If you point `VAICE_LLAMACPP_URL` at a remote host, your audio and conversation go there instead.
 - Set `VAICE_DATA_DIR=""` to keep the conversation **in memory only**: nothing is read from or written to disk, and history disappears when the app stops. Persistence can also be limited with `VAICE_HISTORY_TURNS` (the prompt window), which trims context but keeps the file — set `VAICE_DATA_DIR=""` if the file itself is the concern.
 
 ## Troubleshooting
@@ -418,7 +457,7 @@ src/vaice/
   lifecycle.py      Stop signal handler: Ctrl+C asks the app and its responders to abandon in-flight calls
   config.py         Environment-driven settings (.env.example lists them with defaults)
   conversation.py   Turn / Conversation: history windowing, barge-in trimming, atomic JSON persistence, error notes
-  brain.py          Assistant mode: ChatBrain, one /v1/chat/completions call with tools (no server-side tool execution)
+  brain.py          Assistant mode: ChatBrain, one chat-completions call with tools (local llama-server or a helper endpoint), BrainError
   skills.py         Assistant mode: the skills (read-only answers, plus open/quit app, volume, mute) and the Skills registry
   confirm.py        Assistant mode: the one pending request of a confirm skill, the spoken yes/no test and its 60 s expiry
   shell.py          Assistant mode, opt-in: the run_shell skill: how a command may be approved, and the runner (timeout, output cap, process group)

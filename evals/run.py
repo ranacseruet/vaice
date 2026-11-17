@@ -23,6 +23,7 @@ import wave
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import numpy as np
 import requests
@@ -54,7 +55,7 @@ ROUTE_TIMEOUT = 120
 SKILL_STUBS = {
     "disk_space": "160 gigabytes free of 460 gigabytes",
     "battery_status": "battery at 78 percent, running on battery power, about 4 hours and 12 minutes left",
-    "system_info": "macOS 15.6 on Ranas-MacBook, up 3 days and 4 hours, 48 gigabytes of memory",
+    "system_info": "macOS 15.6 on Example-MacBook, up 3 days and 4 hours, 48 gigabytes of memory",
     "top_processes": "Google Chrome 12 percent of memory, Xcode 9 percent, Slack 4 percent",
     "find_files": "3 files: report.pdf, report-final.pdf, old report.docx",
 }
@@ -224,8 +225,9 @@ def stub_skills(shell: bool = False) -> Skills:
 
 
 def run_assistant(url: str, prompt: str, skills: Skills, audio, history, brain: ChatBrain | None = None) -> dict:
-    record: dict = {"error": None, "calls": [], "transcript": None, "answer": None, "latency_s": None}
-    brain = brain or ChatBrain(url, ROUTE_TIMEOUT)
+    record: dict = {"error": None, "calls": [], "transcript": None, "answer": None, "pending": False,
+                    "latency_s": None}
+    brain = brain or ChatBrain.local(url, ROUTE_TIMEOUT)
     start = time.perf_counter()
     try:
         transcript = _transcribe(url, config.LLAMACPP_TIMEOUT, audio)
@@ -240,6 +242,7 @@ def run_assistant(url: str, prompt: str, skills: Skills, audio, history, brain: 
             record["calls"] = [[call.name, call.arguments] for call in decision.calls]
             if decision.pending is not None:  # asked for a confirm skill: that is the call (it never runs here)
                 record["calls"].append([decision.pending.name, decision.pending.arguments])
+                record["pending"] = True  # its answer is a question, which the answer checks do not apply to
             record["answer"] = decision.answer
         else:  # as in the app: nothing is asked of the brain
             record["answer"] = NOT_HEARD
@@ -285,6 +288,13 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
                                          "VAICE_ASSISTANT_PROMPT for assistant")
     parser.add_argument("--shell", action="store_true",
                         help="assistant path: also offer the run_shell skill (stubbed: it asks, nothing is run)")
+    parser.add_argument("--brain-url", default=config.BRAIN_URL,
+                        help="assistant path: the brain's OpenAI-compatible base URL, /v1 included (default: "
+                             "VAICE_BRAIN_URL; empty = the local llama-server). The key is read from "
+                             "VAICE_BRAIN_API_KEY only. With a remote host the case sentences and the stub "
+                             "results are sent there")
+    parser.add_argument("--brain-model", default=config.BRAIN_MODEL,
+                        help="assistant path: the model sent to --brain-url (default: VAICE_BRAIN_MODEL)")
     parser.add_argument("--history", action=argparse.BooleanOptionalAction, default=True,
                         help="send two fixed earlier exchanges (default: on)")
     parser.add_argument("--out", type=Path, help="results file (default: evals/results/<UTC timestamp>.json)")
@@ -296,9 +306,34 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     unknown = [p for p in args.paths if p not in PATHS]
     if unknown or not args.paths:
         parser.error(f"--paths takes {', '.join(PATHS)}, got {unknown or 'nothing'}")
+    if args.brain_url:
+        try:
+            args.brain_url = config.brain_base(args.brain_url)
+        except ValueError as exc:
+            parser.error(f"--brain-url: {exc}")
     if not args.cases_file:
         args.cases_file = "assistant_cases.json" if args.paths == ["assistant"] else "cases.json"
     return args
+
+
+def make_brain(args: argparse.Namespace) -> ChatBrain | None:
+    """The helper brain for the assistant path when `--brain-url` is set (None: the local llama-server). The key
+    comes from VAICE_BRAIN_API_KEY (config), never from the command line."""
+    if not args.brain_url:
+        return None
+    return ChatBrain.helper(args.brain_url, config.BRAIN_TIMEOUT, args.brain_model, config.BRAIN_API_KEY)
+
+
+def describe_brain(args: argparse.Namespace) -> dict:
+    """Which brain the assistant path used, for the report and the results: the host and the model, never the
+    key or the URL's path."""
+    if not args.brain_url:  # host None: the local llama-server
+        return {"host": None, "model": None}
+    return {"host": urlsplit(args.brain_url).netloc, "model": args.brain_model or None}
+
+
+def brain_line(used: dict) -> str:
+    return "the local llama-server" if used["host"] is None else f"{used['host']}, model {used['model'] or '(none)'}"
 
 
 def select_cases(cases: list[dict], wanted: str | None) -> list[dict]:
@@ -316,7 +351,7 @@ def fmt(seconds: float | None) -> str:
     return "-" if seconds is None else f"{seconds:.2f}s"
 
 
-def print_summary(runs: list[dict], paths: list[str], case_ids: list[str]) -> dict:
+def print_summary(runs: list[dict], paths: list[str], case_ids: list[str], brain_used: dict | None = None) -> dict:
     summary = {}
     for path in paths:
         records = [r for r in runs if r["path"] == path]
@@ -324,20 +359,30 @@ def print_summary(runs: list[dict], paths: list[str], case_ids: list[str]) -> di
         summary[path] = agg
         latency = {"interleaved": "time to first audio", "assistant": "time to answer text"}.get(
             path, "time to decision")
-        print(f"\n== {path}: {agg['runs']} runs ==")
+        brain = f", brain: {brain_line(brain_used)}" if path == "assistant" and brain_used is not None else ""
+        print(f"\n== {path}: {agg['runs']} runs{brain} ==")
         for outcome in scoring.OUTCOMES:
             print(f"  {outcome:<11}{agg['counts'][outcome]:>4}  {agg['percent'][outcome]:>5.1f}%")
         print(f"  {'duplicate':<11}{agg['duplicate']:>4}  {agg['duplicate_percent']:>5.1f}%  (same tool and arguments "
               "twice; also counted above)")
         print(f"  {latency}: median {fmt(agg['latency_median_s'])}, max {fmt(agg['latency_max_s'])}")
+        for label, key in (("answer faithful", "answer_faithful"), ("command ok", "command_ok")):
+            if key in agg:  # only when a case asked for it; apart from the verdicts above
+                print(f"  {label} {agg[key]['ok']}/{agg[key]['of']}")
     cells = {path: scoring.per_case([r for r in runs if r["path"] == path]) for path in paths}
+    checks = {label: scoring.per_case_check(runs, key) for label, key in (("answer", "answer_ok"),
+                                                                           ("command", "command_ok"))}
+    checks = {label: cell for label, cell in checks.items() if cell}  # the columns some case asked for
     width = max([len("case"), *(len(c) for c in case_ids)])
-    print(f"\n{'case':<{width}}  " + "  ".join(f"{p:>12}" for p in paths))
+    print(f"\n{'case':<{width}}  " + "  ".join(f"{name:>12}" for name in [*paths, *checks]))
     for case_id in case_ids:
         row = []
         for path in paths:
             correct, total = cells[path].get(case_id, (0, 0))
             row.append(f"{correct}/{total}" if total else "-")
+        for cell in checks.values():
+            ok, of = cell.get(case_id, (0, 0))
+            row.append(f"{ok}/{of}" if of else "-")
         print(f"{case_id:<{width}}  " + "  ".join(f"{cell:>12}" for cell in row))
     heard = [r for r in runs if r["path"] in ("text", "assistant") and r.get("transcript") is not None]
     wrong = [r for r in heard if scoring.misheard(r["say"], r["transcript"])]
@@ -364,6 +409,12 @@ def main(argv: list[str] | None = None) -> None:
     out = args.out or HERE / "results" / f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.json"
 
     print(f"server {url}: {info.get('model_alias')} {info.get('build_info')} temperature={info.get('temperature')}")
+    brain = make_brain(args) if "assistant" in args.paths else None
+    brain_used = describe_brain(args) if "assistant" in args.paths else None
+    if brain_used is not None:
+        print(f"assistant brain: {brain_line(brain_used)}")
+        if brain is not None and urlsplit(args.brain_url).hostname not in config.LOCAL_HOSTS:
+            print("  the case sentences and the stub skills' results are sent to that endpoint")
     runs: list[dict] = []
     started = datetime.now(timezone.utc).isoformat(timespec="seconds")
     total = len(cases) * len(args.paths) * args.repeats
@@ -377,22 +428,28 @@ def main(argv: list[str] | None = None) -> None:
                         if path == "interleaved":
                             record = run_interleaved(url, prompts[path], tools, results, audio[case["id"]], history)
                         elif path == "assistant":
-                            record = run_assistant(url, prompts[path], skills, audio[case["id"]], history)
+                            record = run_assistant(url, prompts[path], skills, audio[case["id"]], history, brain)
                         else:
                             record = run_text(url, prompts[path], tools, audio[case["id"]], history)
                         record.update(case=case["id"], say=case["say"], path=path, repeat=repeat)
                         if not record["error"]:
-                            record["score"] = scoring.score(case["expect"], [tuple(c) for c in record["calls"]])
+                            calls = [tuple(c) for c in record["calls"]]
+                            record["score"] = scoring.score(case["expect"], calls)
+                            if path == "assistant":  # apart from the verdict: a right call can have a wrong answer
+                                record["score"].update(
+                                    scoring.check_answer(case["expect"], calls, record["answer"], record["pending"]))
                         runs.append(record)
                         outcome = f"error: {record['error']}" if record["error"] else record["score"]["verdict"]
                         print(f"[{len(runs)}/{total}] {path} {case['id']} #{repeat}: {outcome}", file=sys.stderr)
     except KeyboardInterrupt:
         print("\ninterrupted: reporting the runs so far", file=sys.stderr)
-    summary = print_summary(runs, args.paths, [c["id"] for c in cases])
+    summary = print_summary(runs, args.paths, [c["id"] for c in cases], brain_used)
 
     config_used = {"paths": args.paths, "cases_file": args.cases_file, "repeats": args.repeats,
                    "shell": args.shell, "history": history, "prompts": prompts, "cases": [c["id"] for c in cases],
                    "platform": platform.platform()}
+    if brain_used is not None:
+        config_used["brain"] = brain_used  # the host and the model only: never the key, never the URL's path
     document = {"label": args.label, "started": started, "config": config_used, "server": info,
                 "summary": summary, "runs": runs}
     out.parent.mkdir(parents=True, exist_ok=True)

@@ -137,6 +137,49 @@ ASSISTANT_PROMPT = _env(
 ASSISTANT_SHELL = _flag("VAICE_ASSISTANT_SHELL", default=False)
 VOICE = _choice("VAICE_VOICE", default="female", choices=("female", "male"))
 
+
+LOCAL_HOSTS = ("localhost", "127.0.0.1", "::1")  # a brain at one of these hosts does not leave this machine
+
+
+def brain_base(raw: str) -> str:
+    """The helper brain's base URL as OpenAI clients take it, `/v1` included, without a trailing slash.
+
+    Raises ValueError with a message that never repeats `raw`: a key pasted into a URL must not reach the log."""
+    parts = urlsplit(raw if "://" in raw else f"http://{raw}")
+    if parts.scheme not in ("http", "https") or not parts.netloc:
+        raise ValueError("expected an http(s) URL like http://localhost:1234/v1")
+    if "@" in parts.netloc or parts.query or parts.fragment:
+        raise ValueError("it must not contain credentials, a query or a fragment (the API key goes in "
+                         "VAICE_BRAIN_API_KEY)")
+    path = parts.path.rstrip("/")
+    if path.endswith("/chat/completions"):
+        raise ValueError("give the base URL (e.g. http://localhost:1234/v1), not the endpoint: vaice adds "
+                         "/chat/completions itself")
+    return f"{parts.scheme}://{parts.netloc}{path}"
+
+
+def _brain_url(name: str) -> str:
+    """`brain_base` of the variable; "" (unset or empty) = no helper."""
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return ""
+    try:
+        return brain_base(raw)
+    except ValueError as exc:
+        raise SystemExit(f"vaice: {name}: {exc}") from None
+
+
+# Assistant mode only: an optional helper for the brain step, any OpenAI-compatible chat-completions endpoint
+# (a local server such as LM Studio or Ollama, or a hosted one); vaice does not tell them apart. Unset = the
+# local llama-server answers. Only the brain moves: speech recognition and speech output stay on llama-server.
+# Everything the brain sees is sent to that endpoint (see README, Privacy). The key is a secret: never logged.
+BRAIN_URL = _brain_url("VAICE_BRAIN_URL")
+BRAIN_MODEL = _env("VAICE_BRAIN_MODEL", default="").strip()
+BRAIN_API_KEY = _env("VAICE_BRAIN_API_KEY", default="").strip()
+BRAIN_TIMEOUT = _number("VAICE_BRAIN_TIMEOUT", default="60", kind=float)
+if BRAIN_TIMEOUT <= 0:
+    raise SystemExit("vaice: VAICE_BRAIN_TIMEOUT must be > 0")
+
 PORT = _number("VAICE_PORT", default="7860", kind=int)
 
 # The conversation is kept here between runs; the last HISTORY_TURNS exchanges go into each prompt.

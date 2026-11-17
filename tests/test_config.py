@@ -282,3 +282,101 @@ def test_a_bad_choice_names_the_variable_and_the_values(monkeypatch, name, value
     finally:
         monkeypatch.undo()
         importlib.reload(config)
+
+
+BRAIN_NAMES = ("VAICE_BRAIN_URL", "VAICE_BRAIN_MODEL", "VAICE_BRAIN_API_KEY", "VAICE_BRAIN_TIMEOUT")
+
+
+def test_the_helper_brain_is_off_by_default(monkeypatch):
+    for name in BRAIN_NAMES:
+        monkeypatch.delenv(name, raising=False)
+    try:
+        reloaded = importlib.reload(config)
+        assert (reloaded.BRAIN_URL, reloaded.BRAIN_MODEL, reloaded.BRAIN_API_KEY) == ("", "", "")
+        assert reloaded.BRAIN_TIMEOUT == 60.0
+    finally:
+        monkeypatch.undo()
+        importlib.reload(config)
+
+
+def test_an_empty_brain_url_is_no_helper(monkeypatch):
+    monkeypatch.setenv("VAICE_BRAIN_URL", "  ")
+    try:
+        assert importlib.reload(config).BRAIN_URL == ""
+    finally:
+        monkeypatch.undo()
+        importlib.reload(config)
+
+
+def test_the_helper_brain_settings_are_read_from_the_environment(monkeypatch):
+    monkeypatch.setenv("VAICE_BRAIN_URL", "https://openrouter.ai/api/v1/")
+    monkeypatch.setenv("VAICE_BRAIN_MODEL", " some/model ")
+    monkeypatch.setenv("VAICE_BRAIN_API_KEY", "fake-key-123\n")
+    monkeypatch.setenv("VAICE_BRAIN_TIMEOUT", "12.5")
+    try:
+        reloaded = importlib.reload(config)
+        assert reloaded.BRAIN_URL == "https://openrouter.ai/api/v1"  # trailing slash stripped, path kept
+        assert reloaded.BRAIN_MODEL == "some/model"
+        assert reloaded.BRAIN_API_KEY == "fake-key-123"  # a pasted newline is not part of the key
+        assert reloaded.BRAIN_TIMEOUT == 12.5
+    finally:
+        monkeypatch.undo()
+        importlib.reload(config)
+
+
+@pytest.mark.parametrize(("given", "base"), [
+    ("http://localhost:1234/v1", "http://localhost:1234/v1"),
+    ("http://localhost:1234/v1/", "http://localhost:1234/v1"),
+    ("https://api.openai.com/v1", "https://api.openai.com/v1"),
+    ("localhost:11434/v1", "http://localhost:11434/v1"),  # no scheme: plain http, as for the llama-server URL
+    ("http://localhost:11434", "http://localhost:11434"),
+])
+def test_a_brain_base_url_keeps_its_path_and_loses_the_trailing_slash(given, base):
+    assert config.brain_base(given) == base
+
+
+@pytest.mark.parametrize("given", ["http://host/v1/chat/completions", "http://host/v1/chat/completions/"])
+def test_the_endpoint_instead_of_the_base_is_a_clear_error(given):
+    with pytest.raises(ValueError, match=r"base URL.*not the endpoint"):
+        config.brain_base(given)
+
+
+@pytest.mark.parametrize("given", ["ftp://host/v1", "http://", "ws://host:1/v1"])
+def test_a_brain_url_that_is_not_http_is_refused(given):
+    with pytest.raises(ValueError, match="http"):
+        config.brain_base(given)
+
+
+@pytest.mark.parametrize("given", ["https://user:fake-key-123@host/v1", "https://host/v1?key=fake-key-123",
+                                   "https://host/v1#fake-key-123"])
+def test_credentials_a_query_or_a_fragment_in_the_brain_url_are_refused_without_echoing_them(given):
+    with pytest.raises(ValueError, match="credentials, a query or a fragment") as caught:
+        config.brain_base(given)
+
+    assert "fake-key-123" not in str(caught.value)
+
+
+def test_a_bad_brain_url_names_the_variable_and_never_repeats_the_value(monkeypatch):
+    monkeypatch.setenv("VAICE_BRAIN_URL", "https://host/v1?key=fake-key-123")
+    try:
+        with pytest.raises(SystemExit, match="vaice: VAICE_BRAIN_URL: it must not contain credentials") as caught:
+            importlib.reload(config)
+        assert "fake-key-123" not in str(caught.value)
+
+        monkeypatch.setenv("VAICE_BRAIN_URL", "http://host/v1/chat/completions")
+        with pytest.raises(SystemExit, match="VAICE_BRAIN_URL: give the base URL"):
+            importlib.reload(config)
+    finally:
+        monkeypatch.undo()
+        importlib.reload(config)
+
+
+@pytest.mark.parametrize("value", ["0", "-5", "soon"])
+def test_a_bad_brain_timeout_is_a_clean_error(monkeypatch, value):
+    monkeypatch.setenv("VAICE_BRAIN_TIMEOUT", value)
+    try:
+        with pytest.raises(SystemExit, match="VAICE_BRAIN_TIMEOUT must be"):
+            importlib.reload(config)
+    finally:
+        monkeypatch.undo()
+        importlib.reload(config)

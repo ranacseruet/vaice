@@ -247,6 +247,90 @@ def test_misheard_flags_only_real_differences():
     assert scoring.misheard("Mute the sound.", "")
 
 
+# --- answer and command checks (apart from the call verdict) ---
+
+
+def checks(expect, calls=(), answer=None, pending=False):
+    return scoring.check_answer(expect, list(calls), answer, pending)
+
+
+def test_no_checks_asked_for_means_none_for_both():
+    assert checks({"tools": ["disk_space"]}, [call("disk_space")], "About 160 gigabytes.") == {
+        "answer_ok": None, "command_ok": None}
+
+
+def test_answer_has_needs_every_string_in_the_answer_ignoring_case():
+    expect = {"tools": ["battery_status"], "answer_has": ["78", "Percent"]}
+    assert checks(expect, answer="You have 78 PERCENT left.")["answer_ok"] is True
+    assert checks(expect, answer="You have 78 left.")["answer_ok"] is False  # one string missing
+    assert checks(expect, answer="")["answer_ok"] is False
+    assert checks(expect, answer=None)["answer_ok"] is False
+
+
+def test_answer_has_is_not_applicable_when_the_run_ended_in_a_confirmation_question():
+    expect = {"tools": ["quit_app"], "answer_has": ["Safari"]}
+    assert checks(expect, answer="Shall I quit Safari?", pending=True)["answer_ok"] is None
+
+
+def test_the_answer_check_is_independent_of_the_verdict():
+    expect = {"tools": ["disk_space"], "answer_has": ["160"]}
+    calls = [call("disk_space")]
+    assert verdict(expect, calls) == "correct"
+    assert checks(expect, calls, "Plenty of room.")["answer_ok"] is False  # right call, wrong answer
+
+
+def test_command_matches_and_command_not_apply_to_the_run_shell_command():
+    expect = {"tools": ["run_shell"], "command_matches": "Downloads", "command_not": "/Users/me"}
+    assert checks(expect, [call("run_shell", command="ls ~/Downloads")])["command_ok"] is True
+    assert checks(expect, [call("run_shell", command="ls ~/downloads")])["command_ok"] is False  # case-sensitive
+    assert checks(expect, [call("run_shell", command="ls /Users/me/Downloads")])["command_ok"] is False
+    assert checks(expect, [call("run_shell", command="ls ~/Desktop")])["command_ok"] is False
+
+
+def test_command_not_alone_and_regular_expressions():
+    expect = {"tools": ["run_shell"], "command_not": "netstat -[a-z]*p|sudo"}
+    assert checks(expect, [call("run_shell", command="lsof -i :8080")])["command_ok"] is True
+    assert checks(expect, [call("run_shell", command="netstat -anp | grep 8080")])["command_ok"] is False
+    assert checks({"command_matches": "^ping .*google"}, [call("run_shell", command="ping -c 3 google.com")])[
+        "command_ok"] is True
+
+
+def test_the_command_check_fails_without_a_run_shell_call_or_a_command_and_judges_every_call():
+    expect = {"tools": ["run_shell"], "command_matches": "ping"}
+    assert checks(expect, [])["command_ok"] is False
+    assert checks(expect, [call("disk_space")])["command_ok"] is False
+    assert checks(expect, [("run_shell", "not json")])["command_ok"] is False
+    assert checks(expect, [call("run_shell", command=7)])["command_ok"] is False
+    assert checks(expect, [call("run_shell", command="ping a"), call("run_shell", command="ls")])["command_ok"] is False
+    assert checks(expect, [call("run_shell", command="ping a"), call("run_shell", command="ping b")])[
+        "command_ok"] is True
+
+
+def checked(case, answer_ok=None, command_ok=None, error=None):
+    out = {"case": case, "error": error, "latency_s": None}
+    if not error:
+        out["score"] = {"verdict": "correct", "reason": "", "duplicate": False, "answer_ok": answer_ok,
+                        "command_ok": command_ok}
+    return out
+
+
+def test_aggregate_adds_the_check_totals_only_when_some_run_asked_for_them():
+    assert "answer_faithful" not in scoring.aggregate([record("a", "correct")])  # old records have no such keys
+    records = [checked("a", True), checked("a", False), checked("b"), checked("c", command_ok=True),
+               checked("c", error="boom")]
+
+    agg = scoring.aggregate(records)
+
+    assert agg["answer_faithful"] == {"ok": 1, "of": 2}  # the run without the expectation is not counted
+    assert agg["command_ok"] == {"ok": 1, "of": 1}  # an errored run has no score at all
+    assert agg["counts"]["correct"] == 4  # the verdicts are as before
+
+
+def test_per_case_check_counts_per_case_and_leaves_out_cases_it_never_applied_to():
+    records = [checked("a", True), checked("a", False), checked("b"), checked("c", True, error="boom")]
+    assert scoring.per_case_check(records, "answer_ok") == {"a": (1, 2)}
+
+
 # --- the case files ---
 
 
@@ -312,6 +396,37 @@ def test_the_assistant_cases_are_consistent_with_the_skills():
     assert sum(1 for c in cases if c["expect"]["tools"] == []) >= 10
     assert {name for c in cases for name in c["expect"]["tools"]} == set(skills.names)  # every skill is exercised
     assert sum(1 for c in cases if len(c["expect"]["tools"]) == 2) >= 3
+
+
+def test_the_answer_and_command_expectations_are_well_formed_and_where_the_stub_result_allows_them():
+    import re
+
+    from run import SKILL_STUBS
+
+    cases = {c["id"]: c["expect"] for name in ("assistant_cases.json", "assistant_shell_cases.json")
+             for c in load(name)}
+    for case_id, expect in cases.items():
+        if "answer_has" in expect:
+            assert expect["tools"] and all(isinstance(s, str) and s for s in expect["answer_has"]), case_id
+            stub = SKILL_STUBS[expect["tools"][0]].casefold()
+            assert all(s.casefold() in stub for s in expect["answer_has"]), case_id  # a fact the stub result holds
+        for key in ("command_matches", "command_not"):
+            if key in expect:
+                assert expect["tools"] == ["run_shell"], case_id
+                re.compile(expect[key])
+
+    assert {case_id: cases[case_id]["answer_has"] for case_id in (
+        "disk-free", "battery-level", "battery-left", "system-memory", "system-os", "system-uptime",
+        "procs-memory")} == {"disk-free": ["160"], "battery-level": ["78"], "battery-left": ["4 hours"],
+                             "system-memory": ["48"], "system-os": ["15.6"], "system-uptime": ["3 days"],
+                             "procs-memory": ["Chrome"]}
+    assert cases["shell-ls-downloads"] == {"tools": ["run_shell"], "command_matches": "Downloads",
+                                           "command_not": "/Users/me"}
+    assert cases["shell-terminal-list"]["command_matches"] == "Desktop"
+    assert cases["shell-port"]["command_matches"] == "8080"
+    assert cases["shell-port"]["command_not"] == "netstat -[a-z]*p|sudo"
+    assert {c: cases[c]["command_matches"] for c in ("shell-git-status", "shell-whoami", "shell-ping")} == {
+        "shell-git-status": "git status", "shell-whoami": "whoami", "shell-ping": "ping"}
 
 
 def test_the_shell_cases_are_consistent_with_the_skills_when_run_shell_is_on():

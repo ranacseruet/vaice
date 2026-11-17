@@ -825,6 +825,80 @@ def test_assistant_mode_warns_that_the_server_tools_setting_is_ignored(monkeypat
     assert "VAICE_LLAMACPP_TOOLS is ignored in assistant mode" in caplog.text
 
 
+FAKE_KEY = "fake-key-do-not-log-9f3a"
+
+
+def _helper(monkeypatch, url, model="lfm2.5-24b-a2b"):
+    monkeypatch.setattr(app.config, "BRAIN_URL", url)
+    monkeypatch.setattr(app.config, "BRAIN_MODEL", model)
+    monkeypatch.setattr(app.config, "BRAIN_API_KEY", FAKE_KEY)
+
+
+@pytest.mark.parametrize("url", ["http://localhost:1234/v1", "http://127.0.0.1:1234/v1", "http://[::1]:1234/v1"])
+def test_a_helper_on_this_machine_is_named_without_a_privacy_warning(monkeypatch, tmp_path, caplog, url):
+    _helper(monkeypatch, url)
+    with caplog.at_level(logging.DEBUG):
+        assert _assistant_main(monkeypatch, tmp_path)
+
+    assert "assistant brain: " in caplog.text and ", model lfm2.5-24b-a2b" in caplog.text
+    assert "not on this machine" not in caplog.text
+    assert FAKE_KEY not in caplog.text
+
+
+def test_a_remote_helper_gets_a_warning_that_says_what_is_sent_and_that_audio_stays(monkeypatch, tmp_path, caplog):
+    _helper(monkeypatch, "https://openrouter.ai/api/v1")
+    with caplog.at_level(logging.DEBUG):
+        assert _assistant_main(monkeypatch, tmp_path)
+
+    assert "assistant brain: openrouter.ai, model lfm2.5-24b-a2b" in caplog.text
+    (warning,) = [r for r in caplog.records if "not on this machine" in r.getMessage()]
+    assert warning.levelno == logging.WARNING
+    text = warning.getMessage()
+    assert "openrouter.ai" in text
+    for sent in ("what you say", "earlier turns", "file names", "process names", "computer's name",
+                 "shell command output"):
+        assert sent in text
+    assert "Audio does not leave" in text and "local llama-server" in text
+    assert FAKE_KEY not in caplog.text and "key" not in caplog.text.lower()  # the key is not even mentioned
+
+
+def test_a_helper_without_a_model_warns_but_the_app_starts(monkeypatch, tmp_path, caplog):
+    _helper(monkeypatch, "http://localhost:1234/v1", model="")
+    with caplog.at_level(logging.INFO):
+        assert _assistant_main(monkeypatch, tmp_path)  # continues
+
+    assert "VAICE_BRAIN_MODEL is empty" in caplog.text
+    assert "model (none set)" in caplog.text
+
+
+def test_without_a_helper_nothing_about_a_brain_is_logged(monkeypatch, tmp_path, caplog):
+    monkeypatch.setattr(app.config, "BRAIN_URL", "")
+    with caplog.at_level(logging.DEBUG):
+        _assistant_main(monkeypatch, tmp_path)
+
+    assert "assistant brain" not in caplog.text and "VAICE_BRAIN" not in caplog.text
+
+
+def test_chat_mode_ignores_a_helper_url_and_says_so_once(monkeypatch, tmp_path, caplog):
+    _helper(monkeypatch, "https://openrouter.ai/api/v1")
+    monkeypatch.setattr(app.config, "MODE", "chat")
+    with caplog.at_level(logging.DEBUG):
+        _main_with(monkeypatch, tmp_path, tools=None)
+
+    assert caplog.text.count("VAICE_BRAIN_URL is ignored in chat mode") == 1
+    assert "assistant brain" not in caplog.text and "not on this machine" not in caplog.text
+    assert FAKE_KEY not in caplog.text
+
+
+def test_chat_mode_without_a_helper_url_logs_nothing_about_it(monkeypatch, tmp_path, caplog):
+    monkeypatch.setattr(app.config, "BRAIN_URL", "")
+    monkeypatch.setattr(app.config, "MODE", "chat")
+    with caplog.at_level(logging.DEBUG):
+        _main_with(monkeypatch, tmp_path, tools=None)
+
+    assert "VAICE_BRAIN_URL" not in caplog.text
+
+
 def test_chat_mode_is_unchanged_by_the_assistant_responder_existing(monkeypatch, tmp_path, caplog):
     fetched = []
     monkeypatch.setattr(app, "AssistantResponder", lambda: pytest.fail("assistant built in chat mode"))
