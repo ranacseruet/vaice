@@ -867,6 +867,22 @@ def test_a_question_cut_off_before_its_audio_was_all_out_is_dropped(monkeypatch)
     assert s.ran == []
 
 
+def test_a_question_fully_queued_but_cut_off_before_it_was_all_handed_out_is_dropped(tts):
+    # /tts runs ahead of playback: the worker has queued the whole question and ended, yet the listener
+    # got only its first frame. The request must not be answerable, and closing the reply drops it.
+    tts._make = lambda text: FakeResponse([pcm_bytes(50), pcm_bytes(50)])
+    s = confirming(ask(QUIT))
+    gen = s.resp.respond(AUDIO, [], Turn())
+
+    next_on_fresh_thread(gen)
+    wait_until(lambda: not threads_named("vaice-assistant"))  # everything is queued
+
+    assert s.resp.pending().armed_at is None
+    gen.close()  # the user talked over it
+    assert s.resp.pending() is None
+    assert s.ran == []
+
+
 def test_a_question_whose_audio_failed_is_dropped_too(monkeypatch):
     monkeypatch.setattr(assistant.requests, "post", FakeTTS(lambda text: FakeResponse([], status=503)))
     s = confirming(ask(QUIT))
