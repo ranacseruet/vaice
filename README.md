@@ -346,7 +346,8 @@ level three" stores a note, and nothing is extracted from what you say. Three sk
   sentence of at least three words and is not bound to a moment: **vaice cannot remind you of anything** (nothing
   in it fires later), so a request such as "remind me to call Mom tomorrow at nine" is refused and answered with
   the fixed sentence "I can't set reminders or timers, so I haven't saved that." (not the model's own words: told of
-  the refusal, a model still said "I've noted it"), instead of being saved and announced as a reminder, and a word such as "Goodbye" is not a note ("there was nothing to remember").
+  the refusal, a model still said "I've noted it"), instead of being saved and announced as a reminder, a word such as "Goodbye" is not a note ("there was nothing to remember"), and neither is your question
+  written down ("The user asks where they park" is refused, so the model answers instead).
 - `forget(about)` deletes the notes that contain a word or phrase of at least 3 letters, and names them
   (`forgot: ...`).
 - `forget_everything` erases all of them, after the usual question (`Shall I erase all 3 notes I keep?`),

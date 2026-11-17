@@ -45,6 +45,11 @@ _REMINDER = re.compile(
 _CLOCK_TIME = re.compile(r"\bo'clock\b|\b\d{1,2}\s?(?:am|pm)\b|\bat \d{1,2}:\d{2}\b|\bat \d{1,2}\s*[.!?]*$", re.I)
 _HABIT = re.compile(r"\b(?:every|each|daily|usually|always|normally|weekdays?|weekends?|mornings?|evenings?|nights?)\b",
                     re.I)
+# The user's question written down as a note: "Where do I usually park my car?" as the first turn of a conversation
+# became remember("The user asks where they usually park their car") on the 2B, 10 of 10 (live eval, no history).
+# Only asking followed by a question word: "The user asks to be called Sam" is a preference and is kept
+_QUESTION = re.compile(r"\?\s*$|^(?:the\s+)?user\s+(?:asks|asked|is\s+asking|wants\s+to\s+know|wonders|wondered)\s+"
+                       r"(?:where|what|when|who|whom|whose|which|why|how|whether|if)\b", re.I)
 _FENCE = re.compile(r"`{3,}")
 _LIST_MARKER = re.compile(r"^(?:[-*+•>#]+|\d+[.)])(?:\s+|$)")
 
@@ -73,6 +78,8 @@ def clean_note(text) -> str:
         note = stripped
     if len(note.split()) < MIN_NOTE_WORDS:  # "Goodbye": the 2B model saved a farewell as a note (live eval, 5 of 5)
         raise SkillError("there was nothing to remember")
+    if _QUESTION.search(note):
+        raise SkillError("nothing was saved: that is the user's question, not a fact about them; answer it")
     # "Call Mom tomorrow at 9": saved as a note, then announced as a reminder (live eval)
     if _REMINDER.search(note) or (_CLOCK_TIME.search(note) and not _HABIT.search(note)):
         raise SkillError("nothing was saved: I can't set reminders or timers, I only keep lasting facts about you",

@@ -479,6 +479,29 @@ def test_the_remember_description_says_it_is_for_lasting_facts_and_not_for_remin
     assert "Not for reminders, timers or things to do later" in remember.description
 
 
+@pytest.mark.parametrize("raw", [
+    "The user asks where they usually park their car.",  # what the 2B wrote, live
+    "user asks where they usually park their car",
+    "The user asked what their sister's name is",
+    "The user wants to know whether it will rain",
+    "Where do I usually park my car?",
+    "The user is asking how much memory they have",
+])
+def test_the_users_question_is_not_a_note(raw):
+    with pytest.raises(SkillError, match="that is the user's question, not a fact about them"):
+        clean_note(raw)
+
+
+@pytest.mark.parametrize("raw", [
+    "The user asks to be called Sam.",
+    "The user asks for short answers.",
+    "The user always asks how the weather is in Lisbon",  # a habit, not this question
+    "The user wonders about nothing in particular",
+])
+def test_a_preference_about_asking_is_still_a_note(raw):
+    assert clean_note(raw) == raw
+
+
 def test_a_loaded_note_that_is_a_reminder_or_a_word_is_skipped_without_failing_the_load(tmp_path, caplog):
     path = tmp_path / "memory.json"
     path.write_text(json.dumps({"version": 1, "notes": ["Goodbye", "Call mom tomorrow at nine", NADIA]}))
