@@ -375,10 +375,11 @@ def test_the_required_sentences_are_cases():
 
 
 def test_the_assistant_cases_are_consistent_with_the_skills():
+    from vaice.memory import Memory
     from vaice.skills import default_skills
 
     cases = load("assistant_cases.json")
-    skills = default_skills()
+    skills = default_skills(memory=Memory(None))
     ids = [c["id"] for c in cases]
     assert len(ids) == len(set(ids))
     assert len(cases) >= 30
@@ -407,9 +408,12 @@ def test_the_answer_and_command_expectations_are_well_formed_and_where_the_stub_
              for c in load(name)}
     for case_id, expect in cases.items():
         if "answer_has" in expect:
-            assert expect["tools"] and all(isinstance(s, str) and s for s in expect["answer_has"]), case_id
-            stub = SKILL_STUBS[expect["tools"][0]].casefold()
-            assert all(s.casefold() in stub for s in expect["answer_has"]), case_id  # a fact the stub result holds
+            assert all(isinstance(s, str) and s for s in expect["answer_has"]), case_id
+            if expect["tools"]:
+                stub = SKILL_STUBS[expect["tools"][0]].casefold()
+                assert all(s.casefold() in stub for s in expect["answer_has"]), case_id  # a fact the stub result holds
+            else:  # a question answered from the notes (or from the model's knowledge, as with Paris)
+                assert case_id.startswith("memory-recall"), case_id
         for key in ("command_matches", "command_not"):
             if key in expect:
                 assert expect["tools"] == ["run_shell"], case_id
@@ -449,3 +453,26 @@ def test_the_shell_cases_are_consistent_with_the_skills_when_run_shell_is_on():
     assert sum(1 for c in cases if c["expect"]["tools"] == []) >= 4  # tempting ones that must not call it
     # without --shell the skill does not exist: this file is only for runs that pass it
     assert "run_shell" not in default_skills().names
+
+
+# --- {"contains": ...}: free text such as a note the model words itself ---
+
+REMEMBER_SISTER = {"tools": ["remember"], "args": {"remember": {"note": {"contains": "nadia"}}}}
+
+
+def test_contains_accepts_a_string_that_holds_the_text_ignoring_case():
+    assert verdict(REMEMBER_SISTER, [call("remember", note="The user's sister is called Nadia.")]) == "correct"
+    assert verdict(REMEMBER_SISTER, [call("remember", note="NADIA")]) == "correct"
+
+
+def test_contains_rejects_other_text_a_missing_argument_and_a_non_string():
+    for arguments in ({"note": "The user likes tea."}, {}, {"note": 5}, {"note": None}):
+        result = scoring.score(REMEMBER_SISTER, [("remember", json.dumps(arguments))])
+        assert result["verdict"] == "wrong_args", arguments
+
+
+def test_contains_works_inside_a_list_of_alternatives():
+    expect = {"tools": ["forget"], "args": {"forget": {"about": [{"contains": "sister"}, {"contains": "nadia"}]}}}
+
+    assert verdict(expect, [call("forget", about="Nadia")]) == "correct"
+    assert verdict(expect, [call("forget", about="parking")]) == "wrong_args"

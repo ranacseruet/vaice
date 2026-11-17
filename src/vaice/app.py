@@ -18,6 +18,7 @@ from vaice.confirm import Pending
 from vaice.conversation import Conversation, Turn
 from vaice.interruptible import InterruptSafeReplyOnPause, stop_playing_reply
 from vaice.lifecycle import install_stop_handler, request_stop
+from vaice.memory import Memory
 from vaice.responders.assistant import AssistantResponder
 from vaice.responders.base import Responder
 from vaice.responders.llamacpp import LlamaCppResponder, check_server, fetch_tools, write_capable_tools
@@ -32,6 +33,8 @@ ERROR_TEXT_LIMIT = 200  # characters of a failure shown in the UI; the traceback
 CHATBOT_HEIGHT = 500  # pixels; the default (400) leaves the transcript cramped next to the mic
 UI_TITLE = "vaice"  # the heading above the mic
 BUTTON_ONLY = "Only the Run button can approve this one; saying yes will not."
+NOTHING_REMEMBERED = "Nothing remembered."
+_MARKDOWN_PUNCTUATION = re.compile(r"([!-/:-@\[-`{-~])")  # every ASCII punctuation character
 
 
 def _subtitle() -> str:
@@ -80,7 +83,16 @@ def confirmation_panel(view: dict | None) -> tuple:
     return gr.update(visible=True), f"{view['question']}\n\n{only_button}{fence}\n{command}\n{fence}", view["id"]
 
 
-def refresh_view(conversation: Conversation, known: str, pending: Callable[[], Pending | None] | None = None) -> tuple:
+def memory_markdown(notes: list[str]) -> str:
+    """The Memory panel's text: the notes as a list. They are model-written, so each is shown as plain text: every
+    punctuation character is backslash-escaped (CommonMark), which leaves no link, image, HTML or emphasis."""
+    if not notes:
+        return NOTHING_REMEMBERED
+    return "\n".join("- " + _MARKDOWN_PUNCTUATION.sub(lambda m: "\\" + m.group(1), note) for note in notes)
+
+
+def refresh_view(conversation: Conversation, known: str, pending: Callable[[], Pending | None] | None = None,
+                 memory: Callable[[], list[str]] | None = None) -> tuple:
     """The timer's tick: the chatbot's and tool panel's new views when the conversation changed.
 
     The reply can finish before its parallel transcription session reports the transcript, so
@@ -89,6 +101,7 @@ def refresh_view(conversation: Conversation, known: str, pending: Callable[[], P
 
     With `pending` (a responder that asks for confirmation) the confirmation panel is part of the view:
     its visibility, text and the request's id (which the buttons pass back) come after the two views.
+    With `memory` (the notes, in assistant mode with memory on) the Memory panel's text comes after those.
     """
     view = (conversation.messages_for_ui(), conversation.tool_activity_for_ui())
     components = view
@@ -96,6 +109,10 @@ def refresh_view(conversation: Conversation, known: str, pending: Callable[[], P
         asked = pending_view(pending())
         view += (asked,)
         components += confirmation_panel(asked)
+    if memory is not None:
+        notes = memory()
+        view += (notes,)
+        components += (memory_markdown(notes),)
     rendered = json.dumps(view, ensure_ascii=False)
     if rendered == known:
         return (*(gr.skip() for _ in components), known)  # gr.skip(): leave the components alone
@@ -187,6 +204,13 @@ def build_stream(responder: Responder, conversation: Conversation) -> Stream:
         # 1 s timer (below) fills it when a tool round lands
         with gr.Accordion("Tool activity", open=False):
             tool_panel = gr.Markdown()
+        # Assistant mode with memory on: the notes it keeps about you; "New conversation" leaves them alone
+        memory = getattr(responder, "memory", None)
+        memory_outputs: list = []
+        if memory is not None:
+            with gr.Accordion("Memory", open=False):
+                memory_panel = gr.Markdown()
+            memory_outputs = [memory_panel]
 
         def reset() -> tuple[list, str]:
             for handler in list(getattr(stream, "handlers", {}).values()):  # per-connection handler copies
@@ -212,8 +236,8 @@ def build_stream(responder: Responder, conversation: Conversation) -> Stream:
                                 outputs=[confirm_panel, pending_id, seen])
 
         gr.Timer(VIEW_REFRESH_SECONDS).tick(
-            partial(refresh_view, conversation, pending=pending), inputs=[seen],
-            outputs=[chatbot, tool_panel, *confirm_outputs, seen])
+            partial(refresh_view, conversation, pending=pending, memory=None if memory is None else memory.notes),
+            inputs=[seen], outputs=[chatbot, tool_panel, *confirm_outputs, *memory_outputs, seen])
     return stream
 
 
@@ -265,9 +289,24 @@ def _announce_brain() -> None:
     if parts.hostname not in config.LOCAL_HOSTS:
         log.warning(
             "the brain at %s is not on this machine: what you say (as text), the earlier turns of the "
-            "conversation and the skills' results (file names, process names, this computer's name, shell command "
-            "output) are sent to it. Audio does not leave: speech recognition and speech output stay on the "
-            "local llama-server", parts.netloc)
+            "conversation, the skills' results (file names, process names, this computer's name, shell command "
+            "output)%s are sent to it. Audio does not leave: speech recognition and speech output stay on the "
+            "local llama-server", parts.netloc,
+            " and the notes you asked it to keep about you" if config.ASSISTANT_MEMORY else "")
+
+
+def _open_memory() -> Memory | None:
+    """Assistant mode: the notes it keeps (None when VAICE_ASSISTANT_MEMORY is off). The notes' text is never logged
+    here, only how many there are and where."""
+    if not config.ASSISTANT_MEMORY:
+        log.info("assistant memory is off (VAICE_ASSISTANT_MEMORY): no notes are kept or used")
+        return None
+    memory = Memory(config.MEMORY_FILE)
+    if config.MEMORY_FILE is None:
+        log.info("VAICE_DATA_DIR is empty: the notes the assistant keeps stay in memory only (nothing is persisted)")
+    else:
+        log.info("assistant memory: %d notes loaded from %s", len(memory), config.MEMORY_FILE)
+    return memory
 
 
 def main() -> None:
@@ -284,7 +323,7 @@ def main() -> None:
             if config.LLAMACPP_TOOLS:
                 log.warning("VAICE_LLAMACPP_TOOLS is ignored in assistant mode: the skills run in vaice, "
                             "not on llama-server")
-            responder = AssistantResponder()
+            responder = AssistantResponder(memory=_open_memory())
             _announce_brain()
             if config.ASSISTANT_SHELL:
                 log.warning("VAICE_ASSISTANT_SHELL is on: after you approve it, a shell command the assistant "

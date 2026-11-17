@@ -34,3 +34,12 @@ def realtime():
     yield start
     for server in servers:
         server.stop()
+
+
+@pytest.fixture(autouse=True)
+def no_real_memory_file(monkeypatch):
+    """No test reads or writes the real ~/.vaice/memory.json: a test that wants a file passes its own path.
+    (`config` is imported here, not at the top: it reads a .env at import, and conftest changes directory first.)"""
+    from vaice import config
+
+    monkeypatch.setattr(config, "MEMORY_FILE", None)

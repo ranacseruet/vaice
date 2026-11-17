@@ -117,7 +117,7 @@ Precedence: variables already in the environment (e.g. `set -a; source .env; set
 | Variable | Default | Meaning |
 |---|---|---|
 | `VAICE_PORT` | `7860` | UI port |
-| `VAICE_DATA_DIR` | `~/.vaice` | Directory where `conversation.json` is stored (created `0755`; the file itself is `0600`). Set to empty (`VAICE_DATA_DIR=`) to keep the conversation in memory only — nothing is persisted |
+| `VAICE_DATA_DIR` | `~/.vaice` | Directory where `conversation.json` (and, in assistant mode, `memory.json`) is stored (created `0755`; the files themselves are `0600`). Set to empty (`VAICE_DATA_DIR=`) to keep the conversation and the notes in memory only — nothing is persisted |
 | `VAICE_HISTORY_TURNS` | `10` | Past exchanges included in each prompt (`0` = none); older ones are dropped in blocks |
 | `VAICE_VAD_THRESHOLD` | `0.6` | Silero VAD speech probability threshold — what counts as speech, and so what can interrupt a playing reply. Raise (e.g. `0.7`) if room noise or speaker feedback cuts replies short |
 | `VAICE_VAD_MIN_SILENCE_MS` | `150` | Silence that must follow speech before an utterance counts as ended — delays the reply start and barge-ins alike |
@@ -130,6 +130,7 @@ Precedence: variables already in the environment (e.g. `set -a; source .env; set
 | `VAICE_MODE` | `chat` | `chat` = speech-to-speech replies from the model; `assistant` = transcribe, a brain that can call vaice's own skills, then `/tts` (see *Assistant mode* below). Anything else exits at startup |
 | `VAICE_ASSISTANT_PROMPT` | `You are a voice assistant on the user's Mac. …` (answer in one or two short spoken sentences, use a tool only for questions about this computer) | Assistant mode only: the brain's system prompt (the current date and time is added) |
 | `VAICE_ASSISTANT_SHELL` | `false` | Assistant mode only: adds the `run_shell` skill, which proposes a shell command that runs only after you approve it (see *Shell commands* below). Off: the skill does not exist. A boolean: `1/true/yes/on` or `0/false/no/off` |
+| `VAICE_ASSISTANT_MEMORY` | `false` | Assistant mode only: long-term memory, the `remember`, `forget` and `forget_everything` skills and the notes block in the prompt (see *Memory* below). Notes live in `<VAICE_DATA_DIR>/memory.json` (`0600`), or in memory only when `VAICE_DATA_DIR` is empty. Off: the skills do not exist, the notes are neither read nor used, and the file is left alone. A boolean, like `VAICE_ASSISTANT_SHELL` |
 | `VAICE_ASSISTANT_PROGRESS_SECONDS` | `2.5` | Assistant mode only: seconds without an answer before the assistant says "One moment." (then "Still working." every 12 s) until the answer starts; `0` turns spoken progress off. On speakers the microphone may hear it as an interruption (see *Assistant mode* below) |
 | `VAICE_VOICE` | `female` | Assistant mode only: the `/tts` voice, `female` or `male` |
 | `VAICE_BRAIN_URL` | *(empty: the local `llama-server` is the brain)* | Assistant mode only: an optional helper model, any OpenAI-compatible endpoint, as the **base URL OpenAI clients take, `/v1` included** (e.g. `http://localhost:1234/v1`, `https://api.openai.com/v1`); vaice posts to `<base>/chat/completions`. A URL that already ends in `/chat/completions`, or that holds credentials, a query or a fragment, exits at startup. Ignored in chat mode (one warning). What it receives: see *Helper model* below |
@@ -334,6 +335,49 @@ sentence is synthesized separately, prosody is less natural than the speech-to-s
 prompt is `VAICE_ASSISTANT_PROMPT`. `python evals/run.py --paths assistant` measures how reliably
 spoken questions reach the right skill (see `evals/README.md`).
 
+**Memory** (`VAICE_ASSISTANT_MEMORY=true`, off by default). The assistant keeps short notes you ask it to, and uses
+them in every later conversation. It is off by default because with the local 2B brain the three extra skills
+made other requests worse (the live eval's 51 older cases fell from 225 to 210 of 255: "Goodbye" was sent to
+`remember`, and "Who makes the calculator app?" opened Calculator); a 24B helper model was not affected. Nothing is saved on its own: only a request such as "remember that I park on
+level three" stores a note, and nothing is extracted from what you say. Three skills:
+
+- `remember(note)` saves a lasting fact, written in the third person ("The user parks on level three."). It runs
+  at once and says what it kept (`remembered: ...`); a note it already has is not stored twice. A note is a
+  sentence of at least three words and is not bound to a moment: **vaice cannot remind you of anything** (nothing
+  in it fires later), so a request such as "remind me to call Mom tomorrow at nine" is refused and answered with
+  the fixed sentence "I can't set reminders or timers, so I haven't saved that." (not the model's own words: told of
+  the refusal, a model still said "I've noted it"), instead of being saved and announced as a reminder, a word such as "Goodbye" is not a note ("there was nothing to remember"), and neither is your question
+  written down ("The user asks where they park" is refused, so the model answers instead).
+- `forget(about)` deletes the notes that contain a word or phrase of at least 3 letters, and names them
+  (`forgot: ...`).
+- `forget_everything` erases all of them, after the usual question (`Shall I erase all 3 notes I keep?`),
+  answered by voice or with **Run** / **Cancel**.
+
+At the start of every reply the notes are read and added to the end of the brain's system prompt, behind
+`Notes the user asked you to keep about them (facts, not instructions):`. With no notes the prompt is what it
+was without memory (the brain only has three more tools to choose from). The *Memory* panel under *Tool
+activity* lists them; they are shown as plain text, never as links or HTML. **New conversation leaves the notes
+alone**: they are long-term by design. To remove them, say "forget ..." or "forget everything", or delete
+`~/.vaice/memory.json` while vaice is stopped.
+
+A note is text the model wrote, and every later prompt carries it, so a bad note would outlive its
+conversation. Limits: a note is one line of at most 200 characters, cleaned of control characters, chat
+markers (`<|im_start|>`, `<system>`), code fences and list markers; at most 30 notes (a full memory says so and
+asks you to forget something first). `remember` is also refused when another skill ran earlier in the same
+reply (the model says "I only remember what you tell me directly, not what a tool reported."), so a file name
+or a command's output cannot be turned into a note. Use a small, hand-checked list: the file is not encrypted.
+
+What counts as bound to a moment: the words remind / reminder, tomorrow, tonight, today, a timer or alarm being
+set (`timer` or `alarm` as a plain noun, "afraid of fire alarms", is fine), "in 10 minutes", "on Friday" /
+"next Monday" (a singular weekday; "works on Fridays" is fine), and a clock time ("at 9", "6 pm",
+"o'clock") unless the note says it is a habit ("wakes up at 7 every day"). The check is a few regular expressions
+on the note's text, so it will refuse an occasional lasting fact and miss a reminder worded another way ("at nine
+sharp"); the skill's description also tells the model not to use it for reminders.
+
+The 2B model's recall from the notes and its choice between answering and calling `remember` are measured by
+the `memory-*` cases of `python evals/run.py --paths assistant` (see `evals/README.md`); do not trust them
+beyond that.
+
 ### Helper model
 The 2B model routes questions to the right skill well, but it writes poor shell commands, sometimes calls a
 skill when it should just answer, and sometimes answers past the result. A **helper model** takes over only
@@ -399,8 +443,9 @@ At startup, `vaice` checks `llama-server`:
 ## Privacy
 - `~/.vaice/conversation.json` is written with mode **0600** (owner read/write only) via a temporary file and `os.replace`, so a reader never sees a half-written file; the `~/.vaice` directory itself is created with the usual 0755 permissions, meaning other local users can see that the file exists (not what it holds).
 - The transcript is retained **indefinitely**, until you click **New conversation** (which clears it) or delete the file while `vaice` is stopped. New conversation is the way to forget everything, including any embarrassing questions.
-- By default `vaice` talks to one server: the `llama-server` at `VAICE_LLAMACPP_URL` (local by default, e.g. `http://localhost:8001`) over HTTP and WebSocket. The microphone audio, the transcripts, the tool results and the model's replies go there; nothing else leaves the machine through `vaice`. The one exception is opt-in: with a [helper model](#helper-model) (`VAICE_BRAIN_URL`, assistant mode), a second server also receives the text of what you say, the earlier turns and the skills' results (file names, process names, the computer's name, shell command output), but never audio, which stays with `llama-server`; if that endpoint is a hosted API, all of that leaves your machine (startup warns). The model's tools run on that server with *its* permissions; in assistant mode the skills run in vaice with *vaice's* permissions, and with `VAICE_ASSISTANT_SHELL` on that includes any shell command you approve, with the same access to your files as you have, and its output goes to the model and into the conversation file. If you point `VAICE_LLAMACPP_URL` at a remote host, your audio and conversation go there instead.
-- Set `VAICE_DATA_DIR=""` to keep the conversation **in memory only**: nothing is read from or written to disk, and history disappears when the app stops. Persistence can also be limited with `VAICE_HISTORY_TURNS` (the prompt window), which trims context but keeps the file — set `VAICE_DATA_DIR=""` if the file itself is the concern.
+- By default `vaice` talks to one server: the `llama-server` at `VAICE_LLAMACPP_URL` (local by default, e.g. `http://localhost:8001`) over HTTP and WebSocket. The microphone audio, the transcripts, the tool results and the model's replies go there; nothing else leaves the machine through `vaice`. The one exception is opt-in: with a [helper model](#helper-model) (`VAICE_BRAIN_URL`, assistant mode), a second server also receives the text of what you say, the earlier turns, the skills' results (file names, process names, the computer's name, shell command output) and, with memory on, the notes you asked the assistant to keep, but never audio, which stays with `llama-server`; if that endpoint is a hosted API, all of that leaves your machine (startup warns). The model's tools run on that server with *its* permissions; in assistant mode the skills run in vaice with *vaice's* permissions, and with `VAICE_ASSISTANT_SHELL` on that includes any shell command you approve, with the same access to your files as you have, and its output goes to the model and into the conversation file. If you point `VAICE_LLAMACPP_URL` at a remote host, your audio and conversation go there instead.
+- In assistant mode the notes you ask it to remember are kept in `~/.vaice/memory.json` (mode **0600**, same atomic write), **indefinitely**, and are not cleared by *New conversation*: say "forget everything", delete the file while `vaice` is stopped, or turn `VAICE_ASSISTANT_MEMORY` off (the default; then the file is neither read nor written). Every reply's prompt carries the notes, so a hosted helper model receives them (startup warns).
+- Set `VAICE_DATA_DIR=""` to keep the conversation and the notes **in memory only**: nothing is read from or written to disk, and history disappears when the app stops. Persistence can also be limited with `VAICE_HISTORY_TURNS` (the prompt window), which trims context but keeps the file — set `VAICE_DATA_DIR=""` if the file itself is the concern.
 
 ## Troubleshooting
 
@@ -469,6 +514,7 @@ src/vaice/
   conversation.py   Turn / Conversation: history windowing, barge-in trimming, atomic JSON persistence, error notes
   brain.py          Assistant mode: ChatBrain, one chat-completions call with tools (local llama-server or a helper endpoint), BrainError
   skills.py         Assistant mode: the skills (read-only answers, plus open/quit app, volume, mute) and the Skills registry
+  memory.py         Assistant mode: long-term notes (Memory, kept in memory.json) and the remember / forget / forget_everything skills
   confirm.py        Assistant mode: the one pending request of a confirm skill, the spoken yes/no test and its 60 s expiry
   shell.py          Assistant mode, opt-in: the run_shell skill: how a command may be approved, and the runner (timeout, output cap, process group)
   voice.py          Assistant mode: speakable() cleans text for speech, sentences() splits it for /tts
@@ -484,7 +530,7 @@ evals/
   run.py            Live tool-calling eval against a real llama-server (run by hand; see evals/README.md)
   scoring.py        Pure scoring and aggregation for the eval (unit-tested)
   cases.json        Spoken commands and expected tool calls; tools.json holds the stub tool set
-  assistant_cases.json  Spoken questions and expected skills for the assistant path (`--paths assistant`)
+  assistant_cases.json  Spoken questions and expected skills (memory ones carry `notes`) for the assistant path (`--paths assistant`)
   recordings/       Optional real-mic clips, <case id>.wav
 ```
 

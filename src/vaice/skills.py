@@ -23,6 +23,10 @@ import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from vaice.memory import Memory
 
 log = logging.getLogger(__name__)
 
@@ -39,10 +43,13 @@ VOLUME_STEP = 10  # points for volume_up / volume_down
 @dataclass(frozen=True)
 class SkillResult:
     """`speech`: short plain text for the model to answer from (no paths, no raw tables).
-    `detail`: what the UI's Tool activity panel shows (paths, raw output); empty means show `speech`."""
+    `detail`: what the UI's Tool activity panel shows (paths, raw output); empty means show `speech`.
+    `answer`: when set, the reply ends with exactly this sentence and the model is not asked again (see
+    `SkillError`)."""
 
     speech: str
     detail: str = ""
+    answer: str = ""
 
 
 @dataclass(frozen=True)
@@ -68,10 +75,20 @@ class Skill:
     # A skill that can be stopped (barge-in, the app ending) takes the reply's `stop` callable: `Skills.run` calls
     # this in place of `run` when it has one. `run` stays the fallback that cannot be stopped.
     run_stoppable: Callable[[dict, Callable[[], bool]], SkillResult] | None = None
+    # A skill that must not act on what a tool reported (it stores text the model chose, e.g. `remember`): the
+    # reply loop refuses it once another skill has run in the same reply. See `responders.assistant.decide`.
+    direct_only: bool = False
 
 
 class SkillError(Exception):
-    """A skill could not do its job for a reason worth saying aloud (the message is spoken)."""
+    """A skill could not do its job for a reason worth saying aloud (the message is spoken).
+
+    `answer`: a fixed sentence that ends the reply instead of the model's paraphrase of the failure, for a
+    refusal the model was seen misreporting (a refused reminder announced as "I've noted it")."""
+
+    def __init__(self, message: str, *, answer: str = ""):
+        super().__init__(message)
+        self.answer = answer
 
 
 class Skills:
@@ -90,6 +107,11 @@ class Skills:
         return [{"type": "function",
                  "function": {"name": s.name, "description": s.description, "parameters": s.parameters}}
                 for s in self.skills]
+
+    def direct_only(self, name: str) -> bool:
+        """Whether skill `name` is `direct_only` (an unknown name is not)."""
+        skill = self._by_name.get(name)
+        return skill is not None and skill.direct_only
 
     def _resolve(self, name: str, arguments: str) -> tuple[Skill, dict, str] | SkillResult:
         """The skill, its parsed arguments and its label; or the result that says why that is not possible."""
@@ -144,7 +166,7 @@ class Skills:
             return skill.run(args)
         except SkillError as exc:
             log.warning("skill %s failed: %s", name, exc)
-            return SkillResult(f"{label} failed: {exc}")
+            return SkillResult(f"{label} failed: {exc}", answer=exc.answer)
         except Exception as exc:
             log.exception("skill %s failed", name)
             return SkillResult(f"{label} failed: {type(exc).__name__}: {exc}")
@@ -491,9 +513,10 @@ def _mute_sound(args: dict) -> SkillResult:
     return SkillResult("sound muted" if muted else "sound unmuted")
 
 
-def default_skills(shell: bool = False) -> Skills:
-    """The skills the assistant path offers: five read-only checks, then the actions, and with `shell`
-    (`VAICE_ASSISTANT_SHELL`) `run_shell`, which asks first."""
+def default_skills(shell: bool = False, memory: "Memory | None" = None) -> Skills:
+    """The skills the assistant path offers: five read-only checks, then the actions, with `shell`
+    (`VAICE_ASSISTANT_SHELL`) `run_shell`, which asks first, and with a `memory` (`VAICE_ASSISTANT_MEMORY`) the
+    skills that keep and forget notes (see `memory.py`)."""
     nothing = {"type": "object", "properties": {}}
     app_name = {"type": "object",
                 "properties": {"name": {"type": "string",
@@ -544,4 +567,8 @@ def default_skills(shell: bool = False) -> Skills:
         from vaice.shell import shell_skill  # shell imports this module: not at the top
 
         skills.append(shell_skill())
+    if memory is not None:
+        from vaice.memory import memory_skills  # memory imports this module: not at the top
+
+        skills += memory_skills(memory)
     return Skills(skills)

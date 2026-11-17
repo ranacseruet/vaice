@@ -141,6 +141,12 @@ ASSISTANT_SHELL = _flag("VAICE_ASSISTANT_SHELL", default=False)
 ASSISTANT_PROGRESS_SECONDS = _number("VAICE_ASSISTANT_PROGRESS_SECONDS", default="2.5", kind=float)
 if not ASSISTANT_PROGRESS_SECONDS >= 0:
     raise SystemExit("vaice: VAICE_ASSISTANT_PROGRESS_SECONDS must be >= 0 (0 = no spoken progress)")
+# Assistant mode only: the assistant keeps short notes you ask it to remember ("remember that I park on level
+# three") in <VAICE_DATA_DIR>/memory.json, across conversations, and puts them into every prompt (so a remote
+# helper brain gets them too). Off: no memory skills and no notes in the prompt (an existing file is left alone).
+# Off by default: on the local 2B brain the memory skills cost 3 of the 51 older eval cases (225 -> 210 of 255:
+# remember("Goodbye"), a reminder sent to remember, and Calculator opened for "Who makes the calculator app?").
+ASSISTANT_MEMORY = _flag("VAICE_ASSISTANT_MEMORY", default=False)
 VOICE = _choice("VAICE_VOICE", default="female", choices=("female", "male"))
 
 
@@ -193,6 +199,7 @@ PORT = _number("VAICE_PORT", default="7860", kind=int)
 _DATA_DIR = os.getenv("VAICE_DATA_DIR", "~/.vaice")
 DATA_DIR = None if _DATA_DIR.strip() == "" else Path(_DATA_DIR).expanduser()
 CONVERSATION_FILE = None if DATA_DIR is None else DATA_DIR / "conversation.json"
+MEMORY_FILE = None if DATA_DIR is None else DATA_DIR / "memory.json"  # assistant mode's notes
 HISTORY_TURNS = _number("VAICE_HISTORY_TURNS", default="10", kind=int)
 
 # fastrtc's Silero VAD: what counts as speech, and when an utterance ends. A barge-in fires when

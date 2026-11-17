@@ -20,6 +20,7 @@ import tempfile
 import threading
 import time
 import wave
+from collections.abc import Sequence
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -32,6 +33,7 @@ import scoring
 from vaice import config
 from vaice.brain import ChatBrain
 from vaice.conversation import Turn
+from vaice.memory import Memory
 from vaice.responders.assistant import NOT_HEARD, build_messages, decide
 from vaice.responders.llamacpp import LlamaCppResponder, _transcribe
 from vaice.skills import SkillResult, Skills, default_skills
@@ -209,22 +211,38 @@ def run_text(url: str, prompt: str, tools: list[dict], audio, history) -> dict:
     return record
 
 
-def stub_skills(shell: bool = False) -> Skills:
+def stub_skills(shell: bool = False, memory: Memory | None = None) -> Skills:
     """The real skills' definitions with canned results: the model sees what the app offers, and nothing
     runs on this machine (the stubs replace each skill's `run`, and `run_stoppable` is dropped so the real
     command runner cannot be reached; Skills.run still checks the arguments). A `confirm` skill's `ask` is
-    stubbed to always ask, so no check of the machine (is the app running?) is made. `shell` adds `run_shell`."""
+    stubbed to always ask, so no check of the machine (is the app running?) is made. `shell` adds `run_shell`.
+
+    `memory` adds the memory skills, which stay real: they only touch that store, which must be in memory only
+    (no path), so an eval can never read or write the app's own `memory.json`."""
+    if memory is not None and memory.path is not None:
+        raise ValueError("the eval's memory must be in memory only: it must never touch a notes file")
     answers = {**ACTION_STUBS, **SHELL_STUBS}
     return Skills([
+        skill if skill.name not in answers and skill.name not in SKILL_STUBS else
         replace(skill, run_stoppable=None,
                 run=(lambda args, answer=answers[skill.name]: SkillResult(answer(args)))
                 if skill.name in answers else (lambda _args, text=SKILL_STUBS[skill.name]: SkillResult(text)),
                 **({"ask": lambda _args, name=skill.name: f"Shall I run {name.replace('_', ' ')}?"}
                    if skill.kind == "confirm" else {}))
-        for skill in default_skills(shell=shell).skills])
+        for skill in default_skills(shell=shell, memory=memory).skills])
 
 
-def run_assistant(url: str, prompt: str, skills: Skills, audio, history, brain: ChatBrain | None = None) -> dict:
+def case_memory(case: dict) -> Memory:
+    """A fresh in-memory store holding the case's `notes` (none for most cases): one per run, so a note a run
+    remembers or forgets never reaches the next one."""
+    memory = Memory(None)
+    for note in case.get("notes", []):
+        memory.add(note)
+    return memory
+
+
+def run_assistant(url: str, prompt: str, skills: Skills, audio, history, brain: ChatBrain | None = None,
+                  notes: Sequence[str] = ()) -> dict:
     record: dict = {"error": None, "calls": [], "transcript": None, "answer": None, "pending": False,
                     "latency_s": None}
     brain = brain or ChatBrain.local(url, ROUTE_TIMEOUT)
@@ -235,7 +253,7 @@ def run_assistant(url: str, prompt: str, skills: Skills, audio, history, brain: 
         record["transcript"] = transcript
         if transcript:
             decided = time.perf_counter()
-            decision = decide(brain, skills, build_messages(prompt, history, transcript), lambda: False,
+            decision = decide(brain, skills, build_messages(prompt, history, transcript, notes), lambda: False,
                               turn=Turn())
             record["decide_s"] = time.perf_counter() - decided
             record["brain_s"] = decision.brain_seconds
@@ -288,6 +306,9 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
                                          "VAICE_ASSISTANT_PROMPT for assistant")
     parser.add_argument("--shell", action="store_true",
                         help="assistant path: also offer the run_shell skill (stubbed: it asks, nothing is run)")
+    parser.add_argument("--no-memory", action="store_true",
+                        help="assistant path: leave out the memory skills and the case notes (default: on, as in the "
+                             "app); the store is always in memory, never the app's memory.json")
     parser.add_argument("--brain-url", default=config.BRAIN_URL,
                         help="assistant path: the brain's OpenAI-compatible base URL, /v1 included (default: "
                              "VAICE_BRAIN_URL; empty = the local llama-server). The key is read from "
@@ -404,7 +425,6 @@ def main(argv: list[str] | None = None) -> None:
     info = server_info(url)
     prompts = {"interleaved": args.prompt or config.LLAMACPP_PROMPT, "text": args.prompt or TEXT_PROMPT,
                "assistant": args.prompt or config.ASSISTANT_PROMPT}
-    skills = stub_skills(shell=args.shell)
     history = HISTORY if args.history else []
     out = args.out or HERE / "results" / f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.json"
 
@@ -428,7 +448,10 @@ def main(argv: list[str] | None = None) -> None:
                         if path == "interleaved":
                             record = run_interleaved(url, prompts[path], tools, results, audio[case["id"]], history)
                         elif path == "assistant":
-                            record = run_assistant(url, prompts[path], skills, audio[case["id"]], history, brain)
+                            memory = None if args.no_memory else case_memory(case)  # fresh for every run
+                            record = run_assistant(url, prompts[path], stub_skills(shell=args.shell, memory=memory),
+                                                   audio[case["id"]], history, brain,
+                                                   notes=[] if memory is None else memory.notes())
                         else:
                             record = run_text(url, prompts[path], tools, audio[case["id"]], history)
                         record.update(case=case["id"], say=case["say"], path=path, repeat=repeat)
@@ -446,8 +469,8 @@ def main(argv: list[str] | None = None) -> None:
     summary = print_summary(runs, args.paths, [c["id"] for c in cases], brain_used)
 
     config_used = {"paths": args.paths, "cases_file": args.cases_file, "repeats": args.repeats,
-                   "shell": args.shell, "history": history, "prompts": prompts, "cases": [c["id"] for c in cases],
-                   "platform": platform.platform()}
+                   "shell": args.shell, "memory": not args.no_memory, "history": history, "prompts": prompts,
+                   "cases": [c["id"] for c in cases], "platform": platform.platform()}
     if brain_used is not None:
         config_used["brain"] = brain_used  # the host and the model only: never the key, never the URL's path
     document = {"label": args.label, "started": started, "config": config_used, "server": info,

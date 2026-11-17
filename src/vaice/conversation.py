@@ -34,6 +34,25 @@ def _cap(text: str, limit: int) -> str:
     return text[: limit - len(_TRUNCATED)].rstrip() + _TRUNCATED
 
 
+def write_json_atomically(path: Path, data) -> None:
+    """Write `data` as JSON to `path` through a temp file next to it and `os.replace`, so a reader sees the old
+    file or the new one, never half of one. `mkstemp` creates the file with mode 0600. Raises OSError; no temp
+    file is left behind. Callers serialize their own writers (one temp name per call, but a replace is last-wins)."""
+    tmp: str | None = None
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name, suffix=".tmp")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+        os.replace(tmp, path)
+        tmp = None
+    finally:
+        if tmp is not None:
+            # the temp file is already gone, or cannot be removed either
+            with contextlib.suppress(OSError):
+                os.unlink(tmp)
+
+
 class Turn:
     """One exchange: what the user said, and the part of the reply that was played.
 
@@ -301,23 +320,11 @@ class Conversation:
         if not self._path:
             return
         with self._lock:  # re-entrant: also serializes writers so they can't clobber each other's temp file
-            tmp: str | None = None
             try:
-                data = {"version": _VERSION, "turns": [t.to_dict() for t in self._turns]}
-                self._path.parent.mkdir(parents=True, exist_ok=True)
-                fd, tmp = tempfile.mkstemp(dir=self._path.parent, prefix=self._path.name, suffix=".tmp")
-                with os.fdopen(fd, "w", encoding="utf-8") as f:
-                    json.dump(data, f)
-                os.replace(tmp, self._path)  # readers see the old file or the new one, never half of one
-                tmp = None
+                write_json_atomically(self._path, {"version": _VERSION, "turns": [t.to_dict() for t in self._turns]})
             except OSError as exc:
                 log.warning("could not save the conversation to %s (%s: %s); continuing in memory",
                             self._path, type(exc).__name__, exc)
-            finally:
-                if tmp is not None:
-                    # the temp file is already gone, or cannot be removed either
-                    with contextlib.suppress(OSError):
-                        os.unlink(tmp)
 
     def _load(self) -> list[Turn]:
         try:

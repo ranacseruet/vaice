@@ -19,6 +19,7 @@ from vaice.app import CHATBOT_HEIGHT, UI_TITLE, VIEW_REFRESH_SECONDS, build_stre
 from vaice.confirm import Pending
 from vaice.conversation import Conversation
 from vaice.interruptible import InterruptSafeReplyOnPause
+from vaice.memory import Memory
 from vaice.responders.llamacpp import LlamaCppResponder
 
 AUDIO = (48000, np.zeros((1, 480), dtype=np.int16))
@@ -774,7 +775,10 @@ def test_vaice_up_exits_with_the_servers_message_and_starts_nothing_else(monkeyp
 
 class FakeAssistant:
     name = "assistant"
-    skills = SimpleNamespace(names=("disk_space", "battery_status"))  # the one attribute main() reads
+    skills = SimpleNamespace(names=("disk_space", "battery_status"))  # the attribute main() reads
+
+    def __init__(self, memory=None):
+        self.memory = memory
 
 
 def _assistant_main(monkeypatch, tmp_path, tools=None):
@@ -1125,3 +1129,220 @@ def test_new_conversation_clears_a_waiting_request_and_chat_mode_does_not_need_t
 
     assert responder.cleared == 1 and responder.pending() is None
     confirm_page(FakeResponder()).clicks["New conversation"][0]()  # no clear_pending: no error
+
+
+# -- assistant mode with memory: the Memory panel, the startup line and the privacy warning
+
+
+class MemoryResponder(FakeResponder):
+    """What `build_stream` finds on an assistant responder with memory on: a `memory` holding the notes."""
+
+    def __init__(self, memory):
+        super().__init__()
+        self.memory = memory
+
+
+def _tick_fn(stream):
+    config = stream.ui.get_config_file()
+    ours = [c for c in config["components"] if c["type"] == "timer" and c["props"]["value"] == VIEW_REFRESH_SECONDS]
+    (tick,) = [d for d in config["dependencies"] if d["targets"][0] == (ours[0]["id"], "tick")]
+    return config, tick, stream.ui.fns[tick["id"]].fn
+
+
+def test_the_memory_panel_is_a_collapsed_accordion_under_the_tool_panel_in_assistant_mode_with_memory():
+    stream = build_stream(MemoryResponder(Memory(None)), Conversation())
+    config = stream.ui.get_config_file()
+
+    labels = [c["props"]["label"] for c in config["components"] if c["type"] == "accordion"]
+    assert labels == ["Tool activity", "Memory"]  # in the order they appear
+    memory_accordion = [c for c in config["components"] if c["type"] == "accordion"][1]
+    assert memory_accordion["props"]["open"] is False
+
+
+def test_chat_mode_and_assistant_mode_without_memory_have_no_memory_panel():
+    class NoMemory(FakeResponder):
+        memory = None  # VAICE_ASSISTANT_MEMORY off
+
+    for responder in (FakeResponder(), NoMemory()):
+        stream = build_stream(responder, Conversation())
+        config = stream.ui.get_config_file()
+        assert [c["props"]["label"] for c in config["components"] if c["type"] == "accordion"] == ["Tool activity"]
+        _, tick, tick_fn = _tick_fn(stream)
+        assert len(tick["outputs"]) == 3  # chatbot, tool panel, seen: no memory column
+        assert len(tick_fn("")) == 3
+
+
+def test_the_timer_fills_the_memory_panel_when_the_notes_change_and_is_silent_otherwise():
+    memory = Memory(None)
+    stream = build_stream(MemoryResponder(memory), Conversation())
+    _, tick, tick_fn = _tick_fn(stream)
+    assert len(tick["outputs"]) == 4  # chatbot, tool panel, memory panel, seen
+
+    _, _, shown, seen = tick_fn("")
+    assert shown == "Nothing remembered."
+    assert tick_fn(seen)[0] == {"__type__": "update"}  # unchanged: nothing re-rendered
+
+    memory.add("The user parks on level three.")
+    _, _, shown, seen = tick_fn(seen)
+    assert shown == "- The user parks on level three\\."
+    assert tick_fn(seen)[0] == {"__type__": "update"}
+
+    memory.clear()
+    assert tick_fn(seen)[2] == "Nothing remembered."
+
+
+def test_the_memory_panel_comes_after_the_confirmation_panel_when_both_exist():
+    class Asking(MemoryResponder):
+        def pending(self):
+            return None
+
+        approve = cancel = clear_pending = staticmethod(lambda *_args: None)
+
+    stream = build_stream(Asking(Memory(None)), Conversation())
+    _, tick, tick_fn = _tick_fn(stream)
+
+    result = tick_fn("")
+    assert len(tick["outputs"]) == len(result) == 7  # chatbot, tool, confirm x3, memory, seen
+    assert result[5] == "Nothing remembered."
+
+
+def test_new_conversation_leaves_the_notes_alone():
+    memory = Memory(None)
+    memory.add("The user parks on level three.")
+    conversation = Conversation()
+    stream = build_stream(MemoryResponder(memory), conversation)
+    config = stream.ui.get_config_file()
+    (click,) = [d for d in config["dependencies"] if d["targets"][0][1] == "click"]
+    conversation.start_turn().set_user_text("hello")
+
+    assert stream.ui.fns[click["id"]].fn() == ([], "")  # still just the chatbot and the tool panel
+
+    assert conversation.messages_for_ui() == []
+    assert memory.notes() == ["The user parks on level three."]  # long-term by design
+    (clear,) = [d for d in config["dependencies"] if d["targets"][0][1] == "clear"]
+    stream.ui.fns[clear["id"]].fn()  # the chatbot's trash icon
+    assert memory.notes() == ["The user parks on level three."]
+
+
+HOSTILE_NOTES = [
+    "The user likes [a link](http://evil.example/steal) a lot.",
+    "<img src=x onerror=alert(1)> and <script>alert(1)</script> and <b>bold</b>",
+    "**strong** and _emphasis_ and `code` and ~~strike~~",
+    "![pixel](http://evil.example/p.png)",
+    "bare http://evil.example/x and www.evil.example and <http://evil.example/auto>",
+    "# heading and > quote and 1. list and - item and | table | row",
+    "back\\slash and \\[escaped\\] and trailing \\",
+    "entity &lt;b&gt; &amp; &#60;i&#62;",
+]
+
+
+def test_the_memory_panel_shows_notes_as_plain_text_without_links_html_or_emphasis():
+    from vaice.app import memory_markdown
+
+    markdown_it = pytest.importorskip("markdown_it")
+    renderer = markdown_it.MarkdownIt("commonmark", {"html": True, "linkify": False})
+
+    text = memory_markdown(HOSTILE_NOTES)
+
+    html = renderer.render(text)
+    for tag in ("<a ", "<img", "<script", "<b>", "<strong", "<em>", "<code", "<del", "<h1", "<blockquote", "<table",
+                "<ol"):
+        assert tag not in html, (tag, html)
+    assert html.count("<li>") == len(HOSTILE_NOTES) and "<ul>" in html
+    for fragment in ("evil.example", "alert(1)", "strong", "emphasis"):  # the words themselves are all still shown
+        assert fragment in html.replace("&amp;", "&")
+
+
+def test_the_memory_panel_text_round_trips_and_lists_an_empty_memory_plainly():
+    import re
+
+    from vaice.app import memory_markdown
+
+    assert memory_markdown([]) == "Nothing remembered."
+    lines = memory_markdown(HOSTILE_NOTES).split("\n")
+    assert len(lines) == len(HOSTILE_NOTES) and all(line.startswith("- ") for line in lines)
+    assert [re.sub(r"\\(.)", r"\1", line[2:]) for line in lines] == HOSTILE_NOTES  # escaping only adds backslashes
+
+
+def _memory_main(monkeypatch, tmp_path, notes=None, memory_file="default", on=True):
+    """main() in assistant mode with the real `_open_memory`; returns the `memory` the responder was given."""
+    given = []
+
+    class Responder(FakeAssistant):
+        def __init__(self, memory=None):
+            super().__init__(memory)
+            given.append(memory)
+
+    path = tmp_path / "memory.json" if memory_file == "default" else memory_file
+    if notes is not None and path is not None:
+        path.write_text(json.dumps({"version": 1, "notes": notes}))
+    monkeypatch.setattr(app.config, "ASSISTANT_MEMORY", on)
+    monkeypatch.setattr(app.config, "MEMORY_FILE", path)
+    monkeypatch.setattr(app.config, "MODE", "assistant")
+    monkeypatch.setattr(app, "AssistantResponder", Responder)
+    assert _main_with(monkeypatch, tmp_path, tools=None)
+    return given[0]
+
+
+def test_startup_says_how_many_notes_were_loaded_and_from_where_but_never_what_they_say(monkeypatch, tmp_path, caplog):
+    secret = "The user's locker code is 4417."
+    with caplog.at_level(logging.DEBUG):
+        memory = _memory_main(monkeypatch, tmp_path, notes=[secret, "The user parks on level three."])
+
+    assert memory.notes()[0] == secret
+    assert f"assistant memory: 2 notes loaded from {tmp_path / 'memory.json'}" in caplog.text
+    assert "4417" not in caplog.text and "level three" not in caplog.text
+
+
+def test_startup_with_no_file_loads_zero_notes(monkeypatch, tmp_path, caplog):
+    with caplog.at_level(logging.INFO, logger="vaice.app"):
+        _memory_main(monkeypatch, tmp_path)
+
+    assert "assistant memory: 0 notes loaded from" in caplog.text
+
+
+def test_with_no_data_dir_the_notes_stay_in_memory_and_startup_says_so(monkeypatch, tmp_path, caplog):
+    with caplog.at_level(logging.INFO, logger="vaice.app"):
+        memory = _memory_main(monkeypatch, tmp_path, memory_file=None)
+
+    assert memory.path is None
+    assert "notes the assistant keeps stay in memory only" in caplog.text
+
+
+def test_with_memory_off_the_responder_gets_no_memory_the_file_is_left_alone_and_startup_says_so(
+        monkeypatch, tmp_path, caplog):
+    path = tmp_path / "memory.json"
+    path.write_text("not even json")  # an off switch must not read it, let alone replace it
+    with caplog.at_level(logging.INFO, logger="vaice.app"):
+        memory = _memory_main(monkeypatch, tmp_path, memory_file=path, on=False)
+
+    assert memory is None
+    assert path.read_text() == "not even json"
+    assert "assistant memory is off" in caplog.text and "VAICE_ASSISTANT_MEMORY" in caplog.text
+
+
+def test_chat_mode_does_not_open_the_memory(monkeypatch, tmp_path):
+    monkeypatch.setattr(app, "_open_memory", lambda: pytest.fail("chat mode opened the memory"))
+    monkeypatch.setattr(app.config, "MODE", "chat")
+
+    assert _main_with(monkeypatch, tmp_path, tools=None)
+
+
+def test_a_remote_helper_warning_says_the_saved_notes_are_sent_too_only_while_memory_is_on(
+        monkeypatch, tmp_path, caplog):
+    _helper(monkeypatch, "https://openrouter.ai/api/v1")
+    monkeypatch.setattr(app.config, "ASSISTANT_MEMORY", True)
+    with caplog.at_level(logging.WARNING):
+        assert _assistant_main(monkeypatch, tmp_path)
+
+    (warning,) = [r for r in caplog.records if "not on this machine" in r.getMessage()]
+    assert "the notes you asked it to keep about you" in warning.getMessage()
+    assert "Audio does not leave" in warning.getMessage()
+
+    caplog.clear()
+    monkeypatch.setattr(app.config, "ASSISTANT_MEMORY", False)
+    with caplog.at_level(logging.WARNING):
+        assert _assistant_main(monkeypatch, tmp_path)
+
+    (warning,) = [r for r in caplog.records if "not on this machine" in r.getMessage()]
+    assert "notes" not in warning.getMessage()
