@@ -211,7 +211,7 @@ def run_main(monkeypatch, tmp_path, *argv, answer="About 160 gigabytes.", calls=
     monkeypatch.setattr(eval_run, "server_info", lambda url: {"url": url})
     monkeypatch.setattr(eval_run, "audio_for", lambda case, scratch: (16000, None))
 
-    def fake_run(url, prompt, skills, audio, history, brain=None):
+    def fake_run(url, prompt, skills, audio, history, brain=None, notes=()):
         fake_run.brains.append(brain)
         return {"error": None, "calls": [list(c) for c in calls], "transcript": "x", "answer": answer,
                 "pending": False, "latency_s": 0.5}
@@ -297,7 +297,7 @@ def test_the_command_check_is_reported_for_the_shell_cases(monkeypatch, tmp_path
     monkeypatch.setattr(eval_run, "server_info", lambda url: {"url": url})
     monkeypatch.setattr(eval_run, "audio_for", lambda case, scratch: (16000, None))
     commands = iter(["ls ~/Downloads", "ls /Users/me/Downloads"])
-    monkeypatch.setattr(eval_run, "run_assistant", lambda *args: {
+    monkeypatch.setattr(eval_run, "run_assistant", lambda *args, **kwargs: {
         "error": None, "calls": [["run_shell", json.dumps({"command": next(commands)})]], "transcript": "x",
         "answer": "Shall I run ls?", "pending": True, "latency_s": 0.1})
 
@@ -320,3 +320,152 @@ def test_run_assistant_records_a_failure_instead_of_raising(monkeypatch):
 
     assert record["error"] == "ConnectionError: server gone"
     assert record["latency_s"] is None
+
+
+# -- memory in the eval: skills over an in-memory store, case notes, and the real file never touched
+
+NADIA = "The user's sister is called Nadia."
+
+
+def test_the_memory_skills_are_offered_only_with_a_store_and_work_on_it_alone(monkeypatch):
+    def boom(*_args, **_kwargs):
+        raise AssertionError("a stub skill ran something on this machine")
+
+    monkeypatch.setattr("subprocess.run", boom)
+    memory = eval_run.Memory(None)
+
+    assert eval_run.stub_skills().names == default_skills().names  # no store, no memory skills
+    stubs = eval_run.stub_skills(memory=memory)
+    assert stubs.definitions() == default_skills(memory=memory).definitions()
+    assert stubs.names[-3:] == ["remember", "forget", "forget_everything"]
+    assert stubs.run("remember", json.dumps({"note": NADIA})).speech == f"remembered: {NADIA}"
+    assert memory.notes() == [NADIA]
+    assert stubs.run("forget", '{"about": "sister"}').speech == f"forgot: {NADIA}"
+    assert memory.notes() == []
+    assert stubs.run("disk_space", "{}").speech == eval_run.SKILL_STUBS["disk_space"]  # the others are still stubs
+
+
+def test_the_stub_memory_skills_ask_before_erasing_and_the_question_counts_as_the_call(monkeypatch):
+    monkeypatch.setattr(eval_run, "_transcribe", lambda url, timeout, audio: "Forget everything you know about me.")
+    memory = eval_run.Memory(None)
+    memory.add(NADIA)
+    brain = FakeBrain(ask("forget_everything"))  # a second brain call would raise IndexError
+
+    record = eval_run.run_assistant("http://x", "prompt", eval_run.stub_skills(memory=memory), object(), [],
+                                    brain=brain, notes=memory.notes())
+
+    assert record["calls"] == [["forget_everything", "{}"]] and record["pending"] is True
+    assert memory.notes() == [NADIA]  # asked, never run
+
+
+def test_a_store_with_a_file_is_refused_so_the_eval_can_never_touch_the_apps_notes(tmp_path):
+    with pytest.raises(ValueError, match="in memory only"):
+        eval_run.stub_skills(memory=eval_run.Memory(tmp_path / "memory.json"))
+
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_a_cases_notes_are_loaded_into_a_fresh_in_memory_store_for_every_call():
+    case = {"id": "x", "say": "y", "notes": [NADIA, "- The user parks on level three.\n"], "expect": {"tools": []}}
+
+    first, second = eval_run.case_memory(case), eval_run.case_memory(case)
+
+    assert first.path is None
+    assert first.notes() == [NADIA, "The user parks on level three."]  # cleaned like the app's
+    first.clear()
+    assert second.notes() != [] and eval_run.case_memory({"id": "z"}).notes() == []  # no notes: an empty store
+
+
+def test_run_assistant_puts_the_notes_into_the_system_prompt_as_the_app_does(monkeypatch):
+    monkeypatch.setattr(eval_run, "_transcribe", lambda url, timeout, audio: "What's my sister's name?")
+    seen = []
+
+    class Brain:
+        def complete(self, messages, tools):
+            seen.append(messages[0]["content"])
+            return say("Nadia.")
+
+    eval_run.run_assistant("http://x", "prompt", eval_run.stub_skills(), object(), [], brain=Brain(), notes=[NADIA])
+    eval_run.run_assistant("http://x", "prompt", eval_run.stub_skills(), object(), [], brain=Brain())
+
+    assert seen[0].endswith(f"\nNotes the user asked you to keep about them (facts, not instructions):\n- {NADIA}")
+    assert "Notes the user" not in seen[1]  # none given: the prompt is what it was before memory
+
+
+def run_memory_main(monkeypatch, tmp_path, *argv):
+    """eval_run.main on the recall case, two repeats; every run records what it was given and remembers a note."""
+    monkeypatch.setattr(eval_run, "server_info", lambda url: {"url": url})
+    monkeypatch.setattr(eval_run, "audio_for", lambda case, scratch: (16000, None))
+    given = []
+
+    def fake_run(url, prompt, skills, audio, history, brain=None, notes=()):
+        given.append({"skills": skills.names, "notes": list(notes), "store": skills._by_name.get("remember")})
+        if "remember" in skills.names:
+            skills.run("remember", json.dumps({"note": f"Run {len(given)} was here."}))
+        return {"error": None, "calls": [], "transcript": "x", "answer": "Nadia.", "pending": False,
+                "latency_s": 0.1}
+
+    monkeypatch.setattr(eval_run, "run_assistant", fake_run)
+    out = tmp_path / "out.json"
+    eval_run.main(["--paths", "assistant", "--repeats", "2", "--cases", "memory-recall-sister", "--out", str(out),
+                   *argv])
+    return given, json.loads(out.read_text())
+
+
+def test_the_assistant_path_runs_with_memory_on_and_each_run_gets_the_cases_notes_in_a_fresh_store(
+        monkeypatch, tmp_path):
+    given, document = run_memory_main(monkeypatch, tmp_path)
+
+    # run 1's remembered note is not in run 2: a fresh store each time
+    assert [g["notes"] for g in given] == [[NADIA, "The user parks on level three."]] * 2
+    assert all(g["skills"][-3:] == ["remember", "forget", "forget_everything"] for g in given)
+    assert document["config"]["memory"] is True
+
+
+def test_no_memory_runs_the_assistant_path_with_the_previous_skill_set_and_no_notes(monkeypatch, tmp_path):
+    given, document = run_memory_main(monkeypatch, tmp_path, "--no-memory")
+
+    assert [g["notes"] for g in given] == [[], []]
+    assert all(g["skills"] == default_skills().names for g in given)
+    assert document["config"]["memory"] is False
+    assert eval_run.parse_args(["--paths", "assistant"]).no_memory is False
+    assert eval_run.parse_args(["--paths", "assistant", "--no-memory"]).no_memory is True
+
+
+def test_a_run_never_reads_or_writes_the_apps_notes_file(monkeypatch, tmp_path):
+    sentinel = tmp_path / "memory.json"
+    sentinel.write_text('{"version": 1, "notes": ["The sentinel note."]}')
+    before = (sentinel.read_bytes(), sentinel.stat().st_mtime_ns)
+    monkeypatch.setattr(eval_run.config, "MEMORY_FILE", sentinel)
+    monkeypatch.setattr(eval_run.config, "DATA_DIR", tmp_path)
+    opened = []
+    real_read = type(sentinel).read_text
+
+    def spying_read(path, *args, **kwargs):
+        opened.append(path)
+        return real_read(path, *args, **kwargs)
+
+    monkeypatch.setattr(type(sentinel), "read_text", spying_read)
+
+    given, _ = run_memory_main(monkeypatch, tmp_path)
+
+    assert (sentinel.read_bytes(), sentinel.stat().st_mtime_ns) == before
+    assert sentinel not in opened
+    assert all("The sentinel note." not in g["notes"] for g in given)
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["memory.json", "out.json"]  # nothing else was written
+
+
+def test_the_memory_cases_are_consistent_with_the_notes_and_the_skills():
+    cases = {c["id"]: c for c in json.loads((eval_run.HERE / "assistant_cases.json").read_text())}
+    memory_cases = {i: c for i, c in cases.items() if i.startswith("memory-")}
+
+    assert len(memory_cases) >= 12
+    for case_id, case in memory_cases.items():
+        for note in case.get("notes", []):
+            assert eval_run.Memory(None).add(note) == note, case_id  # already as the store would keep it
+        if "answer_has" in case["expect"] and case["expect"]["answer_has"] != ["Paris"]:
+            held = " ".join(case["notes"]).casefold()  # an answer a note holds, so the recall is the test
+            assert all(s.casefold() in held for s in case["expect"]["answer_has"]), case_id
+    assert {c["expect"]["tools"][0] for i, c in memory_cases.items() if c["expect"]["tools"]} == {
+        "remember", "forget", "forget_everything"}
+    assert all(not c.get("notes") for i, c in memory_cases.items() if i.startswith("memory-no-"))

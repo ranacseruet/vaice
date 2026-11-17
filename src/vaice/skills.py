@@ -23,6 +23,10 @@ import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from vaice.memory import Memory
 
 log = logging.getLogger(__name__)
 
@@ -68,6 +72,9 @@ class Skill:
     # A skill that can be stopped (barge-in, the app ending) takes the reply's `stop` callable: `Skills.run` calls
     # this in place of `run` when it has one. `run` stays the fallback that cannot be stopped.
     run_stoppable: Callable[[dict, Callable[[], bool]], SkillResult] | None = None
+    # A skill that must not act on what a tool reported (it stores text the model chose, e.g. `remember`): the
+    # reply loop refuses it once another skill has run in the same reply. See `responders.assistant.decide`.
+    direct_only: bool = False
 
 
 class SkillError(Exception):
@@ -90,6 +97,11 @@ class Skills:
         return [{"type": "function",
                  "function": {"name": s.name, "description": s.description, "parameters": s.parameters}}
                 for s in self.skills]
+
+    def direct_only(self, name: str) -> bool:
+        """Whether skill `name` is `direct_only` (an unknown name is not)."""
+        skill = self._by_name.get(name)
+        return skill is not None and skill.direct_only
 
     def _resolve(self, name: str, arguments: str) -> tuple[Skill, dict, str] | SkillResult:
         """The skill, its parsed arguments and its label; or the result that says why that is not possible."""
@@ -491,9 +503,10 @@ def _mute_sound(args: dict) -> SkillResult:
     return SkillResult("sound muted" if muted else "sound unmuted")
 
 
-def default_skills(shell: bool = False) -> Skills:
-    """The skills the assistant path offers: five read-only checks, then the actions, and with `shell`
-    (`VAICE_ASSISTANT_SHELL`) `run_shell`, which asks first."""
+def default_skills(shell: bool = False, memory: "Memory | None" = None) -> Skills:
+    """The skills the assistant path offers: five read-only checks, then the actions, with `shell`
+    (`VAICE_ASSISTANT_SHELL`) `run_shell`, which asks first, and with a `memory` (`VAICE_ASSISTANT_MEMORY`) the
+    skills that keep and forget notes (see `memory.py`)."""
     nothing = {"type": "object", "properties": {}}
     app_name = {"type": "object",
                 "properties": {"name": {"type": "string",
@@ -544,4 +557,8 @@ def default_skills(shell: bool = False) -> Skills:
         from vaice.shell import shell_skill  # shell imports this module: not at the top
 
         skills.append(shell_skill())
+    if memory is not None:
+        from vaice.memory import memory_skills  # memory imports this module: not at the top
+
+        skills += memory_skills(memory)
     return Skills(skills)

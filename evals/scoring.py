@@ -42,10 +42,13 @@ def _matches(wanted, actual) -> bool:
     """One expected value against one actual value.
 
     A list holds accepted alternatives. Strings compare case-insensitively after stripping; numbers
-    by value, so `20`, `20.0` and `"20"` agree.
+    by value, so `20`, `20.0` and `"20"` agree. `{"contains": "text"}` accepts a string that holds `text`
+    (case ignored), for free text such as a note the model words itself.
     """
     if isinstance(wanted, list):
         return any(_matches(option, actual) for option in wanted)
+    if isinstance(wanted, dict):
+        return isinstance(actual, str) and str(wanted["contains"]).casefold() in actual.casefold()
     if isinstance(wanted, bool):
         return actual is wanted
     if isinstance(wanted, (int, float)):

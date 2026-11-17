@@ -404,3 +404,29 @@ def test_a_bad_progress_setting_is_a_clean_error(monkeypatch, value):
     finally:
         monkeypatch.undo()
         importlib.reload(config)
+
+
+def test_assistant_memory_is_on_unless_switched_off(monkeypatch):
+    monkeypatch.delenv("VAICE_ASSISTANT_MEMORY", raising=False)
+    try:
+        assert importlib.reload(config).ASSISTANT_MEMORY is True
+        for raw in ("0", "false", "off"):
+            monkeypatch.setenv("VAICE_ASSISTANT_MEMORY", raw)
+            assert importlib.reload(config).ASSISTANT_MEMORY is False
+        monkeypatch.setenv("VAICE_ASSISTANT_MEMORY", "maybe")
+        with pytest.raises(SystemExit, match="VAICE_ASSISTANT_MEMORY must be a boolean"):
+            importlib.reload(config)
+    finally:
+        monkeypatch.undo()
+        importlib.reload(config)
+
+
+def test_the_notes_file_lives_in_the_data_dir_and_is_none_without_one(monkeypatch, tmp_path):
+    monkeypatch.setenv("VAICE_DATA_DIR", str(tmp_path))
+    try:
+        assert tmp_path / "memory.json" == importlib.reload(config).MEMORY_FILE
+        monkeypatch.setenv("VAICE_DATA_DIR", "")
+        assert importlib.reload(config).MEMORY_FILE is None  # in memory only, like the conversation
+    finally:
+        monkeypatch.undo()
+        importlib.reload(config)
