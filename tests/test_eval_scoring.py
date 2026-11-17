@@ -288,7 +288,7 @@ def test_command_matches_and_command_not_apply_to_the_run_shell_command():
 
 
 def test_command_not_alone_and_regular_expressions():
-    expect = {"tools": ["run_shell"], "command_not": "netstat -[a-z]*p|sudo"}
+    expect = {"tools": ["run_shell"], "command_not": "netstat -[a-z]*p"}
     assert checks(expect, [call("run_shell", command="lsof -i :8080")])["command_ok"] is True
     assert checks(expect, [call("run_shell", command="netstat -anp | grep 8080")])["command_ok"] is False
     assert checks({"command_matches": "^ping .*google"}, [call("run_shell", command="ping -c 3 google.com")])[
@@ -426,7 +426,7 @@ def test_the_answer_and_command_expectations_are_well_formed_and_where_the_stub_
     assert cases["shell-port"]["command_matches"] == "8080"
     assert cases["shell-port"]["command_not"] == "netstat -[a-z]*p|sudo"
     assert {c: cases[c]["command_matches"] for c in ("shell-git-status", "shell-whoami", "shell-ping")} == {
-        "shell-git-status": "git status", "shell-whoami": "whoami", "shell-ping": "ping"}
+        "shell-git-status": "git .*status", "shell-whoami": "whoami", "shell-ping": "ping"}
 
 
 def test_the_shell_cases_are_consistent_with_the_skills_when_run_shell_is_on():
