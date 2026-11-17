@@ -869,6 +869,30 @@ def test_a_question_cut_off_before_its_audio_was_all_out_is_dropped(monkeypatch)
     assert s.ran == []
 
 
+def test_a_question_fully_queued_but_cut_off_before_it_was_all_handed_out_is_dropped(tts):
+    # /tts runs ahead of playback: the worker has queued the whole question and ended, yet the listener
+    # got only its first frame. The request must not be answerable, and closing the reply drops it.
+    tts._make = lambda text: FakeResponse([pcm_bytes(50), pcm_bytes(50)])
+    s = confirming(ask(QUIT))
+    gen = s.resp.respond(AUDIO, [], Turn())
+
+    next_on_fresh_thread(gen)
+    wait_until(lambda: not threads_named("vaice-assistant"))  # everything is queued
+
+    assert s.resp.pending().armed_at is None
+    gen.close()  # the user talked over it
+    assert s.resp.pending() is None
+    assert s.ran == []
+
+
+def test_a_question_that_produced_no_audio_is_dropped(tts):
+    tts._make = lambda text: FakeResponse([])  # HTTP 200, the right content type, an empty stream
+    s = asked()
+
+    assert s.resp.pending() is None
+    assert s.ran == []
+
+
 def test_a_question_whose_audio_failed_is_dropped_too(monkeypatch):
     monkeypatch.setattr(assistant.requests, "post", FakeTTS(lambda text: FakeResponse([], status=503)))
     s = confirming(ask(QUIT))
@@ -1006,6 +1030,20 @@ def test_a_yes_cannot_approve_a_request_whose_question_was_not_fully_out(tts, he
     assert s.ran == []
     assert s.brain.calls[0][0][-1] == {"role": "user", "content": "yes"}
     assert tool_events(request.turn) == [("quit_app", "not confirmed")]
+
+
+def test_an_utterance_that_was_not_understood_leaves_the_request_waiting(tts, heard):
+    s = asked(answer("Safari is closed."))
+    waiting = s.resp.pending()
+
+    heard.text = ""  # noise, a cough
+    drive(s.resp, turn=Turn())
+    assert s.resp.pending() is waiting and s.ran == []
+    assert tts.bodies[-1]["input"] == assistant.NOT_HEARD
+
+    heard.text = "Go ahead."
+    drive(s.resp, turn=Turn())
+    assert s.ran == [{"name": "Safari"}]
 
 
 def test_a_request_expires_a_minute_after_its_question_was_spoken(tts, heard):

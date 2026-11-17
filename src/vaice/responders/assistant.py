@@ -40,6 +40,14 @@ NOT_HEARD = "Sorry, I didn't catch that."
 NO_ANSWER = "Sorry, I couldn't work that out."
 CANCELLED = "Okay, I won't."  # spoken when the user says no to a confirmation
 _DONE = object()
+
+
+@dataclass(frozen=True)
+class _Asked:
+    """Queue marker around a confirmation question's frames: `spoken=False` before them, `True` after them."""
+
+    pending_id: str
+    spoken: bool
 _RATE = re.compile(r"\brate=(\d+)")
 
 
@@ -270,11 +278,14 @@ def _work(url: str, timeout: float, prompt: str, voice_name: str, skills: Skills
         if transcript:
             decision = _decision(prompt, history, transcript, skills, brain, confirmations, turn, stop)
         else:
+            # Nothing was understood (noise, a cough): a waiting confirmation is left alone on purpose. The
+            # user still has to answer it with a whole-utterance yes, and a cough must not cancel their request.
             decision = Decision(NOT_HEARD)
         pending = decision.pending
         if pending is not None:  # on the screen at once; answerable by voice only once the question was spoken
             confirmations.ask(pending)
             turn.add_tool_event(pending.name, pending.arguments, "waiting for confirmation")
+            out.put(_Asked(pending.id, spoken=False))
         try:
             first = _speak(url, timeout, voice_name, decision.answer, out, stop, started)
         except BaseException:  # stopped or failed before the question was out: nobody heard it, nobody can say yes
@@ -282,7 +293,14 @@ def _work(url: str, timeout: float, prompt: str, voice_name: str, skills: Skills
                 confirmations.take(pending.id)
             raise
         if pending is not None:
-            confirmations.arm(pending.id)  # not before: the question's own audio can echo into the mic
+            # The generator arms the request when it reaches this marker, i.e. once it handed out the whole
+            # question. Arming here would be too early: the frames are only queued, and a barge-in that cuts
+            # the question off must leave a request nobody heard to the end unanswerable.
+            if first is None:  # /tts sent no audio: the question was never heard, so nobody can say yes to it
+                log.warning("assistant dropped the request to run %s: its question produced no audio", pending.name)
+                confirmations.take(pending.id)
+            else:
+                out.put(_Asked(pending.id, spoken=True))
         if first is not None:
             thinking = "+".join(f"{seconds:.2f}s" for seconds in decision.brain_seconds) or "none"
             log.info("assistant timings: transcript %.2fs, brain %s, first audio %.2fs", transcribed, thinking, first)
@@ -378,6 +396,7 @@ class AssistantResponder:
             daemon=True,
         ).start()
         spoken = ""
+        asked: str | None = None  # a confirmation question in flight: its request is not answerable yet
         try:
             while True:
                 if lifecycle.stopping.is_set():  # the app is stopping: don't wait for a server that may never answer
@@ -391,6 +410,11 @@ class AssistantResponder:
                     continue
                 if isinstance(item, BaseException):
                     raise item
+                if isinstance(item, _Asked):
+                    if item.spoken:  # every frame of the question was handed out
+                        self._confirmations.arm(item.pending_id)
+                    asked = None if item.spoken else item.pending_id
+                    continue
                 if item is _DONE:
                     if lifecycle.stopping.is_set():  # the reply thread may have stopped for the app first
                         log.warning(ABANDONED)
@@ -403,4 +427,6 @@ class AssistantResponder:
                     turn.set_assistant_text(text)
                 yield rate, frame
         finally:
+            if asked is not None:  # the question was cut off (barge-in, stop, error): nobody can say yes to it
+                self._confirmations.take(asked)
             cancelled.set()  # the reply's thread stops, and closes a streaming /tts response
