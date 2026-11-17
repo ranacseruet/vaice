@@ -129,6 +129,7 @@ Precedence: variables already in the environment (e.g. `set -a; source .env; set
 | `VAICE_LLAMACPP_START_TIMEOUT` | `900` | `vaice up` only: seconds to wait for the started `llama-server` to become ready; the first run downloads about 1 GB |
 | `VAICE_MODE` | `chat` | `chat` = speech-to-speech replies from the model; `assistant` = transcribe, a brain that can call vaice's own skills, then `/tts` (see *Assistant mode* below). Anything else exits at startup |
 | `VAICE_ASSISTANT_PROMPT` | `You are a voice assistant on the user's Mac. …` (answer in one or two short spoken sentences, use a tool only for questions about this computer) | Assistant mode only: the brain's system prompt (the current date and time is added) |
+| `VAICE_ASSISTANT_SHELL` | `false` | Assistant mode only: adds the `run_shell` skill, which proposes a shell command that runs only after you approve it (see *Shell commands* below). Off: the skill does not exist. A boolean: `1/true/yes/on` or `0/false/no/off` |
 | `VAICE_VOICE` | `female` | Assistant mode only: the `/tts` voice, `female` or `male` |
 | `VAICE_LLAMACPP_PROMPT` | `Reply naturally and concisely in 1 to 2 spoken sentences.` | Reply instructions; `vaice` prepends `Respond with interleaved text and audio.` |
 | `VAICE_LLAMACPP_TIMEOUT` | `120` | Seconds to open a connection or the longest silence from `llama-server` before a reply fails. It is also the total bound for a tool call: when it passes — or the reply is stopped — vaice stops waiting for the call and discards the result (the underlying request is not cancelled; the server may still run/finish the tool). The parallel transcription session's silence budget is this setting too, but its connection **handshake** uses a fixed 2 s (transcription is best-effort and degrades to `(inaudible)`), so raising this cannot extend a slow-handshake server |
@@ -221,7 +222,8 @@ assistant can answer questions about your Mac from real data:
 
 The skills run on your machine with vaice's own permissions, not through llama-server (its `--tools` and
 `VAICE_LLAMACPP_TOOLS` are unused in this mode and vaice warns if the latter is set). They never go through
-a shell: each runs a fixed command with its arguments as separate values.
+a shell: each runs a fixed command with its arguments as separate values. The one opt-in exception is
+`run_shell` (`VAICE_ASSISTANT_SHELL`, off by default; see *Shell commands* below).
 
 | Skill | What it does |
 |---|---|
@@ -263,6 +265,47 @@ name that is not running is refused, nothing is asked), and the request waits in
   the request waiting; the next understood utterance settles it.
 - A bare "yes" can be too short for the pause detection to notice as speech (seen with synthetic speech
   through the browser: "Yes." started no turn, "Go ahead." did; #95). Prefer "go ahead" or "yes please".
+
+**Shell commands** (`VAICE_ASSISTANT_SHELL=1`, off by default). With the setting on, the assistant has one
+more skill, `run_shell(command)`, for when you ask it to run a command (or nothing else fits a request about
+this Mac). Nothing runs when the model asks; every command goes through the confirmation above, and the
+command is shown in full on the screen:
+
+- **By voice or click**, only for a command vaice can show to be harmless: one program plus arguments, no
+  shell syntax at all (none of `` | & ; < > ( ) $ ` { } * ? [ ] ! # \ `` or a newline), and the program is a bare
+  name from this list, which only lists or reports: `ls`, `df`, `du`, `date`, `uptime`, `whoami`, `pwd`,
+  `sw_vers`, `hostname`, `uname`. `hostname`, `whoami`, `pwd` and `uptime` take no arguments, and `date` takes
+  only options (`+%Y`, `-u`), because a bare argument would set the clock. A leading `~/` in an argument is
+  expanded by vaice (only in a command without quotes). It runs as an argument list, with no shell. vaice speaks
+  `Shall I run the command ls? The full command is on the screen.`: only the program's name, never its
+  arguments, and the sentence is built by vaice, not by the model.
+- **By click only**, for every other command (pipes, redirects, `rm`, `cat`, `find`, `git`, a program given
+  by path, ...): it runs through `/bin/zsh -c` after you click **Run**. A spoken yes does not approve it:
+  vaice answers `This one needs the Run button on the screen.` and the request stays pending. vaice says
+  `I would run a command for this request. The command is on the screen; click Run to allow the run.`
+  The panel says it too.
+- **`sudo` is refused** before any question (it needs an administrator password, which vaice cannot give). The
+  check looks for the word anywhere in the command, quoted or not, and is a courtesy rather than a boundary:
+  the boundary is that you read the command and click.
+- A command that is empty or longer than 500 characters is refused. What you see is exactly what runs.
+
+Both kinds run with vaice's own permissions, in your home folder, with no input, standard output and error
+merged, in a process group of their own. They are stopped after **30 seconds**, when you talk over the reply
+(spoken approval), when the app stops, and on *New conversation* (click approval; otherwise only the 30
+seconds end a command you started with the button). Stopping ends the command's whole process group, and a
+background process the command started ends with it, whether or not it kept the output open. At most 20,000 characters of output
+are kept (the rest is read and discarded, so a chatty command cannot hang); the model gets a one-line outcome
+(`the command finished`, `the command failed with status 2`, `the command was stopped after 30 seconds`) and
+the first 600 characters of the output, with the whole output on screen in *Tool activity*. The output is
+data for the model to answer from, nothing else: it goes into a tool message only. Note that it does go to the
+model, and so into the conversation file: a command that prints a file (`cat`) hands its content to the
+model, which is why such commands need the button.
+
+The local 2B model writes poor commands (a first live check misheard `whoami` as `HUMI`, and asked for a
+command to answer "What does the ls command do?"), so this skill becomes useful mainly with the helper model
+planned next. Until then, read every command before you approve it, and keep the setting off if you do not
+need it. Starting vaice with it on logs a warning. `python evals/run.py --paths assistant --shell
+--cases-file assistant_shell_cases.json` measures how often spoken requests reach it (see `evals/README.md`).
 
 The first time `quit_app` runs, macOS may ask whether your terminal (or the app that started vaice) may
 control the app it is quitting (Automation permission); allow it in System Settings, Privacy & Security,
@@ -307,7 +350,7 @@ At startup, `vaice` checks `llama-server`:
 ## Privacy
 - `~/.vaice/conversation.json` is written with mode **0600** (owner read/write only) via a temporary file and `os.replace`, so a reader never sees a half-written file; the `~/.vaice` directory itself is created with the usual 0755 permissions, meaning other local users can see that the file exists (not what it holds).
 - The transcript is retained **indefinitely**, until you click **New conversation** (which clears it) or delete the file while `vaice` is stopped. New conversation is the way to forget everything, including any embarrassing questions.
-- `vaice` talks to one server: the `llama-server` at `VAICE_LLAMACPP_URL` (local by default, e.g. `http://localhost:8001`) over HTTP and WebSocket. The microphone audio, the transcripts, the tool results and the model's replies go there; nothing else leaves the machine through `vaice` (the model's tools run on that server and run with *its* permissions). If you point `VAICE_LLAMACPP_URL` at a remote host, your audio and conversation go there instead.
+- `vaice` talks to one server: the `llama-server` at `VAICE_LLAMACPP_URL` (local by default, e.g. `http://localhost:8001`) over HTTP and WebSocket. The microphone audio, the transcripts, the tool results and the model's replies go there; nothing else leaves the machine through `vaice` (the model's tools run on that server and run with *its* permissions; in assistant mode the skills run in vaice with *vaice's* permissions, and with `VAICE_ASSISTANT_SHELL` on that includes any shell command you approve, with the same access to your files as you have, and its output goes to the model and into the conversation file). If you point `VAICE_LLAMACPP_URL` at a remote host, your audio and conversation go there instead.
 - Set `VAICE_DATA_DIR=""` to keep the conversation **in memory only**: nothing is read from or written to disk, and history disappears when the app stops. Persistence can also be limited with `VAICE_HISTORY_TURNS` (the prompt window), which trims context but keeps the file — set `VAICE_DATA_DIR=""` if the file itself is the concern.
 
 ## Troubleshooting
@@ -378,6 +421,7 @@ src/vaice/
   brain.py          Assistant mode: ChatBrain, one /v1/chat/completions call with tools (no server-side tool execution)
   skills.py         Assistant mode: the skills (read-only answers, plus open/quit app, volume, mute) and the Skills registry
   confirm.py        Assistant mode: the one pending request of a confirm skill, the spoken yes/no test and its 60 s expiry
+  shell.py          Assistant mode, opt-in: the run_shell skill: how a command may be approved, and the runner (timeout, output cap, process group)
   voice.py          Assistant mode: speakable() cleans text for speech, sentences() splits it for /tts
   audio.py          Mic frame → mono PCM16 at the model's rate (resampled via scipy) and back to float32
   responders/

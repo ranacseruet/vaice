@@ -68,6 +68,8 @@ ACTION_STUBS = {
     "volume_down": lambda args: "volume set to 40 percent",
     "mute_sound": lambda args: "sound muted" if args.get("muted", True) else "sound unmuted",
 }
+# run_shell (--shell): it asks, and nothing is run; the result is only there if a case gets past the question
+SHELL_STUBS = {"run_shell": lambda args: "the command finished. Output: ok"}
 TRANSCRIPT_WAIT = 5.0  # the interleaved path's transcript is reported after the reply; wait this long for it
 
 
@@ -206,16 +208,19 @@ def run_text(url: str, prompt: str, tools: list[dict], audio, history) -> dict:
     return record
 
 
-def stub_skills() -> Skills:
+def stub_skills(shell: bool = False) -> Skills:
     """The real skills' definitions with canned results: the model sees what the app offers, and nothing
-    runs on this machine (the stubs replace each skill's `run`; Skills.run still checks the arguments). A
-    `confirm` skill's `ask` is stubbed to always ask, so no check of the machine (is the app running?) is made."""
+    runs on this machine (the stubs replace each skill's `run`, and `run_stoppable` is dropped so the real
+    command runner cannot be reached; Skills.run still checks the arguments). A `confirm` skill's `ask` is
+    stubbed to always ask, so no check of the machine (is the app running?) is made. `shell` adds `run_shell`."""
+    answers = {**ACTION_STUBS, **SHELL_STUBS}
     return Skills([
-        replace(skill, run=(lambda args, answer=ACTION_STUBS[skill.name]: SkillResult(answer(args)))
-                if skill.name in ACTION_STUBS else (lambda _args, text=SKILL_STUBS[skill.name]: SkillResult(text)),
+        replace(skill, run_stoppable=None,
+                run=(lambda args, answer=answers[skill.name]: SkillResult(answer(args)))
+                if skill.name in answers else (lambda _args, text=SKILL_STUBS[skill.name]: SkillResult(text)),
                 **({"ask": lambda _args, name=skill.name: f"Shall I run {name.replace('_', ' ')}?"}
                    if skill.kind == "confirm" else {}))
-        for skill in default_skills().skills])
+        for skill in default_skills(shell=shell).skills])
 
 
 def run_assistant(url: str, prompt: str, skills: Skills, audio, history, brain: ChatBrain | None = None) -> dict:
@@ -278,6 +283,8 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--prompt", help="reply instructions (interleaved) and system prompt (text, assistant); "
                                          "default: VAICE_LLAMACPP_PROMPT, a spoken-assistant prompt for text, "
                                          "VAICE_ASSISTANT_PROMPT for assistant")
+    parser.add_argument("--shell", action="store_true",
+                        help="assistant path: also offer the run_shell skill (stubbed: it asks, nothing is run)")
     parser.add_argument("--history", action=argparse.BooleanOptionalAction, default=True,
                         help="send two fixed earlier exchanges (default: on)")
     parser.add_argument("--out", type=Path, help="results file (default: evals/results/<UTC timestamp>.json)")
@@ -352,7 +359,7 @@ def main(argv: list[str] | None = None) -> None:
     info = server_info(url)
     prompts = {"interleaved": args.prompt or config.LLAMACPP_PROMPT, "text": args.prompt or TEXT_PROMPT,
                "assistant": args.prompt or config.ASSISTANT_PROMPT}
-    skills = stub_skills()
+    skills = stub_skills(shell=args.shell)
     history = HISTORY if args.history else []
     out = args.out or HERE / "results" / f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.json"
 
@@ -383,8 +390,9 @@ def main(argv: list[str] | None = None) -> None:
         print("\ninterrupted: reporting the runs so far", file=sys.stderr)
     summary = print_summary(runs, args.paths, [c["id"] for c in cases])
 
-    config_used = {"paths": args.paths, "cases_file": args.cases_file, "repeats": args.repeats, "history": history,
-                   "prompts": prompts, "cases": [c["id"] for c in cases], "platform": platform.platform()}
+    config_used = {"paths": args.paths, "cases_file": args.cases_file, "repeats": args.repeats,
+                   "shell": args.shell, "history": history, "prompts": prompts, "cases": [c["id"] for c in cases],
+                   "platform": platform.platform()}
     document = {"label": args.label, "started": started, "config": config_used, "server": info,
                 "summary": summary, "runs": runs}
     out.parent.mkdir(parents=True, exist_ok=True)

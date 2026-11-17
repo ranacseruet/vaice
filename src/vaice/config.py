@@ -132,6 +132,9 @@ ASSISTANT_PROMPT = _env(
             "plain sentences, with no lists, symbols or file paths. Use a tool only when the question is about "
             "this computer; answer everything else yourself.",
 )
+# Assistant mode only: adds the `run_shell` skill (shell.py). Every command is approved first; only a short
+# list of harmless ones by voice, the rest only by the UI's Run button. Off: the skill does not exist.
+ASSISTANT_SHELL = _flag("VAICE_ASSISTANT_SHELL", default=False)
 VOICE = _choice("VAICE_VOICE", default="female", choices=("female", "male"))
 
 PORT = _number("VAICE_PORT", default="7860", kind=int)

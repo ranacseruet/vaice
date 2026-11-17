@@ -312,3 +312,25 @@ def test_the_assistant_cases_are_consistent_with_the_skills():
     assert sum(1 for c in cases if c["expect"]["tools"] == []) >= 10
     assert {name for c in cases for name in c["expect"]["tools"]} == set(skills.names)  # every skill is exercised
     assert sum(1 for c in cases if len(c["expect"]["tools"]) == 2) >= 3
+
+
+def test_the_shell_cases_are_consistent_with_the_skills_when_run_shell_is_on():
+    from vaice.skills import default_skills
+
+    cases = load("assistant_shell_cases.json")
+    skills = default_skills(shell=True)
+    ids = [c["id"] for c in cases]
+    assert len(ids) == len(set(ids))
+    assert len(cases) >= 10
+    for c in cases:
+        assert c["say"].strip()
+        expected = c["expect"]["tools"]
+        assert isinstance(expected, list), c["id"]
+        assert set(expected) <= set(skills.names), c["id"]
+        assert not c["expect"].get("args", {}).get("run_shell"), c["id"]  # only the tool is expected, not the command
+        scoring.score(c["expect"], [])  # the expectation is well formed
+
+    assert sum(1 for c in cases if c["expect"]["tools"] == ["run_shell"]) >= 4
+    assert sum(1 for c in cases if c["expect"]["tools"] == []) >= 4  # tempting ones that must not call it
+    # without --shell the skill does not exist: this file is only for runs that pass it
+    assert "run_shell" not in default_skills().names

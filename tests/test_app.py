@@ -1,6 +1,7 @@
 import argparse
 import importlib
 import itertools
+import json
 import logging
 import signal
 from types import SimpleNamespace
@@ -796,6 +797,22 @@ def test_assistant_mode_uses_the_assistant_responder_and_skips_the_tools_block(m
     assert "ignored in assistant mode" not in caplog.text  # VAICE_LLAMACPP_TOOLS is unset
 
 
+def test_assistant_mode_warns_when_shell_commands_are_on_and_is_quiet_when_they_are_off(monkeypatch, tmp_path, caplog):
+    monkeypatch.setattr(app.config, "ASSISTANT_SHELL", True)
+    with caplog.at_level(logging.WARNING, logger="vaice.app"):
+        _assistant_main(monkeypatch, tmp_path)
+
+    assert "VAICE_ASSISTANT_SHELL is on" in caplog.text
+    assert "vaice's own permissions" in caplog.text
+
+    caplog.clear()
+    monkeypatch.setattr(app.config, "ASSISTANT_SHELL", False)
+    with caplog.at_level(logging.WARNING, logger="vaice.app"):
+        _assistant_main(monkeypatch, tmp_path)
+
+    assert "VAICE_ASSISTANT_SHELL" not in caplog.text
+
+
 def test_assistant_mode_never_builds_the_chat_responder(monkeypatch, tmp_path):
     monkeypatch.setattr(app, "_chat_responder", lambda: pytest.fail("chat responder built in assistant mode"))
     assert _assistant_main(monkeypatch, tmp_path)
@@ -956,6 +973,52 @@ def test_the_panel_shows_the_question_and_exactly_what_will_run_and_is_drawn_onc
     responder.waiting = None  # settled somewhere else: the panel goes away
     *_, hidden, text, pending_id, seen = page.tick(seen)
     assert hidden == {"visible": False, "__type__": "update"} and pending_id == ""
+
+
+def shell_request(command, voice, question="Shall I run the command ls? The full command is on the screen."):
+    return Pending("run_shell", json.dumps({"command": command}), question, "call_0", [], conv.Turn(), voice=voice)
+
+
+def test_a_shell_request_shows_the_command_line_itself_not_the_json():
+    view = app.pending_view(shell_request("ls -la ~/Downloads", voice=True))
+
+    _, text, _ = app.confirmation_panel(view)
+
+    assert text == ("Shall I run the command ls? The full command is on the screen.\n\n"
+                    "```\nls -la ~/Downloads\n```")
+    assert "Only the Run button" not in text  # a spoken yes may approve this one
+
+
+def test_a_request_that_needs_the_button_says_so_under_the_question():
+    view = app.pending_view(shell_request("echo a | wc -l", voice=False, question="I would run a command."))
+
+    assert view["voice"] is False
+    _, text, _ = app.confirmation_panel(view)
+
+    assert text == ("I would run a command.\n\n"
+                    "Only the Run button can approve this one; saying yes will not.\n\n"
+                    "```\necho a | wc -l\n```")
+
+
+def test_a_shell_command_is_shown_exactly_and_backticks_cannot_close_its_block():
+    _, text, _ = app.confirmation_panel(app.pending_view(shell_request("echo ```x```\nls", voice=False)))
+
+    assert text.endswith("````\necho ```x```\nls\n````")  # a newline in the command is shown as it is
+
+
+@pytest.mark.parametrize("arguments", ["{not json", "[]", '{"command": 5}', "{}"])
+def test_a_shell_request_with_odd_arguments_falls_back_to_the_raw_call(arguments):
+    request = Pending("run_shell", arguments, "Q?", "call_0", [], conv.Turn(), voice=False)
+
+    _, text, _ = app.confirmation_panel(app.pending_view(request))
+
+    assert f"```\nrun_shell {arguments}\n```" in text
+
+
+def test_the_panel_shows_a_view_without_the_voice_key_as_voice_approvable():
+    view = {"id": "x", "question": "Shall I quit Safari?", "name": "quit_app", "arguments": "{}"}
+
+    assert "Only the Run button" not in app.confirmation_panel(view)[1]
 
 
 def test_arguments_with_backticks_cannot_close_the_code_block():

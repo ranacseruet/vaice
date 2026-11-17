@@ -11,6 +11,8 @@ Each case is a spoken sentence and an expectation (see [Cases](#cases)). Every c
 
 - **assistant** (opt-in: `--paths assistant`): assistant mode's own code up to the answer text, without `/tts`. The audio is transcribed, then `build_messages` and `decide` (the brain/skills loop of `AssistantResponder`, `POST /v1/chat/completions`) run with the real skill definitions and the prompt `VAICE_ASSISTANT_PROMPT`. The skills are stubbed with canned results (`disk_space` says `160 gigabytes free of 460 gigabytes`, and so on; nothing is executed; a `confirm` skill such as `quit_app` always asks, and the pending call counts as the call, since the confirmation itself is unit-tested), so the calls are scored like the other paths, and the final answer text is recorded. Time to answer text is transcription plus the brain rounds. It has its own cases (`assistant_cases.json`, 51 cases, 18 of them must-not-call), used automatically when `assistant` is the only path; `--cases-file` picks another file. It is not in the default `--paths` because its tools are the app's skills, not `tools.json`.
 
+  `--shell` also offers the `run_shell` skill (the app's `VAICE_ASSISTANT_SHELL`): its stub always asks and nothing is run (the stub has no runner, so no command is started on your machine), and the pending call counts as the call. Its cases are in `assistant_shell_cases.json` (`--cases-file assistant_shell_cases.json`, a name in `evals/` or an absolute path; 12 cases: spoken requests to run a command, tempting must-not-call ones such as "What does the ls command do?" and "Goodbye.", and two other skills). Only the tool is expected for a shell case, never the command. Without `--shell` the skill set is unchanged and that file does not apply (`run_shell` would be an unknown tool).
+
 The tools in `tools.json` are stubs with canned results (`disk_space` says `160 gigabytes free of 460`, and so on); nothing is ever executed on your machine.
 
 A run is `correct`, or one of:
@@ -41,9 +43,10 @@ A run is `correct`, or one of:
 
 ```bash
 .venv/bin/python evals/run.py --paths assistant --repeats 1      # assistant mode: its own cases and skills
+.venv/bin/python evals/run.py --paths assistant --shell --repeats 1 --cases-file assistant_shell_cases.json   # with run_shell
 ```
 
-Options: `--url`, `--paths interleaved,text,assistant` (default `interleaved,text`), `--cases-file FILE` (a file in `evals/` or a path; default `cases.json`, or `assistant_cases.json` when `--paths` is `assistant` alone), `--repeats N` (default 5), `--cases id,id`, `--prompt TEXT` (the reply instructions on the interleaved path and the system prompt on the text path; the default is `VAICE_LLAMACPP_PROMPT` for interleaved and a short spoken-assistant prompt for text), `--history/--no-history` (default on: two fixed earlier exchanges, `Hey, are you there?` / `Yes, I'm here.` and `What day is it?` / `It's Monday.`), `--out FILE` (default `evals/results/<UTC timestamp>.json`, which is gitignored) and `--label TEXT`. Ctrl+C stops the run and reports the runs so far.
+Options: `--url`, `--shell` (assistant path: also offer the stubbed `run_shell` skill), `--paths interleaved,text,assistant` (default `interleaved,text`), `--cases-file FILE` (a file in `evals/` or a path; default `cases.json`, or `assistant_cases.json` when `--paths` is `assistant` alone), `--repeats N` (default 5), `--cases id,id`, `--prompt TEXT` (the reply instructions on the interleaved path and the system prompt on the text path; the default is `VAICE_LLAMACPP_PROMPT` for interleaved and a short spoken-assistant prompt for text), `--history/--no-history` (default on: two fixed earlier exchanges, `Hey, are you there?` / `Yes, I'm here.` and `What day is it?` / `It's Monday.`), `--out FILE` (default `evals/results/<UTC timestamp>.json`, which is gitignored) and `--label TEXT`. Ctrl+C stops the run and reports the runs so far.
 
 The full set is about 33 cases x 2 paths x 5 repeats, around 330 runs; use `--cases` and `--repeats 1` while iterating.
 

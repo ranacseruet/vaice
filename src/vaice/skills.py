@@ -1,9 +1,10 @@
 """Skills: small checks of and actions on this Mac that the assistant path runs itself.
 
 The brain (a chat model) asks for a skill by name; vaice runs it with vaice's own permissions and hands
-the model a short plain-text result to answer from. A skill never goes through a shell (argv lists only)
-and never raises: whatever goes wrong comes back as a `SkillResult` that says so in plain words, which is
-what the model then tells the user. macOS only, except `disk_space`.
+the model a short plain-text result to answer from. A skill never goes through a shell (argv lists
+only; `run_shell`, see `shell.py`, is the opt-in exception) and never raises: whatever goes wrong comes back as a
+`SkillResult` that says so in plain words, which is what the model then tells the user. macOS only, except
+`disk_space`.
 
 A skill has a `kind`: `read` checks something, `action` changes something that is easy to undo (an app
 opens, the volume moves) and runs at once, `confirm` changes something that is not (an app quits) and runs
@@ -46,9 +47,11 @@ class SkillResult:
 
 @dataclass(frozen=True)
 class Question:
-    """What to ask the user before a `confirm` skill runs: built only from the skill's validated arguments."""
+    """What to ask the user before a `confirm` skill runs: built only from the skill's validated arguments.
+    `voice`: whether a spoken yes may approve it; False means only the UI's Run button can."""
 
     text: str
+    voice: bool = True
 
 
 @dataclass(frozen=True)
@@ -60,7 +63,11 @@ class Skill:
     kind: str = "read"  # "read" | "action" (runs at once, easy to undo) | "confirm" (asks first)
     # confirm only: validates the arguments and returns the question to speak, or raises SkillError. The
     # question must not hold a word the user answers with (see confirm.py): the speakers' echo can reach the mic.
-    ask: Callable[[dict], str] | None = None
+    # A `str` is a question a spoken yes may approve; a `Question` says so itself.
+    ask: Callable[[dict], str | Question] | None = None
+    # A skill that can be stopped (barge-in, the app ending) takes the reply's `stop` callable: `Skills.run` calls
+    # this in place of `run` when it has one. `run` stays the fallback that cannot be stopped.
+    run_stoppable: Callable[[dict, Callable[[], bool]], SkillResult] | None = None
 
 
 class SkillError(Exception):
@@ -115,7 +122,8 @@ class Skills:
         try:
             if skill.ask is None:
                 raise SkillError("it has no question to ask")
-            return Question(skill.ask(args))
+            asked = skill.ask(args)
+            return asked if isinstance(asked, Question) else Question(asked)
         except SkillError as exc:
             log.warning("skill %s cannot be asked about: %s", name, exc)
             return SkillResult(f"{label} failed: {exc}")
@@ -123,14 +131,16 @@ class Skills:
             log.exception("skill %s could not be asked about", name)
             return SkillResult(f"{label} failed: {type(exc).__name__}: {exc}")
 
-    def run(self, name: str, arguments: str) -> SkillResult:
+    def run(self, name: str, arguments: str, stop: Callable[[], bool] | None = None) -> SkillResult:
         """Run skill `name` with `arguments` (the model's JSON string). Never raises. A `confirm` skill runs
-        here too: the caller holds the user's approval (see `prepare`)."""
+        here too: the caller holds the user's approval (see `prepare`). `stop` ends a skill that can be stopped."""
         resolved = self._resolve(name, arguments)
         if isinstance(resolved, SkillResult):
             return resolved
         skill, args, label = resolved
         try:
+            if skill.run_stoppable is not None:
+                return skill.run_stoppable(args, stop or (lambda: False))
             return skill.run(args)
         except SkillError as exc:
             log.warning("skill %s failed: %s", name, exc)
@@ -481,14 +491,15 @@ def _mute_sound(args: dict) -> SkillResult:
     return SkillResult("sound muted" if muted else "sound unmuted")
 
 
-def default_skills() -> Skills:
-    """The skills the assistant path offers: five read-only checks, then the actions."""
+def default_skills(shell: bool = False) -> Skills:
+    """The skills the assistant path offers: five read-only checks, then the actions, and with `shell`
+    (`VAICE_ASSISTANT_SHELL`) `run_shell`, which asks first."""
     nothing = {"type": "object", "properties": {}}
     app_name = {"type": "object",
                 "properties": {"name": {"type": "string",
                                         "description": "The app's name, such as Safari, Notes or Calculator."}},
                 "required": ["name"]}
-    return Skills([
+    skills = [
         Skill("disk_space", "Report how much disk space is free on this Mac.", nothing, _disk_space),
         Skill("battery_status", "Report the battery level and whether this Mac is charging or plugged in.",
               nothing, _battery_status),
@@ -528,4 +539,9 @@ def default_skills() -> Skills:
               {"type": "object",
                "properties": {"muted": {"type": "boolean", "description": "true to mute, false to unmute."}}},
               _mute_sound, kind="action"),
-    ])
+    ]
+    if shell:
+        from vaice.shell import shell_skill  # shell imports this module: not at the top
+
+        skills.append(shell_skill())
+    return Skills(skills)
