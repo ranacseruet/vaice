@@ -270,6 +270,25 @@ def test_a_key_that_another_error_body_echoes_is_blanked_out_of_the_message(post
     assert "HTTP 400: bad request for key [key]" in str(caught.value)
 
 
+@pytest.mark.parametrize("reply", [
+    completion({"role": "assistant", "content": [f"here is {KEY}"]}),  # content that is not text
+    completion({"role": "assistant", "tool_calls": [{"function": {"arguments": KEY}}]}),  # a call without a name
+    FakeResponse(text=f"not json, but it holds {KEY}"),
+    FakeResponse({"choices": [{"message": f"a string, with {KEY}"}]}),
+])
+def test_a_key_that_an_unusable_reply_echoes_never_reaches_the_message_the_chain_or_the_log(post, reply, caplog):
+    import traceback
+
+    post.reply = reply
+
+    with pytest.raises(BrainError) as caught:
+        ChatBrain.helper("https://h/v1", 5, "m", KEY).complete(MESSAGES, None)
+
+    shown = "".join(traceback.format_exception(caught.value)) + repr(caught.value) + caplog.text
+    assert KEY not in shown
+    assert caught.value.__cause__ is None and caught.value.spoken == UNUSABLE
+
+
 def test_a_timeout_is_wrapped_and_names_no_url(monkeypatch):
     monkeypatch.setattr(brain_module.requests, "post", raising(
         brain_module.requests.Timeout("HTTPSConnectionPool(host='h', port=443): Read timed out")))

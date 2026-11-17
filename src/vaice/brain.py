@@ -9,6 +9,7 @@ never put into an error, a log line or a repr: the only place it goes is the Aut
 """
 import json
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import requests
@@ -102,11 +103,12 @@ class ChatBrain:
         try:
             choice = r.json()["choices"][0]
             message = choice["message"]
-        except (ValueError, KeyError, IndexError, TypeError) as exc:
-            raise BrainError(f"chat completions sent no message: {self._clip(r.text)!r}", UNUSABLE) from exc
+        except (ValueError, KeyError, IndexError, TypeError):
+            # not chained: a JSON error keeps the whole body (`.doc`), key included if the body echoes it
+            raise BrainError(f"chat completions sent no message: {self._clip(r.text)!r}", UNUSABLE) from None
         if not isinstance(message, dict):
             raise BrainError(f"chat completions sent no message: {self._clip(r.text)!r}", UNUSABLE)
-        reply = _reply(message)
+        reply = _reply(message, self._clip)
         if choice.get("finish_reason") == "length" and not reply.text and not reply.calls:
             log.warning("the brain stopped at its token limit before it answered (finish_reason length)")
         return reply
@@ -118,15 +120,16 @@ class ChatBrain:
         return text[:ERROR_BODY_CHARS]
 
 
-def _reply(message: dict) -> BrainReply:
+def _reply(message: dict, clip: Callable[[str], str]) -> BrainReply:
+    """`clip` shortens what is quoted in an error and blanks the API key, should the reply echo it."""
     content = message.get("content")
     if content is not None and not isinstance(content, str):
-        raise BrainError(f"chat completions sent unexpected content: {str(content)[:ERROR_BODY_CHARS]!r}", UNUSABLE)
+        raise BrainError(f"chat completions sent unexpected content: {clip(str(content))!r}", UNUSABLE)
     calls = []
     for index, raw in enumerate(message.get("tool_calls") or []):
         function = raw.get("function") if isinstance(raw, dict) else None
         if not isinstance(function, dict) or not function.get("name"):
-            raise BrainError(f"chat completions sent a malformed tool call: {str(raw)[:ERROR_BODY_CHARS]!r}", UNUSABLE)
+            raise BrainError(f"chat completions sent a malformed tool call: {clip(str(raw))!r}", UNUSABLE)
         arguments = function.get("arguments")
         if arguments is None:
             arguments = ""
