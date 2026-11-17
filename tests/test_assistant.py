@@ -883,6 +883,14 @@ def test_a_question_fully_queued_but_cut_off_before_it_was_all_handed_out_is_dro
     assert s.ran == []
 
 
+def test_a_question_that_produced_no_audio_is_dropped(tts):
+    tts._make = lambda text: FakeResponse([])  # HTTP 200, the right content type, an empty stream
+    s = asked()
+
+    assert s.resp.pending() is None
+    assert s.ran == []
+
+
 def test_a_question_whose_audio_failed_is_dropped_too(monkeypatch):
     monkeypatch.setattr(assistant.requests, "post", FakeTTS(lambda text: FakeResponse([], status=503)))
     s = confirming(ask(QUIT))

@@ -285,7 +285,11 @@ def _work(url: str, timeout: float, prompt: str, voice_name: str, skills: Skills
             # The generator arms the request when it reaches this marker, i.e. once it handed out the whole
             # question. Arming here would be too early: the frames are only queued, and a barge-in that cuts
             # the question off must leave a request nobody heard to the end unanswerable.
-            out.put(_Asked(pending.id, spoken=True))
+            if first is None:  # /tts sent no audio: the question was never heard, so nobody can say yes to it
+                log.warning("assistant dropped the request to run %s: its question produced no audio", pending.name)
+                confirmations.take(pending.id)
+            else:
+                out.put(_Asked(pending.id, spoken=True))
         if first is not None:
             thinking = "+".join(f"{seconds:.2f}s" for seconds in decision.brain_seconds) or "none"
             log.info("assistant timings: transcript %.2fs, brain %s, first audio %.2fs", transcribed, thinking, first)
