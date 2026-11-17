@@ -18,9 +18,9 @@ Precedence: variables already in the environment (e.g. `set -a; source .env; set
 | `VAICE_VAD_SPEECH_PAD_MS` | `30` | Padding added around detected speech |
 | `VAICE_CAN_INTERRUPT` | `1` | Set `0` to disable barge-in: a reply always runs to the end |
 | `VAICE_LLAMACPP_URL` | `http://localhost:8001` | `llama-server` URL; only scheme, host and port are used (`/health`, `/v1/models` and `ws://…/v1/realtime` hang off it) |
-| `VAICE_LLAMACPP_MODEL` | `LiquidAI/LFM3-Audio-2B-GGUF:Q4_K_M` | `vaice up` only: the `-hf` model of the `llama-server` it starts |
+| `VAICE_LLAMACPP_MODEL` | `LiquidAI/LFM3-Omni-2B-GGUF:Q8_0` | `vaice up` only: the `-hf` model of the `llama-server` it starts |
 | `VAICE_LLAMACPP_SERVER_ARGS` | *(empty)* | `vaice up` only: extra arguments for the `llama-server` it starts, split like a shell would (e.g. `--tools get_info,read_file`) |
-| `VAICE_LLAMACPP_START_TIMEOUT` | `900` | `vaice up` only: seconds to wait for the started `llama-server` to become ready; the first run downloads about 1 GB |
+| `VAICE_LLAMACPP_START_TIMEOUT` | `900` | `vaice up` only: seconds to wait for the started `llama-server` to become ready; the first run downloads about 2.4 GB |
 | `VAICE_MODE` | `chat` | `chat` = speech-to-speech replies from the model; `assistant` = transcribe, a brain that can call vaice's own skills, then `/tts` (see [Assistant mode](assistant-mode.md)). Anything else exits at startup |
 | `VAICE_ASSISTANT_PROMPT` | `You are a voice assistant on the user's Mac. …` (answer in one or two short spoken sentences, use a tool only for questions about this computer) | Assistant mode only: the brain's system prompt (the current date and time is added) |
 | `VAICE_ASSISTANT_SHELL` | `false` | Assistant mode only: adds the `run_shell` skill, which proposes a shell command that runs only after you approve it (see [Shell commands](assistant-mode.md#shell-commands)). Off: the skill does not exist. A boolean: `1/true/yes/on` or `0/false/no/off` |

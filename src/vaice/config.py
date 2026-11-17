@@ -107,8 +107,8 @@ LLAMACPP_TOOLS = _tools("VAICE_LLAMACPP_TOOLS")
 
 # `vaice up` starts llama-server when none answers at LLAMACPP_URL: the `-hf` model, extra command-line
 # arguments (e.g. `--tools get_info,read_file`), and how long to wait for it (the first run downloads
-# about 1 GB). Plain `vaice` never starts a server.
-LLAMACPP_MODEL = _env("VAICE_LLAMACPP_MODEL", default="LiquidAI/LFM3-Audio-2B-GGUF:Q4_K_M")
+# about 2.4 GB). Plain `vaice` never starts a server.
+LLAMACPP_MODEL = _env("VAICE_LLAMACPP_MODEL", default="LiquidAI/LFM3-Omni-2B-GGUF:Q8_0")
 
 
 def _arguments(name: str) -> list[str]:

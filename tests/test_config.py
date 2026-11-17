@@ -193,7 +193,7 @@ def test_the_server_start_settings_have_defaults(monkeypatch):
         monkeypatch.delenv(name, raising=False)
     try:
         reloaded = importlib.reload(config)
-        assert reloaded.LLAMACPP_MODEL == "LiquidAI/LFM3-Audio-2B-GGUF:Q4_K_M"
+        assert reloaded.LLAMACPP_MODEL == "LiquidAI/LFM3-Omni-2B-GGUF:Q8_0"
         assert reloaded.LLAMACPP_SERVER_ARGS == []
         assert reloaded.LLAMACPP_START_TIMEOUT == 900.0
     finally:

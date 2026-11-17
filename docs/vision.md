@@ -9,6 +9,12 @@ Slack", and it does it, tells you in a sentence what happened, and asks before a
 remembers what you told it, can see what you see when you ask, and reaches into your other tools. It is yours: it
 runs on your machine, with models you choose, and nothing leaves it unless you decide so.
 
+**Where the name comes from.** "Jarvis" is J.A.R.V.I.S., "Just A Rather Very Intelligent System", the AI that Tony
+Stark talks to in Marvel's *Iron Man* films and comics. He speaks to it in plain language while he works, and it runs his
+home, his lab and his suit: it answers, fetches, controls and warns, and it understands what he means without a command
+syntax. We borrow only the experience (talk, and it handles it), not the character or any of its capabilities. `vaice` is
+an independent open-source project with no connection to Marvel.
+
 This is a direction, not a promise of a date. `vaice` is a single-user demo on the way there, and the rest of this page
 says honestly how far it has come.
 

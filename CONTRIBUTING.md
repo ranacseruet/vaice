@@ -7,7 +7,7 @@ Thank you for your interest in contributing to `vaice`! This document covers set
 ### Prerequisites
 - **Python 3.12** (`.python-version`; `uv sync` downloads it when it is missing)
 - **[uv](https://docs.astral.sh/uv/)**
-- *(For manual end-to-end audio testing)* A local `llama.cpp` `llama-server` (**b11960+**, e.g. `brew install llama.cpp`) running an audio-output model such as `LiquidAI/LFM3-Audio-2B-GGUF:Q4_K_M`
+- *(For manual end-to-end audio testing)* A local `llama.cpp` `llama-server` (**b11960+**, e.g. `brew install llama.cpp`) running an audio-output model such as `LiquidAI/LFM3-Omni-2B-GGUF:Q8_0`
 
 ### Install Dependencies
 ```bash

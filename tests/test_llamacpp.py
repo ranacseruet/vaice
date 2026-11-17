@@ -1231,7 +1231,7 @@ def test_a_failing_props_check_logs_a_hint_and_is_not_fatal(monkeypatch, caplog)
 
 def test_a_model_that_cannot_speak_is_an_error_naming_it(monkeypatch):
     serve_checks(monkeypatch, Reply(), Reply(body=models("text")))
-    with pytest.raises(RuntimeError, match=r"LFM3.*does not output audio.*LFM3-Audio-2B-GGUF"):
+    with pytest.raises(RuntimeError, match=r"LFM3.*does not output audio.*LFM3-Omni-2B-GGUF"):
         check_server("http://h:1")
 
 

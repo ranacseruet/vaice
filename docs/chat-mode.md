@@ -26,7 +26,7 @@ tools on the server (read-only subset recommended — they run with the server's
 never enable `exec_shell_command` or `write_file` for a voice demo):
 
 ```bash
-llama-server -hf LiquidAI/LFM3-Audio-2B-GGUF:Q4_K_M --temp 0 --tools get_info,read_file
+llama-server -hf LiquidAI/LFM3-Omni-2B-GGUF:Q8_0 --temp 0 --tools get_info,read_file
 ```
 
 then start `vaice` with `VAICE_LLAMACPP_TOOLS=builtin`. vaice takes **every tool the server

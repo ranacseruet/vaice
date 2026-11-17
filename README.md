@@ -6,7 +6,7 @@
 
 **Talk to your computer and get things done.** `vaice` is a voice assistant that runs in your browser on local
 models: you speak, it answers out loud as it thinks, and it can check on your Mac, open apps, change the volume and
-more, asking before it does anything it cannot undo. The goal is a real-life Jarvis; see the [vision](docs/vision.md).
+more, asking before it does anything it cannot undo. The goal is a real-life Jarvis, the voice-controlled AI from *Iron Man* (see the [vision](docs/vision.md) for what that means here).
 
 > **Status:** a single-user demo in active development, tested on macOS with a 2B speech model. It is useful today
 > for questions and a handful of actions, and it is not yet an assistant you would trust with your whole computer.
@@ -50,8 +50,8 @@ uv sync --extra dev
 .venv/bin/vaice up        # starts llama-server if needed, then opens http://127.0.0.1:7860
 ```
 
-The first run downloads about 1 GB of model weights. In the browser, allow the microphone, click **Record**, ask a
-question and pause. To use the assistant instead of plain chat:
+The first run downloads about 2.4 GB of model weights (LFM3-Omni-2B, 8-bit; about 4 GB of memory once loaded).
+In the browser, allow the microphone, click **Record**, ask a question and pause. To use the assistant instead of plain chat:
 
 ```bash
 VAICE_MODE=assistant .venv/bin/vaice up
