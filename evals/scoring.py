@@ -128,6 +128,39 @@ def score(expect: dict, calls: list[tuple[str, str]]) -> dict:
     return {"verdict": verdict, "reason": reason, "duplicate": _has_duplicate(calls)}
 
 
+def _command(arguments: str) -> str | None:
+    """The `command` of a `run_shell` call's arguments, if they are a JSON object holding a string."""
+    parsed = _parse(arguments)
+    command = None if parsed is None else parsed.get("command")
+    return command if isinstance(command, str) else None
+
+
+def _command_ok(expect: dict, command: str) -> bool:
+    """`command` against the case's `command_matches` (must be found) and `command_not` (must not be)."""
+    if "command_matches" in expect and not re.search(expect["command_matches"], command):
+        return False
+    return not ("command_not" in expect and re.search(expect["command_not"], command))
+
+
+def check_answer(expect: dict, calls: list[tuple[str, str]], answer: str | None, pending: bool = False) -> dict:
+    """The optional checks of `expect` that are about what was said or run, apart from the call verdict (a call
+    can be right and the answer wrong). Each is True, False, or None when `expect` does not ask for it:
+
+    - `answer_has`: every listed string appears in the final answer (case ignored). Not applicable (None) when
+      the run ended in a confirmation question (`pending`): that is not the answer;
+    - `command_matches` / `command_not`: regular expressions searched (case-sensitive) in the `command` of the
+      `run_shell` call(s): the first must be found, the second must not. False when there is no such call.
+    """
+    checks: dict = {"answer_ok": None, "command_ok": None}
+    if "answer_has" in expect and not pending:
+        text = (answer or "").casefold()
+        checks["answer_ok"] = all(wanted.casefold() in text for wanted in expect["answer_has"])
+    if "command_matches" in expect or "command_not" in expect:
+        commands = [c for name, args in calls if name == "run_shell" and (c := _command(args)) is not None]
+        checks["command_ok"] = bool(commands) and all(_command_ok(expect, c) for c in commands)
+    return checks
+
+
 def _percent(count: int, total: int) -> float:
     return round(100 * count / total, 1) if total else 0.0
 
@@ -137,7 +170,8 @@ def aggregate(records: list[dict]) -> dict:
 
     A record has `error` (text or None), `score` (the `score` result, absent for an errored run) and
     `latency_s` (seconds to the first audio or to the decision; may be None). Percentages are of all
-    runs, errors included; latency covers the runs that produced one.
+    runs, errors included; latency covers the runs that produced one. `answer_faithful` and `command_ok`
+    (`check_answer`) are added when some run was asked for them: `{"ok": k, "of": N}` over completed runs.
     """
     total = len(records)
     counts = dict.fromkeys(OUTCOMES, 0)
@@ -145,7 +179,7 @@ def aggregate(records: list[dict]) -> dict:
         counts["error" if record.get("error") else record["score"]["verdict"]] += 1
     duplicates = sum(1 for r in records if not r.get("error") and r["score"]["duplicate"])
     latencies = [r["latency_s"] for r in records if not r.get("error") and r.get("latency_s") is not None]
-    return {
+    summary = {
         "runs": total,
         "counts": counts,
         "percent": {name: _percent(n, total) for name, n in counts.items()},
@@ -154,6 +188,11 @@ def aggregate(records: list[dict]) -> dict:
         "latency_median_s": statistics.median(latencies) if latencies else None,
         "latency_max_s": max(latencies) if latencies else None,
     }
+    for name, key in (("answer_faithful", "answer_ok"), ("command_ok", "command_ok")):
+        ok, of = check_totals(records, key)
+        if of:
+            summary[name] = {"ok": ok, "of": of}
+    return summary
 
 
 def per_case(records: list[dict]) -> dict[str, tuple[int, int]]:
@@ -165,6 +204,26 @@ def per_case(records: list[dict]) -> dict[str, tuple[int, int]]:
         if not record.get("error") and record["score"]["verdict"] == "correct":
             cell[0] += 1
     return {case: (correct, total) for case, (correct, total) in table.items()}
+
+
+def check_totals(records: list[dict], key: str) -> tuple[int, int]:
+    """`(runs where the check held, runs it applied to)` for `key` (`answer_ok` or `command_ok`) over the
+    completed runs; a run the case did not ask the check of is not counted."""
+    values = [r["score"].get(key) for r in records if not r.get("error")]
+    values = [v for v in values if v is not None]
+    return sum(values), len(values)
+
+
+def per_case_check(records: list[dict], key: str) -> dict[str, tuple[int, int]]:
+    """`case id -> (runs where the check held, runs it applied to)`; cases it never applied to are left out."""
+    table: dict[str, list[int]] = {}
+    for record in records:
+        value = None if record.get("error") else record["score"].get(key)
+        if value is not None:
+            cell = table.setdefault(record["case"], [0, 0])
+            cell[0] += value
+            cell[1] += 1
+    return {case: (ok, of) for case, (ok, of) in table.items()}
 
 
 def normalize_transcript(text: str) -> str:

@@ -121,8 +121,8 @@ def test_spoken_duration(seconds, spoken):
 
 def test_describe_system():
     now = 1731000000 + 3 * 86400 + 4 * 3600
-    assert describe_system("15.6", "Ranas-MacBook.local", 1731000000, 48 * GIB, now) == (
-        "macOS 15.6 on Ranas-MacBook, up 3 days and 4 hours, 48 gigabytes of memory")
+    assert describe_system("15.6", "Example-MacBook.local", 1731000000, 48 * GIB, now) == (
+        "macOS 15.6 on Example-MacBook, up 3 days and 4 hours, 48 gigabytes of memory")
     assert "up less than a minute" in describe_system("15.6", "Mac", now + 10, 8 * GIB, now)  # a clock step back
 
 
@@ -388,12 +388,12 @@ def test_system_info(commands, monkeypatch):
     answers = {"kern.boottime": "{ sec = 1731000000, usec = 0 } Fri Nov  8 2024", "hw.memsize": "51539607552\n"}
     monkeypatch.setattr(skills_module, "_command", lambda argv: answers[argv[-1]])
     monkeypatch.setattr(skills_module.platform, "mac_ver", lambda: ("15.6", ("", "", ""), "arm64"))
-    monkeypatch.setattr(skills_module.platform, "node", lambda: "Ranas-MacBook.local")
+    monkeypatch.setattr(skills_module.platform, "node", lambda: "Example-MacBook.local")
     monkeypatch.setattr(skills_module.time, "time", lambda: 1731000000 + 3 * 86400 + 4 * 3600)
 
     result = default_skills().run("system_info", "{}")
 
-    assert result.speech == "macOS 15.6 on Ranas-MacBook, up 3 days and 4 hours, 48 gigabytes of memory"
+    assert result.speech == "macOS 15.6 on Example-MacBook, up 3 days and 4 hours, 48 gigabytes of memory"
 
 
 def test_top_processes_ranks_by_memory_by_default_and_by_cpu_on_request(commands):

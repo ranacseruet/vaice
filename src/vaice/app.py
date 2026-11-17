@@ -6,6 +6,7 @@ import re
 import time
 from collections.abc import Callable
 from functools import partial
+from urllib.parse import urlsplit
 
 import gradio as gr
 import numpy as np
@@ -250,6 +251,23 @@ def _chat_responder() -> LlamaCppResponder:
     return LlamaCppResponder(tools=tools or None)
 
 
+def _announce_brain() -> None:
+    """Assistant mode: say which brain answers. A helper off this machine gets a warning that says what is sent;
+    nothing here touches the API key, which is never logged (not even its length)."""
+    if not config.BRAIN_URL:
+        return
+    parts = urlsplit(config.BRAIN_URL)
+    log.info("assistant brain: %s, model %s", parts.netloc, config.BRAIN_MODEL or "(none set)")
+    if not config.BRAIN_MODEL:
+        log.warning("VAICE_BRAIN_MODEL is empty: most hosted endpoints require a model name")
+    if parts.hostname not in config.LOCAL_HOSTS:
+        log.warning(
+            "the brain at %s is not on this machine: what you say (as text), the earlier turns of the "
+            "conversation and the skills' results (file names, process names, this computer's name, shell command "
+            "output) are sent to it. Audio does not leave: speech recognition and speech output stay on the "
+            "local llama-server", parts.netloc)
+
+
 def main() -> None:
     up = parse_args().command == "up"
 
@@ -265,12 +283,15 @@ def main() -> None:
                 log.warning("VAICE_LLAMACPP_TOOLS is ignored in assistant mode: the skills run in vaice, "
                             "not on llama-server")
             responder = AssistantResponder()
+            _announce_brain()
             if config.ASSISTANT_SHELL:
                 log.warning("VAICE_ASSISTANT_SHELL is on: after you approve it, a shell command the assistant "
                             "proposes runs with vaice's own permissions (harmless ones by voice or click, "
                             "all others only by the Run button)")
             log.info("assistant mode: skills %s", ", ".join(responder.skills.names))
         else:
+            if config.BRAIN_URL:
+                log.warning("VAICE_BRAIN_URL is ignored in chat mode: the helper brain is for assistant mode only")
             responder = _chat_responder()
         log.info("using llama-server at %s", config.LLAMACPP_URL)
 

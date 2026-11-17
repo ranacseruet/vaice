@@ -23,7 +23,7 @@ import requests
 
 from vaice import config, lifecycle, voice
 from vaice.audio import from_pcm16
-from vaice.brain import ChatBrain
+from vaice.brain import BrainError, ChatBrain
 from vaice.confirm import Confirmations, Pending, spoken_answer
 from vaice.conversation import Message, Turn
 from vaice.responders.base import AudioFrame
@@ -224,8 +224,12 @@ def _approved(pending: Pending, skills: Skills, brain: ChatBrain, turn: Turn, st
         raise _Stopped
     messages = [*pending.messages, {"role": "tool", "tool_call_id": pending.call_id, "content": result.speech}]
     started = time.perf_counter()
-    reply = brain.complete(messages, None)
-    return Decision(_spoken_text(reply.text) or result.speech, [SkillCall(pending.name, pending.arguments, result)],
+    try:
+        text = _spoken_text(brain.complete(messages, None).text)
+    except BrainError as exc:  # the skill already ran: say what it did, not that the brain is away
+        log.warning("assistant brain failed after %s ran: %s", pending.name, exc)
+        text = ""
+    return Decision(text or result.speech, [SkillCall(pending.name, pending.arguments, result)],
                     [time.perf_counter() - started])
 
 
@@ -275,8 +279,13 @@ def _work(url: str, timeout: float, prompt: str, voice_name: str, skills: Skills
         transcribed = time.perf_counter() - started
         if stop():
             raise _Stopped
+        failure: BrainError | None = None
         if transcript:
-            decision = _decision(prompt, history, transcript, skills, brain, confirmations, turn, stop)
+            try:
+                decision = _decision(prompt, history, transcript, skills, brain, confirmations, turn, stop)
+            except BrainError as exc:  # audible first: its sentence is spoken below, then the error is raised
+                log.warning("assistant brain failed: %s", exc)
+                decision, failure = Decision(exc.spoken), exc
         else:
             # Nothing was understood (noise, a cough): a waiting confirmation is left alone on purpose. The
             # user still has to answer it with a whole-utterance yes, and a cough must not cancel their request.
@@ -301,6 +310,8 @@ def _work(url: str, timeout: float, prompt: str, voice_name: str, skills: Skills
                 confirmations.take(pending.id)
             else:
                 out.put(_Asked(pending.id, spoken=True))
+        if failure is not None:  # after the apology was queued: the generator raises it, so the UI shows why
+            raise failure
         if first is not None:
             thinking = "+".join(f"{seconds:.2f}s" for seconds in decision.brain_seconds) or "none"
             log.info("assistant timings: transcript %.2fs, brain %s, first audio %.2fs", transcribed, thinking, first)
@@ -312,6 +323,13 @@ def _work(url: str, timeout: float, prompt: str, voice_name: str, skills: Skills
         out.put(exc)
     finally:
         out.put(_DONE)
+
+
+def _default_brain(url: str, timeout: float) -> ChatBrain:
+    """The helper endpoint when VAICE_BRAIN_URL is set, else the local llama-server at `url`."""
+    if config.BRAIN_URL:
+        return ChatBrain.helper(config.BRAIN_URL, config.BRAIN_TIMEOUT, config.BRAIN_MODEL, config.BRAIN_API_KEY)
+    return ChatBrain.local(url, timeout)
 
 
 class AssistantResponder:
@@ -338,7 +356,7 @@ class AssistantResponder:
         self._prompt = prompt
         self._voice = voice
         self.skills = skills or default_skills(shell=config.ASSISTANT_SHELL)
-        self._brain = brain or ChatBrain(url, timeout)
+        self._brain = brain or _default_brain(url, timeout)
         self._confirmations = Confirmations() if confirmations is None else confirmations
         self._runs: set[threading.Event] = set()  # per click-approved run: set by `clear_pending` to stop it
         self._runs_lock = threading.Lock()
