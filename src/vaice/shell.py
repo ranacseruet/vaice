@@ -218,6 +218,9 @@ def run(command: str, stop: Callable[[], bool]) -> SkillResult:
             now = time.monotonic()
             if proc.poll() is not None:
                 if eof:
+                    # whatever it left running in its group (`server >/dev/null &`) ends with it: nothing
+                    # would time it out or stop it later, since only the command itself is tracked
+                    _stop_group(proc)
                     break
                 exited_at = exited_at or now
                 if now - exited_at >= LEFTOVER_WAIT:  # a background process keeps the output open: end it too

@@ -369,6 +369,13 @@ def test_a_background_process_holding_the_output_open_does_not_hang_the_command(
     assert wait_gone(int(result.speech.rsplit(" ", 1)[1]))  # ended with the command
 
 
+def test_a_background_process_that_closed_the_output_ends_with_the_command_too(home):
+    result = shell.run("sleep 30 >/dev/null 2>&1 & echo $!", never)  # the pipe reaches EOF, the child lives on
+
+    assert result.speech.startswith("the command finished. Output: ")
+    assert wait_gone(int(result.speech.rsplit(" ", 1)[1]))
+
+
 def test_the_registry_is_empty_after_a_run(home):
     shell.run("true", never)
 

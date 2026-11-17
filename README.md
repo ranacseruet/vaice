@@ -293,7 +293,7 @@ Both kinds run with vaice's own permissions, in your home folder, with no input,
 merged, in a process group of their own. They are stopped after **30 seconds**, when you talk over the reply
 (spoken approval), when the app stops, and on *New conversation* (click approval; otherwise only the 30
 seconds end a command you started with the button). Stopping ends the command's whole process group, and a
-background process that keeps the output open ends with its command. At most 20,000 characters of output
+background process the command started ends with it, whether or not it kept the output open. At most 20,000 characters of output
 are kept (the rest is read and discarded, so a chatty command cannot hang); the model gets a one-line outcome
 (`the command finished`, `the command failed with status 2`, `the command was stopped after 30 seconds`) and
 the first 600 characters of the output, with the whole output on screen in *Tool activity*. The output is
