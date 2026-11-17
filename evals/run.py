@@ -22,7 +22,7 @@ import time
 import wave
 from collections.abc import Sequence
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -426,7 +426,7 @@ def main(argv: list[str] | None = None) -> None:
     prompts = {"interleaved": args.prompt or config.LLAMACPP_PROMPT, "text": args.prompt or TEXT_PROMPT,
                "assistant": args.prompt or config.ASSISTANT_PROMPT}
     history = HISTORY if args.history else []
-    out = args.out or HERE / "results" / f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.json"
+    out = args.out or HERE / "results" / f"{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}.json"
 
     print(f"server {url}: {info.get('model_alias')} {info.get('build_info')} temperature={info.get('temperature')}")
     brain = make_brain(args) if "assistant" in args.paths else None
@@ -436,7 +436,7 @@ def main(argv: list[str] | None = None) -> None:
         if brain is not None and urlsplit(args.brain_url).hostname not in config.LOCAL_HOSTS:
             print("  the case sentences and the stub skills' results are sent to that endpoint")
     runs: list[dict] = []
-    started = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    started = datetime.now(UTC).isoformat(timespec="seconds")
     total = len(cases) * len(args.paths) * args.repeats
     try:
         with tempfile.TemporaryDirectory(prefix="vaice-evals-") as scratch:

@@ -5,7 +5,7 @@ Thank you for your interest in contributing to `vaice`! This document covers set
 ## Development Setup
 
 ### Prerequisites
-- **Python 3.10–3.12** (`.python-version` defaults to `3.12`)
+- **Python 3.12** (`.python-version`; `uv sync` downloads it when it is missing)
 - **[uv](https://docs.astral.sh/uv/)**
 - *(For manual end-to-end audio testing)* A local `llama.cpp` `llama-server` (**b11960+**, e.g. `brew install llama.cpp`) running an audio-output model such as `LiquidAI/LFM3-Audio-2B-GGUF:Q4_K_M`
 
@@ -64,7 +64,7 @@ Unit tests run completely offline without a real `llama-server` or microphone by
 
 1. Fork the repository and create a descriptive branch (`feat/...`, `fix/...`, `docs/...`, `chore/...`).
 2. Make your changes and add or update tests covering the behavior.
-3. Confirm `.venv/bin/ruff check src tests` and `.venv/bin/pytest` pass on Python 3.10 and 3.12.
+3. Confirm `.venv/bin/ruff check src tests` and `.venv/bin/pytest` pass on Python 3.12.
 4. Open a pull request and fill out the pull request template.
 
 ## Reporting Issues

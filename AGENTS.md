@@ -4,7 +4,7 @@ This file provides guidance to coding agents (Claude Code, Codex, Cursor, …) w
 
 ## What this is
 
-`vaice` is a single-user voice demo: browser mic → fastrtc (WebRTC + VAD) → a `Responder` → spoken reply streamed back, with a persisted multi-turn conversation. The `llamacpp` responder sends audio to llama.cpp `llama-server` (LFM3-Audio, `/v1/realtime` WebSocket) and streams the model's speech back. Python 3.10–3.12 are the CI-tested versions; CI runs on macOS, and other OS audio behavior is not validated. See `README.md` for the user-facing description and the env-var table.
+`vaice` is a single-user voice demo: browser mic → fastrtc (WebRTC + VAD) → a `Responder` → spoken reply streamed back, with a persisted multi-turn conversation. The `llamacpp` responder sends audio to llama.cpp `llama-server` (LFM3-Audio, `/v1/realtime` WebSocket) and streams the model's speech back. Python 3.12 is the one supported and CI-tested version; CI runs on macOS, and other OS audio behavior is not validated. See `README.md` for the user-facing description and the env-var table.
 
 ## Commands
 
