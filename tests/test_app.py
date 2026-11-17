@@ -15,6 +15,7 @@ from threads import next_on_fresh_thread, run_on_thread
 from vaice import app, config, lifecycle
 from vaice import conversation as conv
 from vaice.app import CHATBOT_HEIGHT, UI_TITLE, VIEW_REFRESH_SECONDS, build_stream, make_handler, parse_args
+from vaice.confirm import Pending
 from vaice.conversation import Conversation
 from vaice.interruptible import InterruptSafeReplyOnPause
 from vaice.responders.llamacpp import LlamaCppResponder
@@ -871,3 +872,119 @@ def test_the_llamacpp_responder_never_receives_tool_entries(monkeypatch):
     list(make_handler(responder, _conversation_with_a_skill_turn())(AUDIO))
 
     assert seen == [[("user", "how long has it been on?"), ("assistant", "Three days.")]]
+
+
+# --- the confirmation panel (assistant mode)
+
+
+class ConfirmingResponder(FakeResponder):
+    """A responder that asks for confirmation, as AssistantResponder does."""
+
+    def __init__(self):
+        super().__init__()
+        self.waiting = None
+        self.approved, self.cancelled, self.cleared = [], [], 0
+
+    def pending(self):
+        return self.waiting
+
+    def approve(self, pending_id):
+        self.approved.append(pending_id)
+
+    def cancel(self, pending_id):
+        self.cancelled.append(pending_id)
+
+    def clear_pending(self):
+        self.cleared += 1
+        self.waiting = None
+
+
+def waiting_request(arguments='{"name": "Safari"}'):
+    return Pending("quit_app", arguments, "Shall I quit Safari?", "call_0", [], conv.Turn())
+
+
+def confirm_page(responder):
+    """The stream, its config, the timer's tick function and the buttons' click functions by label."""
+    stream = build_stream(responder, Conversation())
+    config = stream.ui.get_config_file()
+    (timer,) = [c for c in config["components"] if c["type"] == "timer" and c["props"]["value"] == VIEW_REFRESH_SECONDS]
+    (tick,) = [d for d in config["dependencies"] if d["targets"][0] == (timer["id"], "tick")]
+    clicks = {}
+    for button in [c for c in config["components"] if c["type"] == "button"]:
+        (click,) = [d for d in config["dependencies"] if d["targets"][0] == (button["id"], "click")]
+        clicks[button["props"]["value"]] = (stream.ui.fns[click["id"]].fn, click)
+    return SimpleNamespace(stream=stream, config=config, tick=stream.ui.fns[tick["id"]].fn, tick_dep=tick,
+                           clicks=clicks)
+
+
+def test_chat_mode_has_no_confirmation_panel():
+    page = confirm_page(FakeResponder())
+
+    assert set(page.clicks) == {"New conversation"}
+    assert len(page.tick_dep["outputs"]) == 3  # chatbot, tool panel, seen
+    assert len(page.tick("")) == 3
+
+
+def test_assistant_mode_has_a_hidden_panel_with_run_and_cancel_above_the_tool_activity():
+    responder = ConfirmingResponder()
+    page = confirm_page(responder)
+    components = page.config["components"]
+
+    assert set(page.clicks) == {"New conversation", "Run", "Cancel"}
+    (panel,) = [c for c in components if c["type"] == "column" and c["props"].get("visible") is False]
+    (accordion,) = [c for c in components if c["type"] == "accordion"]
+    order = [c["id"] for c in components]
+    assert order.index(panel["id"]) < order.index(accordion["id"])
+    hidden, text, pending_id, _ = page.tick("")[2:]
+    assert hidden == {"visible": False, "__type__": "update"} and text == "" and pending_id == ""
+
+
+def test_the_panel_shows_the_question_and_exactly_what_will_run_and_is_drawn_once():
+    responder = ConfirmingResponder()
+    page = confirm_page(responder)
+    _, _, _, _, _, seen = page.tick("")  # the first tick draws the hidden panel
+    request = waiting_request()
+    responder.waiting = request
+
+    *_, shown, text, pending_id, seen = page.tick(seen)
+
+    assert shown == {"visible": True, "__type__": "update"}
+    assert text == 'Shall I quit Safari?\n\n```\nquit_app {"name": "Safari"}\n```'
+    assert pending_id == request.id
+    assert all(item == {"__type__": "update"} for item in page.tick(seen)[:5])  # unchanged: nothing re-renders
+
+    responder.waiting = None  # settled somewhere else: the panel goes away
+    *_, hidden, text, pending_id, seen = page.tick(seen)
+    assert hidden == {"visible": False, "__type__": "update"} and pending_id == ""
+
+
+def test_arguments_with_backticks_cannot_close_the_code_block():
+    _, text, _ = app.confirmation_panel(app.pending_view(waiting_request('{"name": "a ``` b"}')))
+
+    assert text.splitlines()[2] == "````" and text.splitlines()[-1] == "````"
+
+
+def test_run_and_cancel_pass_the_id_the_panel_showed_and_hide_it_and_redraw_on_the_next_tick():
+    responder = ConfirmingResponder()
+    page = confirm_page(responder)
+    run, run_dep = page.clicks["Run"]
+    cancel, _ = page.clicks["Cancel"]
+    state_ids = {c["id"] for c in page.config["components"] if c["type"] == "state"}
+
+    assert run("id-from-the-panel") == ({"visible": False, "__type__": "update"}, "", "")
+    cancel("another-id")
+
+    assert responder.approved == ["id-from-the-panel"] and responder.cancelled == ["another-id"]
+    assert set(run_dep["outputs"]) - state_ids != set()  # the panel itself
+    assert len(run_dep["outputs"]) == 3  # the panel, the id the panel holds, and `seen`: the blank forces a redraw
+
+
+def test_new_conversation_clears_a_waiting_request_and_chat_mode_does_not_need_the_method():
+    responder = ConfirmingResponder()
+    responder.waiting = waiting_request()
+    page = confirm_page(responder)
+
+    page.clicks["New conversation"][0]()
+
+    assert responder.cleared == 1 and responder.pending() is None
+    confirm_page(FakeResponder()).clicks["New conversation"][0]()  # no clear_pending: no error

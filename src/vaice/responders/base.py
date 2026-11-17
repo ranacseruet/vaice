@@ -27,6 +27,12 @@ class Responder(Protocol):
     Optional attribute `tool_history: bool` (False when absent): a responder that sets it True also gets
     the earlier turns' tool results in `history`, as `("tool", "<name>: <output>")` entries between a
     turn's user and assistant messages (output capped). The others never see them.
+
+    Optional methods for a responder that asks the user to confirm an action (the UI reads them with
+    `getattr`; absent means no confirmation panel): `pending()` returns the request waiting for the user
+    (a `confirm.Pending`) or None; `approve(pending_id)` runs it and returns the result text, or None when
+    `pending_id` is no longer the current request; `cancel(pending_id)` drops it; `clear_pending()` drops
+    any (a new conversation). Nothing is spoken for a click: there is no reply in flight to carry audio.
     """
 
     name: str  # short label shown in logs, e.g. "llamacpp"

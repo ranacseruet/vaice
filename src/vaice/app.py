@@ -2,7 +2,9 @@
 import argparse
 import json
 import logging
+import re
 import time
+from collections.abc import Callable
 from functools import partial
 
 import gradio as gr
@@ -11,6 +13,7 @@ import requests
 from fastrtc import AdditionalOutputs, Stream
 
 from vaice import config
+from vaice.confirm import Pending
 from vaice.conversation import Conversation, Turn
 from vaice.interruptible import InterruptSafeReplyOnPause, stop_playing_reply
 from vaice.lifecycle import install_stop_handler, request_stop
@@ -37,18 +40,49 @@ def _error_text(exc: Exception) -> str:
     return " ".join(f"{type(exc).__name__}: {exc}".split())[:ERROR_TEXT_LIMIT]
 
 
-def refresh_view(conversation: Conversation, known: str) -> tuple:
+def pending_view(pending: Pending | None) -> dict | None:
+    """What the confirmation panel shows of a waiting request (None: nothing waits)."""
+    if pending is None:
+        return None
+    return {"id": pending.id, "question": pending.question, "name": pending.name, "arguments": pending.arguments}
+
+
+def _fence(text: str) -> str:
+    """A code fence longer than any run of backticks in `text`, so the text cannot close it early."""
+    return "`" * max(3, max((len(run) for run in re.findall(r"`+", text)), default=0) + 1)
+
+
+def confirmation_panel(view: dict | None) -> tuple:
+    """The confirmation panel's components for `pending_view`: its visibility, its text, the request's id.
+
+    The text holds the question and, in a code block, the skill and its arguments exactly as they will run."""
+    if view is None:
+        return gr.update(visible=False), "", ""
+    command = f"{view['name']} {view['arguments']}".rstrip()
+    fence = _fence(command)
+    return gr.update(visible=True), f"{view['question']}\n\n{fence}\n{command}\n{fence}", view["id"]
+
+
+def refresh_view(conversation: Conversation, known: str, pending: Callable[[], Pending | None] | None = None) -> tuple:
     """The timer's tick: the chatbot's and tool panel's new views when the conversation changed.
 
     The reply can finish before its parallel transcription session reports the transcript, so
     without this the "…" would sit in the chatbot until the next exchange or a page reload. Views
     are compared as JSON so an unchanged transcript is never re-rendered.
+
+    With `pending` (a responder that asks for confirmation) the confirmation panel is part of the view:
+    its visibility, text and the request's id (which the buttons pass back) come after the two views.
     """
     view = (conversation.messages_for_ui(), conversation.tool_activity_for_ui())
+    components = view
+    if pending is not None:
+        asked = pending_view(pending())
+        view += (asked,)
+        components += confirmation_panel(asked)
     rendered = json.dumps(view, ensure_ascii=False)
     if rendered == known:
-        return gr.skip(), gr.skip(), known  # gr.skip(): leave the components alone
-    return view[0], view[1], rendered
+        return (*(gr.skip() for _ in components), known)  # gr.skip(): leave the components alone
+    return (*components, rendered)
 
 
 def make_handler(responder: Responder, conversation: Conversation):
@@ -115,6 +149,21 @@ def build_stream(responder: Responder, conversation: Conversation) -> Stream:
     with stream.ui:
         stream.ui.load(conversation.messages_for_ui, outputs=chatbot)  # show the stored conversation on every page load
         new_conversation = gr.Button("New conversation")
+        # refresh_view's backstop (the timer below) catches conversation changes no reply update covered
+        # (a late transcript, a barge-in's trimmed text, a tool round); seen holds the views it last rendered
+        seen = gr.State("")
+        # Assistant mode: a request waiting for the user's yes (the responder's `pending`, see Responder)
+        # shows here, above the tool panel; chat mode has no such panel
+        pending = getattr(responder, "pending", None)
+        confirm_outputs: list = []
+        if pending is not None:
+            with gr.Column(visible=False) as confirm_panel:
+                confirm_text = gr.Markdown()
+                with gr.Row():
+                    run_button = gr.Button("Run", variant="primary")
+                    cancel_button = gr.Button("Cancel")
+            pending_id = gr.State("")  # the request the panel shows: a click can only settle that one
+            confirm_outputs = [confirm_panel, confirm_text, pending_id]
         # Tool calls and their results, kept out of the conversation: collapsed by default, and the
         # 1 s timer (below) fills it when a tool round lands
         with gr.Accordion("Tool activity", open=False):
@@ -124,16 +173,28 @@ def build_stream(responder: Responder, conversation: Conversation) -> Stream:
             for handler in list(getattr(stream, "handlers", {}).values()):  # per-connection handler copies
                 stop_playing_reply(handler)  # silence a reply in flight; its turn is detached below
             conversation.reset()
+            clear_pending = getattr(responder, "clear_pending", None)
+            if clear_pending is not None:  # a request from the old conversation must not be approvable
+                clear_pending()
             return [], ""
 
         new_conversation.click(reset, outputs=[chatbot, tool_panel])
         chatbot.clear(reset)  # the chatbot's own trash icon would otherwise only clear the view
 
-        # refresh_view's backstop: catches conversation changes no reply update covered (a late
-        # transcript, a barge-in's trimmed text, a tool round); seen holds the views it last rendered
-        seen = gr.State("")
+        if pending is not None:
+            def settle(settle_request: Callable[[str], object], request_id: str) -> tuple:
+                settle_request(request_id)  # a stale id settles nothing
+                # hide at once; the blank `seen` makes the next tick draw whatever is pending now
+                return gr.update(visible=False), "", ""
+
+            run_button.click(partial(settle, responder.approve), inputs=[pending_id],
+                             outputs=[confirm_panel, pending_id, seen])
+            cancel_button.click(partial(settle, responder.cancel), inputs=[pending_id],
+                                outputs=[confirm_panel, pending_id, seen])
+
         gr.Timer(VIEW_REFRESH_SECONDS).tick(
-            partial(refresh_view, conversation), inputs=[seen], outputs=[chatbot, tool_panel, seen])
+            partial(refresh_view, conversation, pending=pending), inputs=[seen],
+            outputs=[chatbot, tool_panel, *confirm_outputs, seen])
     return stream
 
 

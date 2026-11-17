@@ -58,6 +58,16 @@ SKILL_STUBS = {
     "top_processes": "Google Chrome 12 percent of memory, Xcode 9 percent, Slack 4 percent",
     "find_files": "3 files: report.pdf, report-final.pdf, old report.docx",
 }
+# The actions answer with their own arguments, as the real ones do: a canned "opened Safari" for a call
+# that asked for Calculator made the model call again (seen as duplicates and odd answers)
+ACTION_STUBS = {
+    "open_app": lambda args: f"opened {args.get('name')}",
+    "quit_app": lambda args: f"quit {args.get('name')}",
+    "set_volume": lambda args: f"volume set to {args.get('level', 40)} percent",
+    "volume_up": lambda args: "volume set to 60 percent",
+    "volume_down": lambda args: "volume set to 40 percent",
+    "mute_sound": lambda args: "sound muted" if args.get("muted", True) else "sound unmuted",
+}
 TRANSCRIPT_WAIT = 5.0  # the interleaved path's transcript is reported after the reply; wait this long for it
 
 
@@ -198,9 +208,14 @@ def run_text(url: str, prompt: str, tools: list[dict], audio, history) -> dict:
 
 def stub_skills() -> Skills:
     """The real skills' definitions with canned results: the model sees what the app offers, and nothing
-    runs on this machine (the stubs replace each skill's `run`; Skills.run still checks the arguments)."""
-    return Skills([replace(skill, run=lambda _args, text=SKILL_STUBS[skill.name]: SkillResult(text))
-                   for skill in default_skills().skills])
+    runs on this machine (the stubs replace each skill's `run`; Skills.run still checks the arguments). A
+    `confirm` skill's `ask` is stubbed to always ask, so no check of the machine (is the app running?) is made."""
+    return Skills([
+        replace(skill, run=(lambda args, answer=ACTION_STUBS[skill.name]: SkillResult(answer(args)))
+                if skill.name in ACTION_STUBS else (lambda _args, text=SKILL_STUBS[skill.name]: SkillResult(text)),
+                **({"ask": lambda _args, name=skill.name: f"Shall I run {name.replace('_', ' ')}?"}
+                   if skill.kind == "confirm" else {}))
+        for skill in default_skills().skills])
 
 
 def run_assistant(url: str, prompt: str, skills: Skills, audio, history, brain: ChatBrain | None = None) -> dict:
@@ -213,10 +228,13 @@ def run_assistant(url: str, prompt: str, skills: Skills, audio, history, brain: 
         record["transcript"] = transcript
         if transcript:
             decided = time.perf_counter()
-            decision = decide(brain, skills, build_messages(prompt, history, transcript), lambda: False)
+            decision = decide(brain, skills, build_messages(prompt, history, transcript), lambda: False,
+                              turn=Turn())
             record["decide_s"] = time.perf_counter() - decided
             record["brain_s"] = decision.brain_seconds
             record["calls"] = [[call.name, call.arguments] for call in decision.calls]
+            if decision.pending is not None:  # asked for a confirm skill: that is the call (it never runs here)
+                record["calls"].append([decision.pending.name, decision.pending.arguments])
             record["answer"] = decision.answer
         else:  # as in the app: nothing is asked of the brain
             record["answer"] = NOT_HEARD
