@@ -103,5 +103,7 @@ class Confirmations:
         pending = self._pending
         if pending is not None and pending.armed_at is not None \
                 and self._clock() - pending.armed_at >= CONFIRM_SECONDS:
+            # said in the Tool activity panel too, where the request would otherwise wait for ever
+            pending.turn.add_tool_event(pending.name, pending.arguments, "expired")
             self._pending = pending = None
         return pending

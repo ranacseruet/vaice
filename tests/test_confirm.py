@@ -110,6 +110,8 @@ def test_an_expired_request_cannot_be_taken():
 
     assert confirmations.take() is None
     assert confirmations.take(request.id) is None
+    # said once on the asking turn, so the Tool activity panel does not show it waiting for ever
+    assert [event["output"] for event in request.turn.tool_events] == ["expired"]
 
 
 def test_take_by_id_takes_only_that_request_so_an_old_panel_cannot_approve_a_newer_one():
