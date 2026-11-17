@@ -153,16 +153,17 @@ VOICE = _choice("VAICE_VOICE", default="female", choices=("female", "male"))
 LOCAL_HOSTS = ("localhost", "127.0.0.1", "::1")  # a brain at one of these hosts does not leave this machine
 
 
-def brain_base(raw: str) -> str:
-    """The helper brain's base URL as OpenAI clients take it, `/v1` included, without a trailing slash.
+def brain_base(raw: str, key_variable: str = "VAICE_BRAIN_API_KEY") -> str:
+    """An OpenAI-compatible endpoint's base URL as OpenAI clients take it (the helper brain's, the vision model's),
+    `/v1` included, without a trailing slash. `key_variable` is named in the error for credentials in the URL.
 
     Raises ValueError with a message that never repeats `raw`: a key pasted into a URL must not reach the log."""
     parts = urlsplit(raw if "://" in raw else f"http://{raw}")
     if parts.scheme not in ("http", "https") or not parts.netloc:
         raise ValueError("expected an http(s) URL like http://localhost:1234/v1")
     if "@" in parts.netloc or parts.query or parts.fragment:
-        raise ValueError("it must not contain credentials, a query or a fragment (the API key goes in "
-                         "VAICE_BRAIN_API_KEY)")
+        raise ValueError(f"it must not contain credentials, a query or a fragment (the API key goes in "
+                         f"{key_variable})")
     path = parts.path.rstrip("/")
     if path.endswith("/chat/completions"):
         raise ValueError("give the base URL (e.g. http://localhost:1234/v1), not the endpoint: vaice adds "
@@ -171,12 +172,12 @@ def brain_base(raw: str) -> str:
 
 
 def _brain_url(name: str) -> str:
-    """`brain_base` of the variable; "" (unset or empty) = no helper."""
+    """`brain_base` of the variable; "" (unset or empty) = no helper. Its key variable is the `_API_KEY` sibling."""
     raw = os.getenv(name, "").strip()
     if not raw:
         return ""
     try:
-        return brain_base(raw)
+        return brain_base(raw, name.removesuffix("_URL") + "_API_KEY")
     except ValueError as exc:
         raise SystemExit(f"vaice: {name}: {exc}") from None
 
@@ -191,6 +192,18 @@ BRAIN_API_KEY = _env("VAICE_BRAIN_API_KEY", default="").strip()
 BRAIN_TIMEOUT = _number("VAICE_BRAIN_TIMEOUT", default="60", kind=float)
 if BRAIN_TIMEOUT <= 0:
     raise SystemExit("vaice: VAICE_BRAIN_TIMEOUT must be > 0")
+
+# Assistant mode only: the `look_at_screen` skill (vision.py) takes a screenshot when the user asks about their
+# screen and asks this vision model about it: any OpenAI-compatible endpoint that accepts images (LFM3-Omni-2B on
+# a llama-server of its own, a hosted model). Unset = no skill, no screenshot is ever taken. The screenshot is
+# sent to that endpoint, so a host off this machine receives an image of the screen (see README, Privacy). The key
+# is a secret: never logged.
+VISION_URL = _brain_url("VAICE_VISION_URL")
+VISION_MODEL = _env("VAICE_VISION_MODEL", default="").strip()
+VISION_API_KEY = _env("VAICE_VISION_API_KEY", default="").strip()
+VISION_TIMEOUT = _number("VAICE_VISION_TIMEOUT", default="30", kind=float)
+if VISION_TIMEOUT <= 0:
+    raise SystemExit("vaice: VAICE_VISION_TIMEOUT must be > 0")
 
 PORT = _number("VAICE_PORT", default="7860", kind=int)
 

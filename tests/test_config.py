@@ -382,6 +382,74 @@ def test_a_bad_brain_timeout_is_a_clean_error(monkeypatch, value):
         importlib.reload(config)
 
 
+VISION_NAMES = ("VAICE_VISION_URL", "VAICE_VISION_MODEL", "VAICE_VISION_API_KEY", "VAICE_VISION_TIMEOUT")
+
+
+def test_the_vision_skill_is_off_by_default(monkeypatch):
+    for name in VISION_NAMES:
+        monkeypatch.delenv(name, raising=False)
+    try:
+        reloaded = importlib.reload(config)
+        assert (reloaded.VISION_URL, reloaded.VISION_MODEL, reloaded.VISION_API_KEY) == ("", "", "")
+        assert reloaded.VISION_TIMEOUT == 30.0
+    finally:
+        monkeypatch.undo()
+        importlib.reload(config)
+
+
+def test_the_vision_settings_are_read_from_the_environment(monkeypatch):
+    monkeypatch.setenv("VAICE_VISION_URL", "http://127.0.0.1:8002/v1/")
+    monkeypatch.setenv("VAICE_VISION_MODEL", " omni ")
+    monkeypatch.setenv("VAICE_VISION_API_KEY", "fake-key-123\n")
+    monkeypatch.setenv("VAICE_VISION_TIMEOUT", "12.5")
+    try:
+        reloaded = importlib.reload(config)
+        assert reloaded.VISION_URL == "http://127.0.0.1:8002/v1"  # trailing slash stripped, /v1 kept
+        assert reloaded.VISION_MODEL == "omni"
+        assert reloaded.VISION_API_KEY == "fake-key-123"
+        assert reloaded.VISION_TIMEOUT == 12.5
+        assert reloaded.BRAIN_URL == ""  # the helper brain is a separate setting
+    finally:
+        monkeypatch.undo()
+        importlib.reload(config)
+
+
+def test_a_bad_vision_url_names_the_variable_and_never_repeats_the_value(monkeypatch):
+    monkeypatch.setenv("VAICE_VISION_URL", "https://host/v1?key=fake-key-123")
+    try:
+        with pytest.raises(SystemExit, match="vaice: VAICE_VISION_URL: it must not contain credentials") as caught:
+            importlib.reload(config)
+        assert "VAICE_VISION_API_KEY" in str(caught.value) and "VAICE_BRAIN" not in str(caught.value)
+        assert "fake-key-123" not in str(caught.value)
+
+        monkeypatch.setenv("VAICE_VISION_URL", "http://host/v1/chat/completions")
+        with pytest.raises(SystemExit, match="VAICE_VISION_URL: give the base URL"):
+            importlib.reload(config)
+
+        monkeypatch.setenv("VAICE_VISION_URL", "ftp://host/v1")
+        with pytest.raises(SystemExit, match="VAICE_VISION_URL: expected an http"):
+            importlib.reload(config)
+    finally:
+        monkeypatch.undo()
+        importlib.reload(config)
+
+
+def test_a_bad_brain_url_still_names_the_brain_key():
+    with pytest.raises(ValueError, match="VAICE_BRAIN_API_KEY"):
+        config.brain_base("https://user:pw@host/v1")
+
+
+@pytest.mark.parametrize("value", ["0", "-5", "soon"])
+def test_a_bad_vision_timeout_is_a_clean_error(monkeypatch, value):
+    monkeypatch.setenv("VAICE_VISION_TIMEOUT", value)
+    try:
+        with pytest.raises(SystemExit, match="VAICE_VISION_TIMEOUT must be"):
+            importlib.reload(config)
+    finally:
+        monkeypatch.undo()
+        importlib.reload(config)
+
+
 def test_spoken_progress_is_on_after_two_and_a_half_seconds_and_can_be_turned_off(monkeypatch):
     monkeypatch.delenv("VAICE_ASSISTANT_PROGRESS_SECONDS", raising=False)
     try:

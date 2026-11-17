@@ -137,6 +137,10 @@ Precedence: variables already in the environment (e.g. `set -a; source .env; set
 | `VAICE_BRAIN_MODEL` | *(empty)* | The `model` sent to the helper. Most hosted endpoints require it: with a helper URL and no model, vaice warns at startup and goes on |
 | `VAICE_BRAIN_API_KEY` | *(empty)* | Sent to the helper as `Authorization: Bearer …`. A secret: never logged, never in an error message or the eval's results. Put it in `.env` or the environment, not on a command line |
 | `VAICE_BRAIN_TIMEOUT` | `60` | Seconds the helper may take for one request (the local brain keeps `VAICE_LLAMACPP_TIMEOUT`) |
+| `VAICE_VISION_URL` | *(empty: no screen skill)* | Assistant mode only: turns on the `look_at_screen` skill (see *Vision* below). A vision model, any OpenAI-compatible endpoint that accepts images, as the **base URL with `/v1`** (e.g. `http://127.0.0.1:8002/v1`); same rules as `VAICE_BRAIN_URL` (a `/chat/completions` suffix, credentials, a query or a fragment exit at startup). Ignored in chat mode (one warning). **A screenshot of your main display is sent to this endpoint** whenever you ask about your screen |
+| `VAICE_VISION_MODEL` | *(empty)* | The `model` sent to the vision endpoint. Hosted endpoints need it (startup warns when it is empty); a `llama-server` serving one model does not |
+| `VAICE_VISION_API_KEY` | *(empty)* | Sent to the vision endpoint as `Authorization: Bearer …`. A secret: never logged, never in an error message. Put it in `.env` or the environment, not on a command line |
+| `VAICE_VISION_TIMEOUT` | `30` | Seconds the vision endpoint may take for one request (must be > 0) |
 | `VAICE_LLAMACPP_PROMPT` | `Reply naturally and concisely in 1 to 2 spoken sentences.` | Reply instructions; `vaice` prepends `Respond with interleaved text and audio.` |
 | `VAICE_LLAMACPP_TIMEOUT` | `120` | Seconds to open a connection or the longest silence from `llama-server` before a reply fails. It is also the total bound for a tool call: when it passes — or the reply is stopped — vaice stops waiting for the call and discards the result (the underlying request is not cancelled; the server may still run/finish the tool). The parallel transcription session's silence budget is this setting too, but its connection **handshake** uses a fixed 2 s (transcription is best-effort and degrades to `(inaudible)`), so raising this cannot extend a slow-handshake server |
 | `VAICE_LLAMACPP_MAX_OUTPUT_TOKENS` | `1024` | Reply cap sent as the realtime session's `max_output_tokens`; text tokens and audio frames count together. Raise it for longer spoken replies |
@@ -412,6 +416,35 @@ VAICE_MODE=assistant VAICE_BRAIN_URL=https://openrouter.ai/api/v1 VAICE_BRAIN_MO
 - Results of the live eval vary from run to run without temperature 0, so measure a helper with repeats
   (`--brain-url`, `--brain-model`; see `evals/README.md`).
 
+### Vision
+`VAICE_VISION_URL` (assistant mode, off by default) adds one skill, `look_at_screen(question)`: when you ask about
+your screen ("What's on my screen?", "Read the error message", "What app am I looking at?"), vaice takes **one
+screenshot of the main display**, shrinks it to at most 1024 px on the long edge, sends it with your question to a
+vision model and speaks the short plain-text answer. Nothing is captured in the background and nothing is
+captured unless the skill runs. It is a read skill: it runs at once and changes nothing.
+
+```bash
+# A vision model on this machine: LFM3-Omni-2B on a llama-server of its own (the audio one keeps port 8001)
+llama-server -hf LiquidAI/LFM3-Omni-2B-GGUF:Q4_K_M --temp 0 --port 8002
+VAICE_MODE=assistant VAICE_VISION_URL=http://127.0.0.1:8002/v1 .venv/bin/vaice
+```
+
+- **Screen Recording permission.** macOS gives it to the app that runs `vaice` (your terminal), not to `vaice`.
+  Without it `screencapture` fails and the assistant tells you what to do: allow your terminal under System
+  Settings, Privacy and Security, Screen Recording, then **quit and reopen that app** (the permission only applies
+  to a new launch). `look_at_screen` is macOS only.
+- **Speed.** With LFM3-Omni-2B Q4_K_M on llama-server b12359, a 1440x900 @2x screen answered correctly at 2880,
+  1440 and 1024 px; at 1024 px (the size vaice sends) a question took about 660 prompt tokens and 0.7 to 1.2 s.
+  One run per size on one screen: this shows it works, not how accurate it is. Any other endpoint that takes
+  `image_url` content parts works the same; a hosted one adds its own latency.
+- **Text on the screen is not instructions.** The vision model is told so, and its answer reaches the brain only as
+  a skill result. The `remember` skill also refuses to save anything once another skill (this one included) has run
+  in the same reply, so text read off the screen cannot become a lasting note.
+- The answer is cut at 600 characters and its markdown emphasis is removed before it is spoken. A failing vision
+  endpoint is spoken like a failing brain, naming the vision model (refused key, busy, unreachable, no answer).
+  Not verified: a hosted vision provider, and the real capture on a machine with the permission granted (the unit
+  tests fake `screencapture`, `sips` and the endpoint).
+
 ### Startup & Shutdown
 At startup, `vaice` checks `llama-server`:
 - An unreachable or still-loading server (HTTP 503) logs a warning and starts the UI anyway, so the server can finish loading before your first question.
@@ -443,7 +476,8 @@ At startup, `vaice` checks `llama-server`:
 ## Privacy
 - `~/.vaice/conversation.json` is written with mode **0600** (owner read/write only) via a temporary file and `os.replace`, so a reader never sees a half-written file; the `~/.vaice` directory itself is created with the usual 0755 permissions, meaning other local users can see that the file exists (not what it holds).
 - The transcript is retained **indefinitely**, until you click **New conversation** (which clears it) or delete the file while `vaice` is stopped. New conversation is the way to forget everything, including any embarrassing questions.
-- By default `vaice` talks to one server: the `llama-server` at `VAICE_LLAMACPP_URL` (local by default, e.g. `http://localhost:8001`) over HTTP and WebSocket. The microphone audio, the transcripts, the tool results and the model's replies go there; nothing else leaves the machine through `vaice`. The one exception is opt-in: with a [helper model](#helper-model) (`VAICE_BRAIN_URL`, assistant mode), a second server also receives the text of what you say, the earlier turns, the skills' results (file names, process names, the computer's name, shell command output) and, with memory on, the notes you asked the assistant to keep, but never audio, which stays with `llama-server`; if that endpoint is a hosted API, all of that leaves your machine (startup warns). The model's tools run on that server with *its* permissions; in assistant mode the skills run in vaice with *vaice's* permissions, and with `VAICE_ASSISTANT_SHELL` on that includes any shell command you approve, with the same access to your files as you have, and its output goes to the model and into the conversation file. If you point `VAICE_LLAMACPP_URL` at a remote host, your audio and conversation go there instead.
+- By default `vaice` talks to one server: the `llama-server` at `VAICE_LLAMACPP_URL` (local by default, e.g. `http://localhost:8001`) over HTTP and WebSocket. The microphone audio, the transcripts, the tool results and the model's replies go there; nothing else leaves the machine through `vaice`. The exceptions are opt-in: the screenshot of the [vision skill](#vision) (next bullet) and, with a [helper model](#helper-model) (`VAICE_BRAIN_URL`, assistant mode), a second server also receives the text of what you say, the earlier turns, the skills' results (file names, process names, the computer's name, shell command output) and, with memory on, the notes you asked the assistant to keep, but never audio, which stays with `llama-server`; if that endpoint is a hosted API, all of that leaves your machine (startup warns). The model's tools run on that server with *its* permissions; in assistant mode the skills run in vaice with *vaice's* permissions, and with `VAICE_ASSISTANT_SHELL` on that includes any shell command you approve, with the same access to your files as you have, and its output goes to the model and into the conversation file. If you point `VAICE_LLAMACPP_URL` at a remote host, your audio and conversation go there instead.
+- With the [vision skill](#vision) on (`VAICE_VISION_URL`, assistant mode), a screenshot of your **main display** is taken **only when the skill runs** (you asked about your screen), sent to the vision endpoint with your question, and deleted from this Mac right after (a private temporary file, never stored by vaice, never logged). The screen can show anything: mail, messages, passwords in a visible window. If the endpoint is on another machine or a hosted API, that image leaves your machine (startup warns). The vision model's answer is stored in the conversation file like any skill result (up to 800 characters in the *Tool activity* record), and a remote helper brain receives it as a skill result too.
 - In assistant mode the notes you ask it to remember are kept in `~/.vaice/memory.json` (mode **0600**, same atomic write), **indefinitely**, and are not cleared by *New conversation*: say "forget everything", delete the file while `vaice` is stopped, or turn `VAICE_ASSISTANT_MEMORY` off (the default; then the file is neither read nor written). Every reply's prompt carries the notes, so a hosted helper model receives them (startup warns).
 - Set `VAICE_DATA_DIR=""` to keep the conversation and the notes **in memory only**: nothing is read from or written to disk, and history disappears when the app stops. Persistence can also be limited with `VAICE_HISTORY_TURNS` (the prompt window), which trims context but keeps the file — set `VAICE_DATA_DIR=""` if the file itself is the concern.
 
@@ -513,6 +547,7 @@ src/vaice/
   conversation.py   Turn / Conversation: history windowing, barge-in trimming, atomic JSON persistence, error notes
   brain.py          Assistant mode: ChatBrain, one chat-completions call with tools (local llama-server or a helper endpoint), BrainError
   skills.py         Assistant mode: the skills (read-only answers, plus open/quit app, volume, mute) and the Skills registry
+  vision.py         Assistant mode, opt-in: the look_at_screen skill (one screenshot via screencapture + sips, asked of a vision model)
   memory.py         Assistant mode: long-term notes (Memory, kept in memory.json) and the remember / forget / forget_everything skills
   confirm.py        Assistant mode: the one pending request of a confirm skill, the spoken yes/no test and its 60 s expiry
   shell.py          Assistant mode, opt-in: the run_shell skill: how a command may be approved, and the runner (timeout, output cap, process group)
@@ -530,6 +565,7 @@ evals/
   scoring.py        Pure scoring and aggregation for the eval (unit-tested)
   cases.json        Spoken commands and expected tool calls; tools.json holds the stub tool set
   assistant_cases.json  Spoken questions and expected skills (memory ones carry `notes`) for the assistant path (`--paths assistant`)
+  assistant_vision_cases.json  The same for `look_at_screen` (run with `--vision`; the screen is a stub)
   recordings/       Optional real-mic clips, <case id>.wav
 ```
 

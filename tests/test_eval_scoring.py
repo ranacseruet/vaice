@@ -455,6 +455,35 @@ def test_the_shell_cases_are_consistent_with_the_skills_when_run_shell_is_on():
     assert "run_shell" not in default_skills().names
 
 
+def test_the_vision_cases_are_consistent_with_the_skills_when_look_at_screen_is_on():
+    from run import vision_stub
+
+    from vaice.skills import default_skills
+    from vaice.vision import vision_skill
+
+    cases = load("assistant_vision_cases.json")
+    skills = default_skills(vision=vision_skill(object(), "h"))
+    ids = [c["id"] for c in cases]
+    assert len(ids) == len(set(ids))
+    assert len(cases) >= 10
+    for c in cases:
+        assert c["say"].strip()
+        expected = c["expect"]["tools"]
+        assert isinstance(expected, list), c["id"]
+        assert set(expected) <= set(skills.names), c["id"]
+        assert set(c["expect"].get("args", {})) <= set(expected), c["id"]
+        assert not c["expect"].get("args", {}).get("look_at_screen"), c["id"]  # the question is the model's words
+        scoring.score(c["expect"], [])  # the expectation is well formed
+        for text in c["expect"].get("answer_has", []):  # a fact the stub's answer to the sentence holds
+            assert c["expect"]["tools"] == ["look_at_screen"], c["id"]
+            assert text.casefold() in vision_stub({"question": c["say"]}).casefold(), c["id"]
+
+    assert sum(1 for c in cases if c["expect"]["tools"] == ["look_at_screen"]) >= 5
+    assert sum(1 for c in cases if "look_at_screen" not in c["expect"]["tools"]) >= 5  # tempting ones, no screen
+    # without --vision the skill does not exist: this file is only for runs that pass it
+    assert "look_at_screen" not in default_skills().names
+
+
 # --- {"contains": ...}: free text such as a note the model words itself ---
 
 REMEMBER_SISTER = {"tools": ["remember"], "args": {"remember": {"note": {"contains": "nadia"}}}}

@@ -1,0 +1,25 @@
+[
+  {"id": "vision-whats-on", "say": "What's on my screen?",
+   "expect": {"tools": ["look_at_screen"], "answer_has": ["Numbers"]}},
+  {"id": "vision-error", "say": "Read the error message on my screen.",
+   "expect": {"tools": ["look_at_screen"], "answer_has": ["disk is almost full"]}},
+  {"id": "vision-which-app", "say": "What app am I looking at right now?",
+   "expect": {"tools": ["look_at_screen"], "answer_has": ["Numbers"]}},
+  {"id": "vision-dialog", "say": "What does this dialog say?",
+   "expect": {"tools": ["look_at_screen"], "answer_has": ["disk is almost full"]}},
+  {"id": "vision-open-windows", "say": "Can you see what's open on my screen?",
+   "expect": {"tools": ["look_at_screen"]}},
+
+  {"id": "novision-battery", "say": "How much battery is left?",
+   "expect": {"tools": ["battery_status"]}},
+  {"id": "novision-disk", "say": "How much free disk space do I have?",
+   "expect": {"tools": ["disk_space"]}},
+  {"id": "novision-screen-saver", "say": "What is a screen saver?",
+   "expect": {"tools": []}},
+  {"id": "novision-sky", "say": "Why is the sky blue?",
+   "expect": {"tools": []}},
+  {"id": "novision-take-me-to-safari", "say": "Take me to Safari.",
+   "expect": {"tools": ["open_app"], "args": {"open_app": {"name": "Safari"}}}},
+  {"id": "novision-open-safari", "say": "Open Safari.",
+   "expect": {"tools": ["open_app"], "args": {"open_app": {"name": "Safari"}}}}
+]

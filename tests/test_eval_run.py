@@ -85,6 +85,72 @@ def test_a_shell_request_is_counted_as_the_call_though_nothing_runs(monkeypatch)
     assert eval_run.scoring.score({"tools": ["run_shell"]}, [tuple(c) for c in record["calls"]])["verdict"] == "correct"
 
 
+def test_the_vision_skill_is_offered_only_with_the_flag_and_its_stub_never_captures_or_sends(monkeypatch):
+    def boom(*_args, **_kwargs):
+        raise AssertionError("the stub took a screenshot or reached a network")
+
+    monkeypatch.setattr("subprocess.run", boom)
+    monkeypatch.setattr("subprocess.Popen", boom)
+    monkeypatch.setattr("requests.post", boom)
+    monkeypatch.setattr("vaice.vision.capture", boom)
+
+    assert "look_at_screen" not in eval_run.stub_skills().names
+    assert eval_run.stub_skills(vision=False).definitions() == default_skills().definitions()
+    stubs = eval_run.stub_skills(vision=True)
+    assert "look_at_screen" in stubs.names and [d for d in stubs.definitions()
+                                                if d["function"]["name"] == "look_at_screen"]
+    assert stubs.names.index("look_at_screen") == 5  # as in the app: right after the read-only checks
+
+    dialog = stubs.run("look_at_screen", '{"question": "What does this dialog say?"}').speech
+    assert dialog == ('the screen shows: a dialog that says "Your disk is almost full" over a Numbers window titled '
+                      'Quarterly report')
+    assert stubs.run("look_at_screen", '{"question": "What app is open?"}').speech == (
+        "the screen shows: a Numbers window titled Quarterly report")
+    assert stubs.run("look_at_screen", "{}").speech.startswith("the look at screen skill failed")  # real validation
+
+
+def test_the_vision_flag_is_off_by_default():
+    assert eval_run.parse_args(["--paths", "assistant"]).vision is False
+    assert eval_run.parse_args(["--paths", "assistant", "--vision"]).vision is True
+
+
+def test_a_screen_question_is_counted_as_the_call_and_the_stub_answer_reaches_the_brain(monkeypatch):
+    monkeypatch.setattr(eval_run, "_transcribe", lambda url, timeout, audio: "What's on my screen?")
+    brain = FakeBrain(ask("look_at_screen", '{"question": "What is on the screen?"}'), say("A Numbers window."))
+
+    record = eval_run.run_assistant("http://x", "prompt", eval_run.stub_skills(vision=True), object(), [],
+                                    brain=brain)
+
+    assert record["calls"] == [["look_at_screen", '{"question": "What is on the screen?"}']]
+    assert record["answer"] == "A Numbers window."
+    assert eval_run.scoring.score({"tools": ["look_at_screen"]}, [tuple(c) for c in record["calls"]])[
+        "verdict"] == "correct"
+
+
+def test_the_vision_cases_run_with_the_flag_and_record_it_in_the_results(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(eval_run.config, "BRAIN_URL", "")
+    monkeypatch.setattr(eval_run, "server_info", lambda url: {"url": url})
+    monkeypatch.setattr(eval_run, "audio_for", lambda case, scratch: (16000, None))
+    offered = []
+
+    def run(url, prompt, skills, audio, history, brain=None, notes=()):
+        offered.append("look_at_screen" in skills.names)
+        return {"error": None, "calls": [["look_at_screen", '{"question": "q"}']], "transcript": "x",
+                "answer": "A Numbers window.", "pending": False, "latency_s": 0.1}
+
+    monkeypatch.setattr(eval_run, "run_assistant", run)
+
+    eval_run.main(["--paths", "assistant", "--vision", "--cases-file", "assistant_vision_cases.json", "--repeats", "1",
+                   "--cases", "vision-whats-on,novision-sky", "--out", str(tmp_path / "out.json")])
+
+    assert offered == [True, True]
+    document = json.loads((tmp_path / "out.json").read_text())
+    assert document["config"]["vision"] is True and document["config"]["shell"] is False
+    rows = {r["case"]: r["score"]["verdict"] for r in document["runs"]}
+    assert rows == {"vision-whats-on": "correct", "novision-sky": "overcall"}  # a call where none may be made
+    assert "Numbers" in document["runs"][0]["answer"]
+
+
 def test_the_action_stubs_answer_from_their_own_arguments():
     stubs = eval_run.stub_skills()
 
