@@ -185,7 +185,7 @@ def _brain_url(name: str) -> str:
 # Assistant mode only: an optional helper for the brain step, any OpenAI-compatible chat-completions endpoint
 # (a local server such as LM Studio or Ollama, or a hosted one); vaice does not tell them apart. Unset = the
 # local llama-server answers. Only the brain moves: speech recognition and speech output stay on llama-server.
-# Everything the brain sees is sent to that endpoint (see README, Privacy). The key is a secret: never logged.
+# Everything the brain sees is sent to that endpoint (see docs/privacy.md). The key is a secret: never logged.
 BRAIN_URL = _brain_url("VAICE_BRAIN_URL")
 BRAIN_MODEL = _env("VAICE_BRAIN_MODEL", default="").strip()
 BRAIN_API_KEY = _env("VAICE_BRAIN_API_KEY", default="").strip()
@@ -196,7 +196,7 @@ if BRAIN_TIMEOUT <= 0:
 # Assistant mode only: the `look_at_screen` skill (vision.py) takes a screenshot when the user asks about their
 # screen and asks this vision model about it: any OpenAI-compatible endpoint that accepts images (LFM3-Omni-2B on
 # a llama-server of its own, a hosted model). Unset = no skill, no screenshot is ever taken. The screenshot is
-# sent to that endpoint, so a host off this machine receives an image of the screen (see README, Privacy). The key
+# sent to that endpoint, so a host off this machine receives an image of the screen (see docs/privacy.md). The key
 # is a secret: never logged.
 VISION_URL = _brain_url("VAICE_VISION_URL")
 VISION_MODEL = _env("VAICE_VISION_MODEL", default="").strip()

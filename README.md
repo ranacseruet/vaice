@@ -4,630 +4,80 @@
 [![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-Talk to a local model and hear it answer; the spoken reply streams back as it is generated.
-The conversation carries over between questions and is kept as text history.
+**Talk to your computer and get things done.** `vaice` is a voice assistant that runs in your browser on local
+models: you speak, it answers out loud as it thinks, and it can check on your Mac, open apps, change the volume and
+more, asking before it does anything it cannot undo. The goal is a real-life Jarvis; see the [vision](docs/vision.md).
 
-`vaice` uses a speech-to-speech model ([LFM3-Audio-2B](https://huggingface.co/LiquidAI/LFM3-Audio-2B-GGUF) or
-another compatible model) running on a llama.cpp `llama-server`. The server hears your audio and streams its spoken
-reply over the `/v1/realtime` WebSocket. Choose and run the model separately; `vaice` does not bundle a model.
+> **Status:** a single-user demo in active development, tested on macOS with a 2B speech model. It is useful today
+> for questions and a handful of actions, and it is not yet an assistant you would trust with your whole computer.
+
+## What it does
+
+- **Natural conversation.** Streaming spoken replies, barge-in (talk over it and it stops), and a conversation that
+  carries over between questions and survives a restart.
+- **Gets things done** (assistant mode): disk space, battery, running processes, finding files, opening and quitting
+  apps, volume. Anything that cannot be undone asks first, by voice or with a button.
+- **Opt-in power:** approved shell commands, long-term memory of facts you ask it to keep, looking at your screen,
+  a stronger helper model for the thinking, and tools from any [MCP](https://modelcontextprotocol.io) server.
+- **Local first.** Audio, transcripts and tool results stay on your machine unless you point an optional feature at
+  a remote endpoint, and startup warns when you do. See [Privacy](docs/privacy.md).
+- **Measured, not assumed.** A live eval harness scores how reliably spoken requests become the right action, and
+  prompt and skill changes are checked against it.
+
+## How it works
 
 ```
-browser mic ─WebRTC─▶ fastrtc (VAD: detects you stopped talking)
-                         │  audio
-                         ▼
-                  LlamaCppResponder  llama-server :8001 /v1/realtime (WebSocket): speech streams back;
-                   │                  a second session transcribes your audio in parallel
-                   │ records the transcript and spoken text on `turn`
-                   ▼
-                  Conversation (~/.vaice/conversation.json) ──▶ transcript in the UI
+browser mic ─WebRTC─▶ fastrtc (VAD) ─▶ ears ─text─▶ brain ◀──▶ skills (run in vaice, gated by confirmation)
+                                                      │ text
+                                                      ▼
+                                          voice writer ─▶ streamed speech ─▶ speaker
 ```
 
-That is the default (chat) mode. With `VAICE_MODE=assistant`, the same front end drives an
-`AssistantResponder` instead: transcribe, a chat-completions brain that may call skills, then
-speech from `/tts` sentence by sentence (see [Assistant mode](#assistant-mode)).
+Two modes share the same front end. **Chat** (the default) lets one speech-to-speech model hear you and answer
+directly; **assistant** (`VAICE_MODE=assistant`) transcribes, lets a brain call skills that vaice itself runs, and
+speaks the answer sentence by sentence. Details: [architecture](docs/architecture.md).
 
-```
-fastrtc ─audio─▶ AssistantResponder ─▶ /v1/realtime transcription ─▶ ChatBrain /v1/chat/completions
-                       ▲                                               │ asks for a skill?
-                       │ PCM16 per sentence                            ▼
-                  llama-server /tts ◀── voice.sentences(speakable(answer)) ◀── skills (run in vaice)
-```
+## Quickstart
 
-## Quickstart (From Scratch in 3 Steps)
-
-### 1. Install `llama-server`
-
-`vaice` requires [llama.cpp](https://github.com/ggml-org/llama.cpp) `llama-server` **b11960 or newer** (v0.8.0+) for the `/v1/realtime` WebSocket. Install it via Homebrew (macOS/Linux):
+You need macOS, [uv](https://docs.astral.sh/uv/), Chrome and headphones (speaker audio feeds back into the
+microphone). `vaice` does not bundle a model; it runs [llama.cpp](https://github.com/ggml-org/llama.cpp)
+`llama-server` **b11960 or newer** with a speech model, and `vaice up` starts it for you.
 
 ```bash
 brew install llama.cpp
-```
-
-*(If you prefer to build `llama-server` from source or download a pre-built release binary, see the [llama.cpp installation guide](https://github.com/ggml-org/llama.cpp#usage).)*
-
-### 2. Install and run `vaice up`
-
-Clone this repository, install the locked environment with [uv](https://docs.astral.sh/uv/), and run `vaice up`:
-
-```bash
 git clone https://github.com/ranacseruet/vaice.git && cd vaice
 uv sync --extra dev
-.venv/bin/vaice up
+.venv/bin/vaice up        # starts llama-server if needed, then opens http://127.0.0.1:7860
 ```
 
-`vaice up` makes sure a `llama-server` is running, then starts the UI and opens it in your browser:
-
-- If something already answers `GET /health` at `VAICE_LLAMACPP_URL` (the default is `http://localhost:8001`), it is used as it is and never stopped.
-- Otherwise it starts `llama-server -hf LiquidAI/LFM3-Audio-2B-GGUF:Q4_K_M --temp 0 --host localhost --port 8001` (host and port come from `VAICE_LLAMACPP_URL`, which must be a local address for this; the model from `VAICE_LLAMACPP_MODEL`; add flags such as `--tools get_info,read_file` with `VAICE_LLAMACPP_SERVER_ARGS`) and waits for it to load. The first run downloads about 1 GB of model weights, so the wait can be long (`VAICE_LLAMACPP_START_TIMEOUT`, default 900 s); a progress line appears every 10 s.
-- It checks that `llama-server` is installed and is build 11960 or newer, and tells you how to install or upgrade it. It never installs anything itself.
-- The server's output goes to `~/.vaice/llama-server.log` (`$VAICE_DATA_DIR/llama-server.log`; a temporary directory when `VAICE_DATA_DIR` is empty). Open it if the start fails or takes long.
-- When `vaice` stops (Ctrl+C or any error), the `llama-server` it started is stopped too: terminated, then killed if it does not exit within 5 s.
-
-Plain `vaice` (no `up`) never starts or stops a server, never opens the browser, and works as before.
-
-### 3. Talk in the browser
-
-When you see `Running on local URL: http://127.0.0.1:7860`:
-
-1. Open `http://127.0.0.1:7860` in Chrome (`vaice up` opens it for you).
-2. Put on **headphones** (otherwise speaker audio feeds back into the microphone).
-3. Allow microphone access, click **Record**, ask a question, and pause when done.
-
-For each reply, the terminal logs `[llamacpp] time to first audio: N.NNs` and `[llamacpp] reply finished in N.NNs`.
-
-### Manual alternative: run `llama-server` yourself
-
-To control the server directly, run it in one terminal and plain `vaice` in a second one:
+The first run downloads about 1 GB of model weights. In the browser, allow the microphone, click **Record**, ask a
+question and pause. To use the assistant instead of plain chat:
 
 ```bash
-llama-server -hf LiquidAI/LFM3-Audio-2B-GGUF:Q4_K_M --temp 0 --port 8001
+VAICE_MODE=assistant .venv/bin/vaice up
 ```
 
-```bash
-.venv/bin/vaice
-```
+Then try "How much battery do I have left?" or "Open Safari". More options (running `llama-server` yourself,
+requirements, every setting): [Installation](docs/installation.md) and [Configuration](docs/configuration.md).
 
-> **Sampling:** the LFM3-Audio model card recommends **greedy decoding (temperature 0) for text output** — hence `--temp 0` above (and in the command `vaice up` builds). The `/v1/realtime` API has no temperature field, so reply text is sampled with the server's own setting; at the default 0.8 a 2B audio model drifts off-topic and loses the conversation thread (`vaice` warns about this at startup — and logs a distinct hint when it cannot verify the temperature at all, e.g. a router-style `/props`). Speech sampling is separate and comes from the GGUF (audio temperature 1.0, top_k 128, repetition penalty 1.1), so no audio flags are needed.
-> **Language & voice:** voice chat is English-only for now; ASR and TTS cover 18 languages. Leave `--tts-lang`/`--tts-voice` out of the `llama-server` command: for an English-only voice model the pin buys nothing, and for LFM3 templates llama.cpp turns those flags (and per-session `audio.output.language`/`audio.output.voice`) into a `Speak in English using a female voice.` line prepended to the system prompt. An early single-session repro blamed that line for making the model parrot your words back, but a controlled re-test on the same build (b12359, `Q8_0 --temp 0`, clean TTS and noisy mic inputs) did **not** reproduce the parroting — with or without the flags; on noisy input the injected line degraded one reply into a rambling run-on. Treat the flags as unnecessary for voice chat, not as a proven echo cause. Leave the *transcription* language alone too — the default auto-detect is measurably better than pinning it.
-> **Context:** the model supports 32K tokens. If you pass `-c/--ctx-size` explicitly, use at least 8192 — a realtime conversation that overflows its slot fails with "the conversation does not fit in the context".
-> **How `-hf` works:** `-hf` (`--hf-repo`) is a built-in `llama-server` flag — you do **not** need the `huggingface-cli` / `hf` command-line tool installed. On first run, `llama-server` downloads the GGUF model weights and audio projector directly from Hugging Face into its local cache (`~/Library/Caches/llama.cpp` on macOS or `~/.cache/llama.cpp` on Linux) and starts listening on `http://localhost:8001`.
+## Documentation
 
----
+Start at the [documentation index](docs/README.md). The main pages:
 
-## Requirements & Compatibility
-
-- **Python 3.12** (tested in CI on macOS; `uv sync` downloads it when it is missing; dependencies also resolve on 3.13 and 3.14, but runtime behavior is not validated there).
-- **[uv](https://docs.astral.sh/uv/)** for reproducible dependency management (`uv sync` installs the exact versions from `uv.lock`).
-- **llama.cpp `llama-server` b11960+** running a model with audio output.
-  - **Only llama.cpp `llama-server` is supported and tested.** `vaice` speaks its `/v1/realtime` WebSocket protocol and checks `/health` and `/v1/models` at startup to verify that the loaded model advertises audio output (`output_modalities` includes `"audio"`). It also reads `/props` and warns when the server's text sampling temperature is above 0 (the LFM3-Audio model card recommends `--temp 0`); when `/props` reports no params or the read fails, `vaice` logs a distinct hint instead of staying silent, so a missing warning is never mistaken for `--temp 0` being set. Other servers (Ollama, LM Studio, oMLX, …) will not work.
-  - Point `VAICE_LLAMACPP_URL` at a different host or port if `llama-server` isn't on `:8001`.
-  - Current upstream `llama.cpp` documentation also describes `/v1/realtime` conversation support for LFM3-Omni and the `--reasoning off` server option. `vaice`'s integration has been exercised with LFM3-Audio; Omni behavior is not verified end to end here. On `llama.cpp` builds that provide the option, add `--reasoning off` to the server command if your selected model's chat template supports disabling reasoning. See the [llama.cpp server documentation](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md).
-  - CI runs on macOS; Linux and Windows audio behavior has not been validated.
-
-## Configuration
-
-All settings are optional and configured via environment variables. To keep them in a file, copy `.env.example` to `.env` (gitignored), uncomment what you want to change, and start `vaice` from that directory — it loads `.env` from the working directory at startup:
-
-```bash
-.venv/bin/vaice
-```
-
-Precedence: variables already in the environment (e.g. `set -a; source .env; set +a; .venv/bin/vaice`, or `VAICE_FOO=1 .venv/bin/vaice`) win over the `.env` file, which wins over the built-in defaults.
-
-| Variable | Default | Meaning |
-|---|---|---|
-| `VAICE_PORT` | `7860` | UI port |
-| `VAICE_DATA_DIR` | `~/.vaice` | Directory where `conversation.json` (and, in assistant mode, `memory.json`) is stored (created `0755`; the files themselves are `0600`). Set to empty (`VAICE_DATA_DIR=`) to keep the conversation and the notes in memory only — nothing is persisted |
-| `VAICE_HISTORY_TURNS` | `10` | Past exchanges included in each prompt (`0` = none); older ones are dropped in blocks |
-| `VAICE_VAD_THRESHOLD` | `0.6` | Silero VAD speech probability threshold — what counts as speech, and so what can interrupt a playing reply. Raise (e.g. `0.7`) if room noise or speaker feedback cuts replies short |
-| `VAICE_VAD_MIN_SILENCE_MS` | `150` | Silence that must follow speech before an utterance counts as ended — delays the reply start and barge-ins alike |
-| `VAICE_VAD_SPEECH_PAD_MS` | `30` | Padding added around detected speech |
-| `VAICE_CAN_INTERRUPT` | `1` | Set `0` to disable barge-in: a reply always runs to the end |
-| `VAICE_LLAMACPP_URL` | `http://localhost:8001` | `llama-server` URL; only scheme, host and port are used (`/health`, `/v1/models` and `ws://…/v1/realtime` hang off it) |
-| `VAICE_LLAMACPP_MODEL` | `LiquidAI/LFM3-Audio-2B-GGUF:Q4_K_M` | `vaice up` only: the `-hf` model of the `llama-server` it starts |
-| `VAICE_LLAMACPP_SERVER_ARGS` | *(empty)* | `vaice up` only: extra arguments for the `llama-server` it starts, split like a shell would (e.g. `--tools get_info,read_file`) |
-| `VAICE_LLAMACPP_START_TIMEOUT` | `900` | `vaice up` only: seconds to wait for the started `llama-server` to become ready; the first run downloads about 1 GB |
-| `VAICE_MODE` | `chat` | `chat` = speech-to-speech replies from the model; `assistant` = transcribe, a brain that can call vaice's own skills, then `/tts` (see *Assistant mode* below). Anything else exits at startup |
-| `VAICE_ASSISTANT_PROMPT` | `You are a voice assistant on the user's Mac. …` (answer in one or two short spoken sentences, use a tool only for questions about this computer) | Assistant mode only: the brain's system prompt (the current date and time is added) |
-| `VAICE_ASSISTANT_SHELL` | `false` | Assistant mode only: adds the `run_shell` skill, which proposes a shell command that runs only after you approve it (see *Shell commands* below). Off: the skill does not exist. A boolean: `1/true/yes/on` or `0/false/no/off` |
-| `VAICE_ASSISTANT_MEMORY` | `false` | Assistant mode only: long-term memory, the `remember`, `forget` and `forget_everything` skills and the notes block in the prompt (see *Memory* below). Notes live in `<VAICE_DATA_DIR>/memory.json` (`0600`), or in memory only when `VAICE_DATA_DIR` is empty. Off: the skills do not exist, the notes are neither read nor used, and the file is left alone. A boolean, like `VAICE_ASSISTANT_SHELL` |
-| `VAICE_ASSISTANT_PROGRESS_SECONDS` | `2.5` | Assistant mode only: seconds without an answer before the assistant says "One moment." (then "Still working." every 12 s) until the answer starts; `0` turns spoken progress off. On speakers the microphone may hear it as an interruption (see *Assistant mode* below) |
-| `VAICE_VOICE` | `female` | Assistant mode only: the `/tts` voice, `female` or `male` |
-| `VAICE_BRAIN_URL` | *(empty: the local `llama-server` is the brain)* | Assistant mode only: an optional helper model, any OpenAI-compatible endpoint, as the **base URL OpenAI clients take, `/v1` included** (e.g. `http://localhost:1234/v1`, `https://api.openai.com/v1`); vaice posts to `<base>/chat/completions`. A URL that already ends in `/chat/completions`, or that holds credentials, a query or a fragment, exits at startup. Ignored in chat mode (one warning). What it receives: see *Helper model* below |
-| `VAICE_BRAIN_MODEL` | *(empty)* | The `model` sent to the helper. Most hosted endpoints require it: with a helper URL and no model, vaice warns at startup and goes on |
-| `VAICE_BRAIN_API_KEY` | *(empty)* | Sent to the helper as `Authorization: Bearer …`. A secret: never logged, never in an error message or the eval's results. Put it in `.env` or the environment, not on a command line |
-| `VAICE_BRAIN_TIMEOUT` | `60` | Seconds the helper may take for one request (the local brain keeps `VAICE_LLAMACPP_TIMEOUT`) |
-| `VAICE_VISION_URL` | *(empty: no screen skill)* | Assistant mode only: turns on the `look_at_screen` skill (see *Vision* below). A vision model, any OpenAI-compatible endpoint that accepts images, as the **base URL with `/v1`** (e.g. `http://127.0.0.1:8002/v1`); same rules as `VAICE_BRAIN_URL` (a `/chat/completions` suffix, credentials, a query or a fragment exit at startup). Ignored in chat mode (one warning). **A screenshot of your main display is sent to this endpoint** whenever you ask about your screen |
-| `VAICE_VISION_MODEL` | *(empty)* | The `model` sent to the vision endpoint. Hosted endpoints need it (startup warns when it is empty); a `llama-server` serving one model does not |
-| `VAICE_VISION_API_KEY` | *(empty)* | Sent to the vision endpoint as `Authorization: Bearer …`. A secret: never logged, never in an error message. Put it in `.env` or the environment, not on a command line |
-| `VAICE_VISION_TIMEOUT` | `30` | Seconds the vision endpoint may take for one request (must be > 0) |
-| `VAICE_MCP_CONFIG` | *(empty: no MCP tools)* | Assistant mode only: path to a JSON file naming MCP servers to start and the tools to offer from them (see *MCP tools* below; `~` is expanded). Needs the optional extra: `uv sync --extra mcp`. Ignored in chat mode (one warning). **Each server is a program vaice starts with your permissions, and what its tools receive and return goes to the brain** |
-| `VAICE_MCP_TIMEOUT` | `30` | Seconds a server may take to start and, separately, to answer one tool call (must be > 0) |
-| `VAICE_LLAMACPP_PROMPT` | `Reply naturally and concisely in 1 to 2 spoken sentences.` | Reply instructions; `vaice` prepends `Respond with interleaved text and audio.` |
-| `VAICE_LLAMACPP_TIMEOUT` | `120` | Seconds to open a connection or the longest silence from `llama-server` before a reply fails. It is also the total bound for a tool call: when it passes — or the reply is stopped — vaice stops waiting for the call and discards the result (the underlying request is not cancelled; the server may still run/finish the tool). The parallel transcription session's silence budget is this setting too, but its connection **handshake** uses a fixed 2 s (transcription is best-effort and degrades to `(inaudible)`), so raising this cannot extend a slow-handshake server |
-| `VAICE_LLAMACPP_MAX_OUTPUT_TOKENS` | `1024` | Reply cap sent as the realtime session's `max_output_tokens`; text tokens and audio frames count together. Raise it for longer spoken replies |
-| `VAICE_LLAMACPP_TOOL_VALUE_CHARS` | `200` | Longest string value kept from a tool result before it is fed back to the model. Too small cuts answer-bearing fields (a build timestamp, the end of a file); too large makes the model dictate the result |
-| `VAICE_LLAMACPP_TOOL_OUTPUT_CHARS` | `800` | Cap on the whole compacted tool result fed back to the model |
-| `VAICE_LLAMACPP_TOOLS` | *(unset)* | Voice access to llama-server's built-in tools (see *Tools* below). Unset = off; `builtin` = every tool the server advertises — the set is chosen on the server with `--tools` |
-
-## How It Works & Conversation History
-
-### Tools
-`vaice` can speak the answers of llama-server's **built-in tools** through the voice path. Enable the
-tools on the server (read-only subset recommended — they run with the server's own permissions, so
-never enable `exec_shell_command` or `write_file` for a voice demo):
-
-```bash
-llama-server -hf LiquidAI/LFM3-Audio-2B-GGUF:Q4_K_M --temp 0 --tools get_info,read_file
-```
-
-then start `vaice` with `VAICE_LLAMACPP_TOOLS=builtin`. vaice takes **every tool the server
-advertises** — the set of tools is the server operator's decision, made once on the
-`llama-server` command line (`--tools get_info,read_file`), and it is also the gate: the server
-refuses to execute anything it did not advertise. If the server advertises a tool marked
-`permissions.write` (`exec_shell_command`, `write_file`, `edit_file` in llama-server's built-ins),
-vaice warns at startup. Tool calls run with an overall bound of `VAICE_LLAMACPP_TIMEOUT` (120 s by
-default); when it passes, or when the reply is stopped (barge-in, **New conversation**, Ctrl+C),
-`vaice` stops waiting for the call and discards its result — it does **not** cancel the HTTP
-request, so the server may still run (and finish) the tool, which is one more reason to keep the
-set read-only. Stopping returns the session to listening instead of stalling the thread for the
-full timeout. The definitions come from `GET /tools`, are declared in each realtime
-`session.update`, and a spoken question like *"What operating system is this?"* makes the model
-emit a function call; `vaice` executes it through the server's `POST /tools` and feeds the result
-back, and the model speaks the answer. A call for a tool the server did not advertise is refused
-by the server and spoken as a failure.
-
-The first response is requested with `tool_choice: "required"`; after a tool result vaice asks
-for the next response with `auto` (the model may answer or chain one more call), and after the
-second tool round it asks for the final answer with `none`. That closes a live failure mode: a
-follow-up that inherited `required` was forced to call again, so it repeated the raw result and
-could loop until the token cap instead of answering. A call that still arrives in the forced
-final round is not executed.
-
-Only the answer the model gives **after** a tool result is recorded in the conversation: whatever
-it says before the call (the working-out-loud preamble) is spoken, but it is not written to
-history or shown in the transcript, so a wrong first pass cannot reinforce itself in the next
-turn's prompt.
-
-LFM3-Audio notes from live testing: **tell the model to use the tools** — with the default prompt
-("Reply naturally and concisely…") the model announces a check and then stops without calling in
-most runs; a prompt like `Use the available tools to answer questions about this system.` made it
-call and speak the real answer in 4 of 4 runs (vs 1 of 6 with the default). Keep the tool subset
-small (one or two; with three or more tools it tends to answer from its head and get it wrong).
-`tool_choice: "required"` is reliable in text-only mode, but it is not enforced with interleaved
-text+audio: with the voice output the model can answer without calling, so in practice the prompt
-and the tool subset decide whether it calls.
-
-The model **reads the fed-back tool result aloud** (a 2B voice model limitation; prompt lines
-forbidding it have no measurable effect), so `vaice` compacts every result before feeding it back:
-JSON becomes short `key: value` pairs, values are truncated at 200 characters and the whole output
-at 800 by default (`VAICE_LLAMACPP_TOOL_VALUE_CHARS`, `VAICE_LLAMACPP_TOOL_OUTPUT_CHARS`). A
-`read_file` payload is plain text, so it is bounded by the 800-character output cap only — a
-210-character file lost its last word when the 200-character per-value cap applied to it. The
-caps have to be large enough to keep the answer: at 40/120 a `get_info` result lost the timestamp
-before the model could speak it, and a "what time" question became "I can't tell the time". Larger
-caps mean more dictation; the defaults keep the answer while holding the result to a couple of
-sentences. The transcript can also show the raw result and stray tags around a tool round; whether
-the audio includes them varies, so keep the caps conservative.
-
-Tool calls and their results are kept **out of the conversation**: the chatbot shows only what was
-said, and each call lands in the collapsed *Tool activity* panel under it (name, arguments, result;
-the last 10 across the conversation, each result capped at 800 characters with a `... (truncated)`
-marker). The transcript that is recorded and shown is also cleaned of the model's scaffolding
-(`<tool_call>…</tool_call>` blocks, `</think` fragments, stray `<|…|>` control tokens). There is
-no weather tool in llama-server — a question it cannot answer with the configured tools is refused
-(or, with `exec_shell_command` enabled, the model improvises a shell command, which is one more
-reason to keep that tool out).
-
-### Assistant mode
-`VAICE_MODE=assistant` (default `chat`) swaps the speech-to-speech reply for separate steps, so the
-assistant can answer questions about your Mac from real data:
-
-1. the realtime `transcription` session turns your audio into text;
-2. a **brain** (`llama-server`'s `POST /v1/chat/completions`, temperature 0, unless you set a
-   [helper model](#helper-model)) reads the transcript, the earlier turns and the current date and time,
-   and either answers or asks for a skill;
-3. **skills** run inside vaice and their result goes back to the brain, which then answers (at most
-   three rounds; the last one must answer);
-4. the answer is cleaned for speech (markdown, links, paths and units become words), split into
-   sentences, and each sentence is spoken through llama-server's `POST /tts` (`pcm16`, streamed;
-   `VAICE_VOICE=female|male`).
-
-**Spoken progress.** A slow decision (a helper model can take several seconds, a command you approved up
-to 30) would be silence. When the answer has not started `VAICE_ASSISTANT_PROGRESS_SECONDS` (default 2.5)
-after your question was transcribed, the assistant says "One moment." and, if it still goes on, "Still
-working." every 12 seconds until the answer starts. A fast answer gets no filler, an unheard question
-(`Sorry, I didn't catch that.`) none, and the filler is never part of the conversation history. Set the
-variable to `0` to turn it off. On speakers the microphone can pick the filler up and treat it as you
-interrupting (the same echo problem as in #36), which cancels the reply in flight: use headphones or
-turn the progress off. This has not been tried on speakers.
-
-The skills run on your machine with vaice's own permissions, not through llama-server (its `--tools` and
-`VAICE_LLAMACPP_TOOLS` are unused in this mode and vaice warns if the latter is set). They never go through
-a shell: each runs a fixed command with its arguments as separate values. The one opt-in exception is
-`run_shell` (`VAICE_ASSISTANT_SHELL`, off by default; see *Shell commands* below).
-
-| Skill | What it does |
+| | |
 |---|---|
-| `disk_space` | answers: free and total disk space |
-| `battery_status` | answers: charge, whether it is plugged in or charging, time left |
-| `system_info` | answers: macOS version, uptime, memory |
-| `top_processes` | answers: the apps using the most memory or CPU (`by`, `count`) |
-| `find_files` | answers: files whose name contains a word, in your home, desktop, documents or downloads folder |
-| `open_app` | opens an app by name (`open -a`); runs at once |
-| `quit_app` | quits a running app by name; **asks first** (see below) |
-| `set_volume` | sets the output volume to a `level` from 0 to 100; runs at once |
-| `volume_up`, `volume_down` | turn the output volume up or down by 10 points; no arguments; run at once |
-| `mute_sound` | mutes or unmutes the sound; runs at once |
+| [Vision](docs/vision.md) | Where this is going, and the principles it is built on |
+| [Architecture](docs/architecture.md) | How the pieces fit, and the code layout |
+| [Installation](docs/installation.md) · [Configuration](docs/configuration.md) | Setup, requirements, every `VAICE_*` setting |
+| [Assistant mode](docs/assistant-mode.md) | Skills, confirmation, shell commands, memory |
+| [Helper model](docs/helper-model.md) · [Screen vision](docs/screen-vision.md) · [MCP tools](docs/mcp-tools.md) | The opt-in extensions |
+| [Privacy](docs/privacy.md) · [Troubleshooting](docs/troubleshooting.md) | What leaves your machine; fixing common problems |
 
-Each action's result names what it did (`opened Safari`, `volume set to 40 percent`, `quit Safari`). Earlier
-calls come back into the prompt without their arguments, so a follow-up such as "now close it" is answered from
-those words.
+## Contributing
 
-There is deliberately no web search skill: with one, the small model searched for questions it could answer
-itself ("why is the sky blue") and the eval fell from 170/175 to 185/245. It is planned to return with the
-helper model.
-
-**Confirmation.** A skill that cannot be undone (today only `quit_app`) does not run when the model asks for
-it. vaice speaks a question it builds itself from the checked arguments (`Shall I quit Safari?`; a
-name that is not running is refused, nothing is asked), and the request waits in vaice, not in the model:
-
-- **By voice:** say `yes`, `yes please`, `yeah`, `yep`, `go ahead`, `do it`, `please do`, `confirm` (a few
-  more are listed in `src/vaice/confirm.py`). Only the whole utterance counts: "yes, and open Notes" is
-  not an approval. `no`, `cancel`, `stop`, `never mind` and similar cancel it ("Okay, I won't."). Anything
-  else drops the request and is treated as a new question. The question contains none of the yes words
-  and cannot be answered before all its audio has been handed out, so hearing itself through the
-  speakers does not approve it (it can drop the request, though: use headphones, see #36).
-- **By click:** while a request waits, a panel above *Tool activity* shows the question, the skill and its
-  arguments exactly as they will run, with **Run** and **Cancel** buttons. Nothing is spoken for a click;
-  the outcome shows in *Tool activity* and in later prompts. A panel left on screen cannot approve a newer
-  request: the buttons pass the id of the request they showed.
-- A request expires 60 seconds after its question was spoken, and *New conversation* drops it.
-- An utterance that could not be understood at all (noise, a cough: "Sorry, I didn't catch that.") leaves
-  the request waiting; the next understood utterance settles it.
-- A bare "yes" can be too short for the pause detection to notice as speech (seen with synthetic speech
-  through the browser: "Yes." started no turn, "Go ahead." did; #95). Prefer "go ahead" or "yes please".
-
-**Shell commands** (`VAICE_ASSISTANT_SHELL=1`, off by default). With the setting on, the assistant has one
-more skill, `run_shell(command)`, for when you ask it to run a command (or nothing else fits a request about
-this Mac). Nothing runs when the model asks; every command goes through the confirmation above, and the
-command is shown in full on the screen:
-
-- **By voice or click**, only for a command vaice can show to be harmless: one program plus arguments, no
-  shell syntax at all (none of `` | & ; < > ( ) $ ` { } * ? [ ] ! # \ `` or a newline), and the program is a bare
-  name from this list, which only lists or reports: `ls`, `df`, `du`, `date`, `uptime`, `whoami`, `pwd`,
-  `sw_vers`, `hostname`, `uname`. `hostname`, `whoami`, `pwd` and `uptime` take no arguments, and `date` takes
-  only options (`+%Y`, `-u`), because a bare argument would set the clock. A leading `~/` in an argument is
-  expanded by vaice (only in a command without quotes). It runs as an argument list, with no shell. vaice speaks
-  `Shall I run the command ls? The full command is on the screen.`: only the program's name, never its
-  arguments, and the sentence is built by vaice, not by the model.
-- **By click only**, for every other command (pipes, redirects, `rm`, `cat`, `find`, `git`, a program given
-  by path, ...): it runs through `/bin/zsh -c` after you click **Run**. A spoken yes does not approve it:
-  vaice answers `This one needs the Run button on the screen.` and the request stays pending. vaice says
-  `I would run a command for this request. The command is on the screen; click Run to allow the run.`
-  The panel says it too.
-- **`sudo` is refused** before any question (it needs an administrator password, which vaice cannot give). The
-  check looks for the word anywhere in the command, quoted or not, and is a courtesy rather than a boundary:
-  the boundary is that you read the command and click.
-- A command that is empty or longer than 500 characters is refused. What you see is exactly what runs.
-
-Both kinds run with vaice's own permissions, in your home folder, with no input, standard output and error
-merged, in a process group of their own. They are stopped after **30 seconds**, when you talk over the reply
-(spoken approval), when the app stops, and on *New conversation* (click approval; otherwise only the 30
-seconds end a command you started with the button). Stopping ends the command's whole process group, and a
-background process the command started ends with it, whether or not it kept the output open. At most 20,000 characters of output
-are kept (the rest is read and discarded, so a chatty command cannot hang); the model gets a one-line outcome
-(`the command finished`, `the command failed with status 2`, `the command was stopped after 30 seconds`) and
-the first 600 characters of the output, with the whole output on screen in *Tool activity*. The output is
-data for the model to answer from, nothing else: it goes into a tool message only. Note that it does go to the
-model, and so into the conversation file: a command that prints a file (`cat`) hands its content to the
-model, which is why such commands need the button.
-
-The local 2B model writes poor commands (a first live check misheard `whoami` as `HUMI`, and asked for a
-command to answer "What does the ls command do?"), so this skill becomes useful mainly with a
-[helper model](#helper-model). Either way, read every command before you approve it, and keep the setting off if you do not
-need it. Starting vaice with it on logs a warning. `python evals/run.py --paths assistant --shell
---cases-file assistant_shell_cases.json` measures how often spoken requests reach it (see `evals/README.md`).
-
-The first time `quit_app` runs, macOS may ask whether your terminal (or the app that started vaice) may
-control the app it is quitting (Automation permission); allow it in System Settings, Privacy & Security,
-Automation. Until then `quit_app` fails with a spoken error. `open_app` and the volume and mute skills need no permission.
-
-Earlier skill results stay in the conversation's prompt (each capped at 300 characters), so a follow-up such as "and how much memory does it have?" is answered from the real result. Process names are spoken in a cleaned form (`Google Chrome Helper (Renderer)` counts as `Google Chrome`). Long paths are left out of the spoken answer (only a file's name is spoken); the full detail of every
-skill call lands in the collapsed *Tool activity* panel. Limits: the skills use macOS commands, so
-assistant mode is macOS only; a request can use one or two skills (the brain is told to use a tool
-only for questions about this computer, and answers everything else itself); and because each
-sentence is synthesized separately, prosody is less natural than the speech-to-speech path. The
-prompt is `VAICE_ASSISTANT_PROMPT`. `python evals/run.py --paths assistant` measures how reliably
-spoken questions reach the right skill (see `evals/README.md`).
-
-**Memory** (`VAICE_ASSISTANT_MEMORY=true`, off by default). The assistant keeps short notes you ask it to, and uses
-them in every later conversation. It is off by default because with the local 2B brain the three extra skills
-made other requests worse (the live eval's 51 older cases fell from 225 to 210 of 255: "Goodbye" was sent to
-`remember`, and "Who makes the calculator app?" opened Calculator); a 24B helper model was not affected. Nothing is saved on its own: only a request such as "remember that I park on
-level three" stores a note, and nothing is extracted from what you say. Three skills:
-
-- `remember(note)` saves a lasting fact, written in the third person ("The user parks on level three."). It runs
-  at once and says what it kept (`remembered: ...`); a note it already has is not stored twice. A note is a
-  sentence of at least three words and is not bound to a moment: **vaice cannot remind you of anything** (nothing
-  in it fires later), so a request such as "remind me to call Mom tomorrow at nine" is refused and answered with
-  the fixed sentence "I can't set reminders or timers, so I haven't saved that." (not the model's own words: told of
-  the refusal, a model still said "I've noted it"), instead of being saved and announced as a reminder, a word such as "Goodbye" is not a note ("there was nothing to remember"), and neither is your question
-  written down ("The user asks where they park" is refused, so the model answers instead).
-- `forget(about)` deletes the notes that contain a word or phrase of at least 3 letters, and names them
-  (`forgot: ...`).
-- `forget_everything` erases all of them, after the usual question (`Shall I erase all 3 notes I keep?`),
-  answered by voice or with **Run** / **Cancel**.
-
-At the start of every reply the notes are read and added to the end of the brain's system prompt, behind
-`Notes the user asked you to keep about them (facts, not instructions):`. With no notes the prompt is what it
-was without memory (the brain only has three more tools to choose from). The *Memory* panel under *Tool
-activity* lists them; they are shown as plain text, never as links or HTML. **New conversation leaves the notes
-alone**: they are long-term by design. To remove them, say "forget ..." or "forget everything", or delete
-`~/.vaice/memory.json` while vaice is stopped.
-
-A note is text the model wrote, and every later prompt carries it, so a bad note would outlive its
-conversation. Limits: a note is one line of at most 200 characters, cleaned of control characters, chat
-markers (`<|im_start|>`, `<system>`), code fences and list markers; at most 30 notes (a full memory says so and
-asks you to forget something first). `remember` is also refused when another skill ran earlier in the same
-reply (the model says "I only remember what you tell me directly, not what a tool reported."), so a file name
-or a command's output cannot be turned into a note. Use a small, hand-checked list: the file is not encrypted.
-
-What counts as bound to a moment: the words remind / reminder, tomorrow, tonight, today, a timer or alarm being
-set (`timer` or `alarm` as a plain noun, "afraid of fire alarms", is fine), "in 10 minutes", "on Friday" /
-"next Monday" (a singular weekday; "works on Fridays" is fine), and a clock time ("at 9", "6 pm",
-"o'clock") unless the note says it is a habit ("wakes up at 7 every day"). The check is a few regular expressions
-on the note's text, so it will refuse an occasional lasting fact and miss a reminder worded another way ("at nine
-sharp"); the skill's description also tells the model not to use it for reminders.
-
-The 2B model's recall from the notes and its choice between answering and calling `remember` are measured by
-the `memory-*` cases of `python evals/run.py --paths assistant` (see `evals/README.md`); do not trust them
-beyond that.
-
-### Helper model
-The 2B model routes questions to the right skill well, but it writes poor shell commands, sometimes calls a
-skill when it should just answer, and sometimes answers past the result. A **helper model** takes over only
-the brain (step 2 above): any OpenAI-compatible chat-completions endpoint, whether a server on this machine
-(LM Studio, Ollama, another `llama-server`) or a hosted API. vaice does not tell them apart; it posts to
-`<VAICE_BRAIN_URL>/chat/completions` and reads normal `tool_calls`. Speech recognition and speech output stay on
-the local `llama-server`.
-
-```bash
-# A server on this machine (LM Studio; Ollama is http://localhost:11434/v1), no key needed
-VAICE_MODE=assistant VAICE_BRAIN_URL=http://localhost:1234/v1 VAICE_BRAIN_MODEL=<model id> .venv/bin/vaice
-
-# A hosted endpoint: keep the key in .env or the environment (VAICE_BRAIN_API_KEY=your-key-here)
-VAICE_MODE=assistant VAICE_BRAIN_URL=https://openrouter.ai/api/v1 VAICE_BRAIN_MODEL=<model id> .venv/bin/vaice
-```
-
-- **What is sent to the endpoint**, on every brain call: the transcript of what you say, the earlier turns of
-  the conversation (your words, the spoken replies, and earlier skill results), the system prompt, the
-  current date and time, the skills' definitions, and the results of the skills it asks for: file names,
-  process names, the computer's name (`system_info`), and, with `VAICE_ASSISTANT_SHELL` on, the output of any
-  command you approved. **Audio is never sent.** Startup logs the endpoint's host and model, and a warning
-  when the host is not `localhost`, `127.0.0.1` or `::1`.
-- **The request holds only `messages`, `tools` and `model`.** vaice sends no `temperature` and no token cap to
-  a helper: hosted models differ in which they accept, and a cap would cut a reasoning model's answer short.
-  Its replies may carry a separate `reasoning_content`; that is never spoken and never sent back.
-- **Latency is seconds per decision**: a question that needs a skill is two brain calls. A 24B model on this
-  machine took 1.2 to 5.6 s per call in a live check.
-- **Failures are spoken** (and shown in the chatbot as `(error: …)`): a refused key, a busy endpoint (HTTP
-  429), an unreachable or too slow one each get a short fixed sentence. After you approved an action, a brain
-  failure does not hide that it ran: vaice speaks the skill's own result. Nothing checks the endpoint at
-  startup; an unreachable helper is found out at the first question.
-- Results of the live eval vary from run to run without temperature 0, so measure a helper with repeats
-  (`--brain-url`, `--brain-model`; see `evals/README.md`).
-
-### Vision
-`VAICE_VISION_URL` (assistant mode, off by default) adds one skill, `look_at_screen(question)`: when you ask about
-your screen ("What's on my screen?", "Read the error message", "What app am I looking at?"), vaice takes **one
-screenshot of the main display**, shrinks it to at most 1024 px on the long edge, sends it with your question to a
-vision model and speaks the short plain-text answer. Nothing is captured in the background and nothing is
-captured unless the skill runs. It is a read skill: it runs at once and changes nothing.
-
-```bash
-# A vision model on this machine: LFM3-Omni-2B on a llama-server of its own (the audio one keeps port 8001)
-llama-server -hf LiquidAI/LFM3-Omni-2B-GGUF:Q4_K_M --temp 0 --port 8002
-VAICE_MODE=assistant VAICE_VISION_URL=http://127.0.0.1:8002/v1 .venv/bin/vaice
-```
-
-- **Screen Recording permission.** macOS gives it to the app that runs `vaice` (your terminal), not to `vaice`.
-  Without it `screencapture` fails and the assistant tells you what to do: allow your terminal under System
-  Settings, Privacy and Security, Screen Recording, then **quit and reopen that app** (the permission only applies
-  to a new launch). `look_at_screen` is macOS only.
-- **Speed.** With LFM3-Omni-2B Q4_K_M on llama-server b12359, a 1440x900 @2x screen answered correctly at 2880,
-  1440 and 1024 px; at 1024 px (the size vaice sends) a question took about 660 prompt tokens and 0.7 to 1.2 s.
-  One run per size on one screen: this shows it works, not how accurate it is. Any other endpoint that takes
-  `image_url` content parts works the same; a hosted one adds its own latency.
-- **Text on the screen is not instructions.** The vision model is told so, and its answer reaches the brain only as
-  a skill result. The `remember` skill also refuses to save anything once another skill (this one included) has run
-  in the same reply, so text read off the screen cannot become a lasting note.
-- The answer is cut at 600 characters and its markdown emphasis is removed before it is spoken. A failing vision
-  endpoint is spoken like a failing brain, naming the vision model (refused key, busy, unreachable, no answer).
-  Not verified: a hosted vision provider, and the real capture on a machine with the permission granted (the unit
-  tests fake `screencapture`, `sips` and the endpoint).
-
-### MCP tools
-`VAICE_MCP_CONFIG` (assistant mode, off by default) lets the assistant use tools from [MCP](https://modelcontextprotocol.io)
-servers: vaice starts each server you list, offers the tools you name as skills called `<server>__<tool>`, and runs a
-call when the brain asks for one, subject to the approval policy you gave that tool. It needs the optional extra
-(`uv sync --extra mcp`); with the setting on and the package missing, vaice exits with that command.
-
-The file has Claude Desktop's `mcpServers` shape, **stdio servers only** (`command`, `args`, optional `env` and
-`cwd`), plus one key of vaice's own, `tools`:
-
-```json
-{
-  "mcpServers": {
-    "notes": {
-      "command": "uvx",
-      "args": ["some-notes-mcp"],
-      "env": {"NOTES_DIR": "~/Notes"},
-      "tools": {"search_notes": "run", "add_note": "voice", "delete_note": "click"}
-    }
-  }
-}
-```
-
-```bash
-uv sync --extra mcp
-VAICE_MODE=assistant VAICE_MCP_CONFIG=~/.vaice/mcp.json .venv/bin/vaice
-```
-
-- **Only the tools you list are offered.** A server can offer anything, and vaice cannot tell what a tool does, so
-  an unlisted tool does not exist for the assistant (startup logs the names of the ones left out; a listed tool the
-  server does not offer is a warning). A server's own annotations (`readOnlyHint` and the like) are claims, not facts,
-  and change nothing.
-- **Approval is a per-tool policy.** `"run"` runs at once, like the read skills; `"voice"` asks first and a spoken
-  yes or the **Run** button approves; `"click"` asks first and only the **Run** button approves (a spoken yes is
-  answered with a note and the request stays pending). **`click` is the default**, and a plain list
-  (`"tools": ["search_notes"]`) means all click: a tool you did not think about gets the strictest treatment, and
-  you loosen it tool by tool. A tool that reads and cannot be turned against you is a fair `run`; anything that
-  writes, sends, deletes or spends is not.
-- **The question names the tool and the server, never the arguments** (they come from the model and can be long or
-  misleading); the panel shows the exact call, as for `run_shell`.
-- **What a server sends is untrusted.** A tool's description (which the brain reads) is cleaned to one line, capped
-  at 300 characters and prefixed `(from <server>)`; a result reaches the brain only as a tool result, is spoken up
-  to 2000 characters (`(more on screen)` after that) and kept whole in the *Tool activity* detail; and `remember`
-  refuses once such a skill has run in the reply, so a result cannot become a lasting note. None of this makes a
-  malicious server safe: only list servers you would run anyway.
-- **Startup.** One INFO line per server (`mcp server notes: 3 tools offered (...)`, names only). A server that does
-  not start within `VAICE_MCP_TIMEOUT` is skipped with a warning and the others load; a mistake in the file (bad
-  JSON, a `url` entry, a bad policy, two skills with the same name) exits with `vaice: VAICE_MCP_CONFIG: ...` naming
-  the server and the problem, never an `env` value. A server's stderr goes to `<VAICE_DATA_DIR>/mcp-<name>.log`
-  (mode 0600; a temporary directory when `VAICE_DATA_DIR` is empty). Servers are ended when vaice stops.
-- **Calls** stop on barge-in, *New conversation* (a click-approved one) and app stop, and end after
-  `VAICE_MCP_TIMEOUT`; a failure is spoken, not raised. A server that dies mid-session is not restarted: its tools
-  fail until you restart vaice.
-- Not supported: remote (`url`) servers, resources and prompts (tools only), and reconnecting.
-  Not verified: a real-world server other than the test fixture (`tests/fixtures/mcp_server.py`), and how well the
-  2B brain chooses among many MCP tools (no eval covers them); with the helper model off, keep the list short.
-
-### Startup & Shutdown
-At startup, `vaice` checks `llama-server`:
-- An unreachable or still-loading server (HTTP 503) logs a warning and starts the UI anyway, so the server can finish loading before your first question.
-- A reachable server whose model does not advertise audio output is rejected immediately with an actionable error.
-- A reachable server whose HTTP endpoints answer but which does not route the `/v1/realtime` WebSocket (an older llama.cpp, a proxy in front of it) is rejected at startup too: the check opens the realtime endpoint once and fails with an actionable message, instead of the first question dying after a long stall. A momentary connection failure only warns — the server may just be busy.
-- Replies are capped at `VAICE_LLAMACPP_MAX_OUTPUT_TOKENS` (default 1024 — the model card's own voice-chat example uses 1024; text and audio frames count together, and the LFM3-Audio codec emits 12 tokens per 80 ms of speech); truncation is logged as a warning. Before the cap can even apply, a reply that repeats the same 1–4-line block of text three times back-to-back (compared with case and punctuation ignored) is cut off there: the repeated tail is dropped from the transcript, what was already spoken up to the cut plays, and the session is closed, freeing the server slot. Under `--temp 0` the model sometimes cannot stop after answering and loops until the cap; the breaker cuts that tail early.
-- Every reply's instructions carry the current local date and time (`You know the current date and time: … Use it when asked about the date or time.`), so a "what time is it" question is answered from the machine's clock instead of ending in "I don't have a way" (or in a tool result's build timestamp read as the current time). The line is rebuilt for each reply; there is no `VAICE_*` knob to turn it off.
-- **Ctrl+C** stops the app cleanly: any reply in flight is abandoned (`the app is stopping; the reply is abandoned`) and the process exits within ~1 s when idle or ~5–6 s when a browser is connected mid-reply, even if the server never answers. Finished turns remain on disk.
-
-### Multi-Turn Conversation & Barge-In
-`vaice` persists your conversation to `~/.vaice/conversation.json` (see `VAICE_DATA_DIR`; set it empty to keep everything in memory — see *Privacy* below) after every update, so it survives page reloads and restarts.
-
-- **New conversation:** Clicking **New conversation** (or the chatbot's trash icon) clears the stored history and immediately silences any reply playing or queued. Any utterance you were halfway through saying when clicking it is discarded; what you say after clicking starts a fresh conversation with no prior turns in the prompt.
-- **Live transcript updates:** The chatbot view is checked once a second and re-rendered only when it changes, so a user transcript that finishes *after* the spoken reply ends still replaces the `"…"` placeholder automatically.
-- **What the model sees:** Earlier turns are formatted as native ChatML `<|im_start|>user` / `<|im_start|>assistant` turns inside the session `instructions` (which `llama-server` tokenizes with `parse_special=true`), while the current question is sent as audio.
-  - Because `llama-server`'s `/v1/realtime` endpoint rejects `conversation.item.create` with the `assistant` role, each reply opens a fresh session with the conversation history embedded in `instructions`. Emitting real ChatML turn delimiters instead of a flat `User:` / `Assistant:` transcript inside the system block prevents 2B models from confusing speaker roles or treating prior replies as few-shot instructions to repeat, while keeping `Conversation` (`conversation.py`) the single owner of history windowing, barge-in cuts, and resets.
-  - A second `/v1/realtime` session of type `transcription` runs in parallel on the same audio to produce the user transcript (with language auto-detection). Its connection handshake is given a fixed 2 s — transcription is best-effort and degrades to `(inaudible)` — while the silence budget it waits for the ASR result is `VAICE_LLAMACPP_TIMEOUT` like the reply path.
-  - A turn whose transcript has not arrived yet is left out of the prompt rather than shown as `(inaudible)`, so the model never sees a dangling answer to an unreadable question. An empty completed transcript is recorded as `(inaudible)`.
-  - Small speech-to-speech models use the last few turns well but may forget details from much earlier in a long conversation.
-- **Barge-in (interrupting a reply) & VAD tuning:** If you speak over a reply, playback stops when you finish your interrupting question, and history keeps only the estimated portion of the reply that actually played, marked `(interrupted)`:
-  - `fastrtc` queues audio chunks ahead of real-time playback, and LFM models emit text roughly ~2x ahead of audio. `vaice` splits the generated text by the share of audio handed out, and on barge-in further trims it to the wall-clock duration that could have played since the first audio chunk (keeping at least one word if any audio played).
-  - `InterruptSafeReplyOnPause` (`interruptible.py`) fixes two `fastrtc` 0.0.34 barge-in races (dropping the stale audio chunk that was mid-generation when the interrupt happened, and restoring the interrupting utterance if the previous reply happened to finish at the exact moment of the barge-in), defaults to tuned `SileroVadOptions` (`threshold=0.6`, `min_silence_duration_ms=150`, `speech_pad_ms=30` — all env-tunable via `VAICE_VAD_THRESHOLD`, `VAICE_VAD_MIN_SILENCE_MS`, `VAICE_VAD_SPEECH_PAD_MS`; see the table above) so brief room noises inside 600 ms chunks aren't inflated into speech, and preserves a 0.3 s pre-roll buffer from the preceding chunk so opening words aren't clipped at chunk boundaries. `VAICE_CAN_INTERRUPT=0` disables barge-in entirely.
-- **History trimming:** Prompts include at most `VAICE_HISTORY_TURNS` exchanges. Oldest turns are dropped in blocks of `window // 2` rather than one by one.
-- **Fault tolerance:**
-  - A corrupt `conversation.json` is moved aside to `conversation.json.corrupt` with a warning, and `vaice` starts with an empty conversation.
-  - Unwritable disk state logs a warning and continues the conversation in memory without crashing the session.
-  - A failed reply (`llama-server` down, WebSocket closed, or server error event) is caught inside the reply generator so `fastrtc`'s WebRTC audio task stays alive; the partial reply and `(error: …)` note appear in the UI, and the next question works without reloading the page.
-
-## Privacy
-- `~/.vaice/conversation.json` is written with mode **0600** (owner read/write only) via a temporary file and `os.replace`, so a reader never sees a half-written file; the `~/.vaice` directory itself is created with the usual 0755 permissions, meaning other local users can see that the file exists (not what it holds).
-- The transcript is retained **indefinitely**, until you click **New conversation** (which clears it) or delete the file while `vaice` is stopped. New conversation is the way to forget everything, including any embarrassing questions.
-- By default `vaice` talks to one server: the `llama-server` at `VAICE_LLAMACPP_URL` (local by default, e.g. `http://localhost:8001`) over HTTP and WebSocket. The microphone audio, the transcripts, the tool results and the model's replies go there; nothing else leaves the machine through `vaice`. The exceptions are opt-in: the screenshot of the [vision skill](#vision) (next bullet) and, with a [helper model](#helper-model) (`VAICE_BRAIN_URL`, assistant mode), a second server also receives the text of what you say, the earlier turns, the skills' results (file names, process names, the computer's name, shell command output) and, with memory on, the notes you asked the assistant to keep, but never audio, which stays with `llama-server`; if that endpoint is a hosted API, all of that leaves your machine (startup warns). The model's tools run on that server with *its* permissions; in assistant mode the skills run in vaice with *vaice's* permissions, and with `VAICE_ASSISTANT_SHELL` on that includes any shell command you approve, with the same access to your files as you have, and its output goes to the model and into the conversation file. If you point `VAICE_LLAMACPP_URL` at a remote host, your audio and conversation go there instead.
-- With the [vision skill](#vision) on (`VAICE_VISION_URL`, assistant mode), a screenshot of your **main display** is taken **only when the skill runs** (you asked about your screen), sent to the vision endpoint with your question, and deleted from this Mac right after (a private temporary file, never stored by vaice, never logged). The screen can show anything: mail, messages, passwords in a visible window. If the endpoint is on another machine or a hosted API, that image leaves your machine (startup warns). The vision model's answer is stored in the conversation file like any skill result (up to 800 characters in the *Tool activity* record), and a remote helper brain receives it as a skill result too.
-- With [MCP tools](#mcp-tools) on (`VAICE_MCP_CONFIG`, assistant mode), vaice starts the servers you list as programs with **your** permissions and the `env` you give them, and the arguments the brain chooses (from what you said) go to them. A tool's result reaches the brain, is stored in the conversation file like any skill result (up to 800 characters in the *Tool activity* record), and goes to a hosted helper brain too. What a server does with your data is up to that server (an `npx` or `uvx` package fetches and runs code), so list only servers you trust. The `env` values in the file are never logged; the file itself is plain text, so keep it private.
-- In assistant mode the notes you ask it to remember are kept in `~/.vaice/memory.json` (mode **0600**, same atomic write), **indefinitely**, and are not cleared by *New conversation*: say "forget everything", delete the file while `vaice` is stopped, or turn `VAICE_ASSISTANT_MEMORY` off (the default; then the file is neither read nor written). Every reply's prompt carries the notes, so a hosted helper model receives them (startup warns).
-- Set `VAICE_DATA_DIR=""` to keep the conversation and the notes **in memory only**: nothing is read from or written to disk, and history disappears when the app stops. Persistence can also be limited with `VAICE_HISTORY_TURNS` (the prompt window), which trims context but keeps the file — set `VAICE_DATA_DIR=""` if the file itself is the concern.
-
-## Troubleshooting
-
-- **Replies are off-topic, ignore the question, or lose the conversation thread:**
-  Start `llama-server` with `--temp 0`. The `/v1/realtime` API has no temperature field, so reply text is sampled with the server's own setting (default 0.8), and the LFM3-Audio model card recommends greedy decoding (temperature 0) for text output — `vaice` warns about this at startup (and logs a distinct hint when it cannot verify the temperature, so an absent warning does not mean greedy is fine). If the replies are still weak, try a better quantization: `Q4_K_M` (the quickstart default) is the balance; `Q8_0` matches the unquantized model step-for-step in side-by-side runs, while 4-bit backbones measurably drift. You can also lower `VAICE_HISTORY_TURNS` (e.g. `4`) — small models follow a short history better than a long one.
-- **`llama-server` has no `/v1/realtime` endpoint or returns 404 on WebSocket connect:**
-  Your `llama.cpp` installation is older than `b11960` (v0.8.0). Upgrade it (`brew upgrade llama.cpp` or install a newer release from [ggml-org/llama.cpp](https://github.com/ggml-org/llama.cpp)).
-- **`RuntimeError: the model on llama-server ... does not output audio`:**
-  The model loaded in `llama-server` is text-only or audio-input-only. Start `llama-server` with an audio-output model such as `LiquidAI/LFM3-Audio-2B-GGUF:Q4_K_M`.
-- **The assistant repeats back exactly what you said (echo) instead of answering:**
-  1. **Clear the poisoned history first:** click **New conversation** (or delete `~/.vaice/conversation.json` while the app is stopped). Each echo is stored and replayed to the model as ChatML `user: X → assistant: X` pairs, which teach it to echo — the loop self-reinforces across restarts.
-  2. **Start `llama-server` with `--temp 0`** (see the off-topic replies item above — weak text sampling is the most common cause of bad replies, including parroting).
-  3. **Leave `--tts-lang`/`--tts-voice` out** — not because they are a proven echo cause (an early single-session repro blamed them, but a controlled re-test on the same build did not reproduce it), but because the model is English-only by training, so the pin is unnecessary, and for LFM3 templates the flags alter the voice-chat system prompt (see the "Language & voice" note in *Quickstart*).
-  4. On llama.cpp 1.0.0 the penalty flag is `--repeat-penalty` (the old `--rep-pen` alias is gone) — relevant if you experiment with sampling.
-- **The assistant interrupts itself or hears its own voice:**
-  Speaker audio is feeding back into your microphone and triggering `fastrtc`'s voice activity detection (VAD). Use headphones.
-- **`concurrency_limit_reached` when opening a new tab or reconnecting:**
-  `vaice` is a single-user demo (`concurrency_limit=1`). Normal page reloads close the old WebRTC connection immediately and reconnect within milliseconds. However, if a browser tab crashes or is force-closed without sending a WebRTC goodbye, the server holds the slot for ~30 seconds until ICE consent checks expire. Wait ~30 seconds and try again.
-- **`AbortError: BodyStreamBuffer was aborted` / `Connection errored out` in the browser console on reload:**
-  Harmless message from Gradio's frontend client when page navigation cuts its open `queue/data` SSE stream.
-
-## Setup & Dependency Updates
-
-```bash
-uv sync --extra dev      # creates .venv from uv.lock: the exact versions CI tests (add --extra mcp for the MCP tools and their tests)
-```
-
-`uv sync` installs from the committed `uv.lock`, so every developer and CI run gets the same dependency versions (`.python-version` selects Python 3.12). A plain `uv pip install -e ".[dev]"` or `pip install -e ".[dev]"` also works and resolves against the version bounds in `pyproject.toml`.
-
-To upgrade dependencies deliberately:
-
-```bash
-uv lock --upgrade-package fastrtc   # or --upgrade to refresh everything
-uv sync --extra dev
-.venv/bin/pytest && .venv/bin/ruff check src tests
-```
-
-Known compatibility bounds in `pyproject.toml`:
-- **`fastrtc[vad]>=0.0.34,<0.1`** — `interruptible.py` and `tests/test_interruptible.py` rely on `fastrtc` 0.0.34's `ReplyOnPause` internals and verify `ReplyOnPause.__init__`'s signature on every test run.
-- **`gradio>=5.50,<6`** — imported directly by `app.py`; capped below 6.0 to match `fastrtc` 0.0.34 and keep `gr.Chatbot(allow_tags=False)` behavior consistent.
-
-## Tests & Code Quality
-
-```bash
-.venv/bin/pytest                                         # run all unit tests
-.venv/bin/pytest --cov=vaice --cov-report=term-missing   # run with line coverage
-.venv/bin/ruff check src tests evals                     # run linter
-```
-
-CI (`.github/workflows/ci.yml`) runs Ruff and `pytest --cov=vaice` with `uv sync --locked --extra dev --extra mcp` on Python 3.12 on macOS for every push to `main` and every pull request; a newer push to a pull request cancels the older run. It can also be started by hand (`gh workflow run ci.yml --ref main`), for a push whose run never started.
-
-The unit tests never touch a real model. To measure how reliably spoken commands turn into the right tool call (with repeats, on both the interleaved and a transcribe-then-route path), run the live eval in [`evals/`](evals/README.md) against a real `llama-server`: `.venv/bin/python evals/run.py`. It is run by hand, not in CI.
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for contributor guidelines and how the fake `/v1/realtime` server and multi-threaded `fastrtc` test harnesses work.
-
-## Layout
-
-```
-src/vaice/
-  app.py            CLI + Gradio/WebRTC UI; wraps a Responder, logs time to first audio, transcript + reset
-  interruptible.py  ReplyOnPause subclass fixing fastrtc 0.0.34 barge-in races, VAD tuning, pre-roll buffer, reset silencing, and idle CPU polling
-  server.py         `vaice up`: reuse a running llama-server or start one (log in the data dir), wait for /health, stop it at exit
-  lifecycle.py      Stop signal handler: Ctrl+C asks the app and its responders to abandon in-flight calls
-  config.py         Environment-driven settings (.env.example lists them with defaults)
-  conversation.py   Turn / Conversation: history windowing, barge-in trimming, atomic JSON persistence, error notes
-  brain.py          Assistant mode: ChatBrain, one chat-completions call with tools (local llama-server or a helper endpoint), BrainError
-  skills.py         Assistant mode: the skills (read-only answers, plus open/quit app, volume, mute) and the Skills registry
-  vision.py         Assistant mode, opt-in: the look_at_screen skill (one screenshot via screencapture + sips, asked of a vision model)
-  memory.py         Assistant mode: long-term notes (Memory, kept in memory.json) and the remember / forget / forget_everything skills
-  mcp_skills.py     Assistant mode, opt-in (the `mcp` extra): MCP servers over stdio as skills, with a per-tool approval policy
-  confirm.py        Assistant mode: the one pending request of a confirm skill, the spoken yes/no test and its 60 s expiry
-  shell.py          Assistant mode, opt-in: the run_shell skill: how a command may be approved, and the runner (timeout, output cap, process group)
-  voice.py          Assistant mode: speakable() cleans text for speech, sentences() splits it for /tts
-  audio.py          Mic frame → mono PCM16 at the model's rate (resampled via scipy) and back to float32
-  responders/
-    base.py         Responder protocol (audio + history in → audio chunks out; reports transcript and spoken text)
-    __init__.py     Responder package
-    llamacpp.py     llama-server /v1/realtime: parallel reply and transcription sessions on daemon threads, startup check
-    assistant.py    Assistant mode: transcribe, brain + skills loop, streamed /tts per sentence, on one daemon thread
-tests/
-  fake_realtime.py  Fake /v1/realtime WebSocket + HTTP server for testing LlamaCppResponder end to end
-evals/
-  run.py            Live tool-calling eval against a real llama-server (run by hand; see evals/README.md)
-  scoring.py        Pure scoring and aggregation for the eval (unit-tested)
-  cases.json        Spoken commands and expected tool calls; tools.json holds the stub tool set
-  assistant_cases.json  Spoken questions and expected skills (memory ones carry `notes`) for the assistant path (`--paths assistant`)
-  assistant_vision_cases.json  The same for `look_at_screen` (run with `--vision`; the screen is a stub)
-  recordings/       Optional real-mic clips, <case id>.wav
-```
+See [CONTRIBUTING.md](CONTRIBUTING.md) and [Development](docs/development.md). Coding agents also read
+[AGENTS.md](AGENTS.md), which holds the design decisions and the gotchas that have bitten this repo. Security issues:
+[SECURITY.md](SECURITY.md).
 
 ## License
 

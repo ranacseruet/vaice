@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- **Documentation moved into `docs/`.** The README is now a short overview with a quickstart; the rest of it lives in `docs/` (installation, configuration, chat mode, assistant mode, helper model, screen vision, MCP tools, conversation, privacy, troubleshooting, development), indexed by `docs/README.md`. New: `docs/architecture.md` (the processes, both modes, the confirmation and safety model, threading, state on disk and the code map) and `docs/vision.md` (the north star, principles, where the project is and what is missing). The text of the moved sections is unchanged apart from links and headings; messages and comments that named a README section now name the `docs/` page.
 - **Python 3.12 only** (`requires-python = ">=3.12,<3.13"`, was 3.10–3.12): 3.10 reached end of life in October 2026, 3.11 was never tested, and `uv sync` downloads 3.12 from `.python-version` when it is missing. Installing on 3.10 or 3.11 now fails with a clear version error. The 3.10-only `onnxruntime<1.24` bound is gone. CI runs one macOS job instead of two, and a newer push to a pull request cancels the older run (`concurrency`), so fewer jobs wait for a macOS runner (#91).
 - CI can be started by hand (`workflow_dispatch`: Actions > CI > Run workflow, or `gh workflow run ci.yml --ref main`), for a push whose run never started: #104's merge hit a GitHub 502 and reached `main` with no CI run.
 
