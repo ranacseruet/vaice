@@ -193,6 +193,9 @@ def run(command: str, stop: Callable[[], bool]) -> SkillResult:
     for a refused or unstartable command."""
     plan = classify(command)
     argv = plan.argv or ["/bin/zsh", "-c", plan.command]
+    if stop():  # stopped between the approval and here (New conversation, a barge-in): nothing is started
+        status = "the command was stopped"
+        return SkillResult(status, f"$ {plan.command}\n({status})")
     try:
         proc = subprocess.Popen(argv, cwd=Path.home(), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                 stderr=subprocess.STDOUT, start_new_session=True)

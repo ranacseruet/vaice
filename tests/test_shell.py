@@ -11,7 +11,7 @@ import pytest
 
 from vaice import shell
 from vaice.confirm import NO, YES
-from vaice.skills import Question, SkillError, default_skills
+from vaice.skills import Question, SkillError, SkillResult, default_skills
 
 HOME = str(Path.home())
 
@@ -374,6 +374,15 @@ def test_a_background_process_that_closed_the_output_ends_with_the_command_too(h
 
     assert result.speech.startswith("the command finished. Output: ")
     assert wait_gone(int(result.speech.rsplit(" ", 1)[1]))
+
+
+def test_a_command_stopped_before_it_started_is_never_started(home, tmp_path):
+    marker = tmp_path / "ran"
+
+    result = shell.run(f"touch {marker}", lambda: True)
+
+    assert result == SkillResult("the command was stopped", f"$ touch {marker}\n(the command was stopped)")
+    assert not marker.exists()
 
 
 def test_the_registry_is_empty_after_a_run(home):
