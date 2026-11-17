@@ -107,6 +107,8 @@
    "expect": {"tools": ["remember"], "args": {"remember": {"note": {"contains": "peanut"}}}}},
   {"id": "memory-remember-color", "say": "Note that my favorite color is green.",
    "expect": {"tools": ["remember"], "args": {"remember": {"note": {"contains": "green"}}}}},
+  {"id": "memory-remember-birthday", "say": "Remember that my birthday is in March.",
+   "expect": {"tools": ["remember"], "args": {"remember": {"note": {"contains": "March"}}}}},
   {"id": "memory-recall-sister", "say": "What's my sister's name?",
    "notes": ["The user's sister is called Nadia.", "The user parks on level three."],
    "expect": {"tools": [], "answer_has": ["Nadia"]}},
@@ -124,5 +126,7 @@
    "expect": {"tools": ["forget_everything"]}},
   {"id": "memory-no-titanic", "say": "Do you remember the movie Titanic?", "expect": {"tools": []}},
   {"id": "memory-no-passwords", "say": "I can never remember my passwords.", "expect": {"tools": []}},
-  {"id": "memory-no-know-me", "say": "What do you know about me?", "expect": {"tools": []}}
+  {"id": "memory-no-know-me", "say": "What do you know about me?", "expect": {"tools": []}},
+  {"id": "memory-no-reminder-dentist", "say": "Remind me about my dentist appointment on Friday.",
+   "expect": {"tools": []}}
 ]

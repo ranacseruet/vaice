@@ -23,6 +23,7 @@ log = logging.getLogger(__name__)
 
 MAX_NOTE_CHARS = 200
 MAX_NOTES = 30
+MIN_NOTE_WORDS = 3  # a fact about the user is a sentence, not a word
 MIN_FORGET_CHARS = 3  # `forget("a")` would otherwise erase nearly everything with no confirmation
 _VERSION = 1
 
@@ -30,6 +31,17 @@ _VERSION = 1
 _CONTROL_TOKEN = re.compile(r"<\|.*?\|>")
 _ROLE_TAG = re.compile(r"</?\s*(?:system|user|assistant|tool|tool_call|think|answer|function\b[^>]*)\s*>", re.I)
 _ROLE_LABEL = re.compile(r"^(?:system|assistant|user|tool)\s*:\s*", re.I)
+# A note bound to a moment is a reminder, not a fact about the user; vaice has nothing that would fire later.
+# `timer` / `alarm` alone are nouns that facts use ("afraid of fire alarms"): only a request to set one counts
+_REMINDER = re.compile(
+    r"\b(?:remind(?:er|ed|s)?|tomorrow|tonight|today|in \d+ (?:minutes?|hours?)"
+    # a singular weekday ("on Friday"); "works on Fridays" passes
+    r"|(?:on|this|next|by) (?:monday|tuesday|wednesday|thursday|friday|saturday|sunday))\b"
+    r"|\b(?:set|start|cancel)\b[^.]*\b(?:timers?|alarms?)\b|\b(?:timers?|alarms?) (?:for|at|in)\b", re.I)
+# A clock time is a reminder too ("Call Mom at 9"), unless the note says it is a habit ("wakes up at 7 every day")
+_CLOCK_TIME = re.compile(r"\bo'clock\b|\b\d{1,2}\s?(?:am|pm)\b|\bat \d{1,2}:\d{2}\b|\bat \d{1,2}\s*[.!?]*$", re.I)
+_HABIT = re.compile(r"\b(?:every|each|daily|usually|always|normally|weekdays?|weekends?|mornings?|evenings?|nights?)\b",
+                    re.I)
 _FENCE = re.compile(r"`{3,}")
 _LIST_MARKER = re.compile(r"^(?:[-*+•>#]+|\d+[.)])(?:\s+|$)")
 
@@ -56,8 +68,11 @@ def clean_note(text) -> str:
         if stripped == note:
             break
         note = stripped
-    if not note:
+    if len(note.split()) < MIN_NOTE_WORDS:  # "Goodbye": the 2B model saved a farewell as a note (live eval, 5 of 5)
         raise SkillError("there was nothing to remember")
+    # "Call Mom tomorrow at 9": saved as a note, then announced as a reminder (live eval)
+    if _REMINDER.search(note) or (_CLOCK_TIME.search(note) and not _HABIT.search(note)):
+        raise SkillError("I can't set reminders or timers; I can only keep lasting facts about you")
     if len(note) > MAX_NOTE_CHARS:
         raise SkillError(f"that is too long to remember: keep a note under {MAX_NOTE_CHARS} characters")
     return note
@@ -225,8 +240,9 @@ def memory_skills(memory: Memory) -> list[Skill]:
     """`remember`, `forget` and `forget_everything` over `memory`. `remember` is `direct_only`: it does not store
     anything once another skill has run in the same reply (what a tool reported is not what the user said)."""
     return [
-        Skill("remember", "Save a short note about the user or their preferences, only when the user asks you to "
-                          "remember it; write it in the third person, such as The user parks on level three.",
+        Skill("remember", "Save a lasting fact about the user or their preferences, only when the user asks you to "
+                          "remember it; write it in the third person, such as The user parks on level three. "
+                          "Not for reminders, timers or things to do later: you cannot remind the user.",
               {"type": "object",
                "properties": {"note": {"type": "string",
                                        "description": "The note, one short sentence about the user."}},

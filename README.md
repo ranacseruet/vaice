@@ -339,8 +339,12 @@ spoken questions reach the right skill (see `evals/README.md`).
 them in every later conversation. Nothing is saved on its own: only a request such as "remember that I park on
 level three" stores a note, and nothing is extracted from what you say. Three skills:
 
-- `remember(note)` saves a note, written in the third person ("The user parks on level three."). It runs at once
-  and says what it kept (`remembered: ...`); a note it already has is not stored twice.
+- `remember(note)` saves a lasting fact, written in the third person ("The user parks on level three."). It runs
+  at once and says what it kept (`remembered: ...`); a note it already has is not stored twice. A note is a
+  sentence of at least three words and is not bound to a moment: **vaice cannot remind you of anything** (nothing
+  in it fires later), so a request such as "remind me to call Mom tomorrow at nine" is refused with "I can't set
+  reminders or timers; I can only keep lasting facts about you" instead of being saved and announced as a
+  reminder, and a word such as "Goodbye" is not a note ("there was nothing to remember").
 - `forget(about)` deletes the notes that contain a word or phrase of at least 3 letters, and names them
   (`forgot: ...`).
 - `forget_everything` erases all of them, after the usual question (`Shall I erase all 3 notes I keep?`),
@@ -359,6 +363,13 @@ markers (`<|im_start|>`, `<system>`), code fences and list markers; at most 30 n
 asks you to forget something first). `remember` is also refused when another skill ran earlier in the same
 reply (the model says "I only remember what you tell me directly, not what a tool reported."), so a file name
 or a command's output cannot be turned into a note. Use a small, hand-checked list: the file is not encrypted.
+
+What counts as bound to a moment: the words remind / reminder, tomorrow, tonight, today, a timer or alarm being
+set (`timer` or `alarm` as a plain noun, "afraid of fire alarms", is fine), "in 10 minutes", "on Friday" /
+"next Monday" (a singular weekday; "works on Fridays" is fine), and a clock time ("at 9", "6 pm",
+"o'clock") unless the note says it is a habit ("wakes up at 7 every day"). The check is a few regular expressions
+on the note's text, so it will refuse an occasional lasting fact and miss a reminder worded another way ("at nine
+sharp"); the skill's description also tells the model not to use it for reminders.
 
 The 2B model's recall from the notes and its choice between answering and calling `remember` are measured by
 the `memory-*` cases of `python evals/run.py --paths assistant` (see `evals/README.md`); do not trust them

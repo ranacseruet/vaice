@@ -54,6 +54,9 @@ class _Asked:
     pending_id: str
     spoken: bool
 _RATE = re.compile(r"\brate=(\d+)")
+# An answer that is only bracket-style pseudo tool calls, `[open_file(path='old_report.docx')]` (a helper model's
+# habit, seen live), possibly several in a row: spoken, it would read out a function call
+_PSEUDO_CALLS = re.compile(r"(?:\[\s*[A-Za-z_]\w*\s*\(.*?\)\s*\]\s*)+", re.DOTALL)
 
 
 def _spoken_text(text: str) -> str:
@@ -61,8 +64,11 @@ def _spoken_text(text: str) -> str:
     round made without tools: `<tool_call><function=open_web>...`), which would otherwise be spoken. The same
     stripper chat mode uses: `<tool_call>` / `<function=...>` blocks go through their close tag, an unterminated
     one to the end, stray `<think>`/`<answer>` tags and `<|...|>` control tokens with them. Empty when nothing
-    is left."""
+    is left. An answer that is nothing but bracket-style pseudo calls (`[name(...)]`) is dropped too; text that
+    merely contains brackets is left alone."""
     cleaned = _MarkupStripper().feed(text).strip()
+    if _PSEUDO_CALLS.fullmatch(cleaned):
+        cleaned = ""
     if cleaned != text.strip():
         log.warning("assistant answer carried model markup, removed: %r", text[:200])
     return cleaned

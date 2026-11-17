@@ -2028,3 +2028,59 @@ def test_a_responder_without_memory_never_puts_a_notes_block_into_the_prompt(tts
     drive(resp)
 
     assert system_prompt(brain) == f"Be brief.\n{assistant._clock_line()}"
+
+
+PSEUDO_CALLS = [  # a helper model's final answers, seen live
+    "[open_file(path='old_report.docx')]",
+    "[find_files(name='resume*', path='/home')]",
+    "  [find_files(name='resume*', path='/home')] [open_file(path='old_report.docx')]\n",
+    "[disk_space()]",
+    "[ open_file ( path = 'a (1).docx' ) ]",
+]
+
+
+@pytest.mark.parametrize("written", PSEUDO_CALLS)
+def test_an_answer_that_is_only_bracket_style_pseudo_calls_becomes_the_no_answer_sentence(caplog, written):
+    with caplog.at_level(logging.WARNING, logger="vaice.responders.assistant"):
+        decision = decide(FakeBrain(answer(written)), disk_skills(), [{"role": "user", "content": "x"}],
+                          lambda: False, turn=Turn())
+
+    assert decision.answer == assistant.NO_ANSWER
+    assert "carried model markup" in caplog.text
+
+
+@pytest.mark.parametrize("written", [
+    "I opened it [see open_file(path='a.docx')] for you.",  # brackets inside a sentence
+    "[open_file(path='a.docx')] Done.",  # a call and then words
+    "Done. [open_file(path='a.docx')]",
+    "[1] The sky is blue. [2] Because of scattering.",
+    "[Note] Two is less than three.",
+    "[open file] (path a.docx)",  # not an identifier followed by parentheses
+    "[open_file(path='a.docx'",  # never closed
+])
+def test_text_that_merely_has_brackets_is_spoken_as_written(caplog, written):
+    with caplog.at_level(logging.WARNING, logger="vaice.responders.assistant"):
+        decision = decide(FakeBrain(answer(written)), disk_skills(), [{"role": "user", "content": "x"}],
+                          lambda: False, turn=Turn())
+
+    assert decision.answer == written
+    assert "carried model markup" not in caplog.text
+
+
+def test_a_pseudo_call_in_the_forced_final_round_is_not_spoken_either():
+    decision = decide(FakeBrain(*[ask(("disk_space", "{}"))] * 3, answer("[disk_space()]")), disk_skills(),
+                      [{"role": "user", "content": "x"}], lambda: False, turn=Turn())
+
+    assert decision.answer == assistant.NO_ANSWER
+
+
+def test_an_approved_skills_follow_up_that_is_only_a_pseudo_call_speaks_the_skills_result(tts, heard, caplog):
+    s = asked(answer("[quit_app(name='Safari')]"))
+    heard.text = "yes"
+    turn = Turn()
+
+    with caplog.at_level(logging.WARNING, logger="vaice.responders.assistant"):
+        drive(s.resp, turn=turn)
+
+    assert turn.assistant_text == "quit Safari"
+    assert "carried model markup" in caplog.text
