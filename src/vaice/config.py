@@ -135,6 +135,12 @@ ASSISTANT_PROMPT = _env(
 # Assistant mode only: adds the `run_shell` skill (shell.py). Every command is approved first; only a short
 # list of harmless ones by voice, the rest only by the UI's Run button. Off: the skill does not exist.
 ASSISTANT_SHELL = _flag("VAICE_ASSISTANT_SHELL", default=False)
+# Assistant mode only: after this many seconds without a spoken answer the reply says "One moment." (then
+# "Still working." every 12 s) until the answer starts. 0 turns it off. A speaker's own filler can reach the
+# microphone and be taken for the user interrupting (#36), which is the other reason for the off switch.
+ASSISTANT_PROGRESS_SECONDS = _number("VAICE_ASSISTANT_PROGRESS_SECONDS", default="2.5", kind=float)
+if not ASSISTANT_PROGRESS_SECONDS >= 0:
+    raise SystemExit("vaice: VAICE_ASSISTANT_PROGRESS_SECONDS must be >= 0 (0 = no spoken progress)")
 VOICE = _choice("VAICE_VOICE", default="female", choices=("female", "male"))
 
 

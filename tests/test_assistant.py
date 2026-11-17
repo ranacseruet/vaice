@@ -1,6 +1,7 @@
 """The assistant path: transcribe, brain, skills, /tts — against fakes (no server, no machine commands)."""
 import json
 import logging
+import queue
 import subprocess
 import threading
 import time
@@ -15,7 +16,7 @@ from vaice import lifecycle, shell
 from vaice.app import make_handler
 from vaice.audio import from_pcm16
 from vaice.brain import BUSY, BrainError, BrainReply, ToolCall
-from vaice.confirm import CONFIRM_SECONDS, Confirmations, Pending
+from vaice.confirm import CONFIRM_SECONDS, Confirmations, Pending, spoken_answer
 from vaice.conversation import Conversation, Turn
 from vaice.responders import assistant
 from vaice.responders.assistant import AssistantResponder, decide
@@ -1543,3 +1544,290 @@ def test_the_default_skills_have_run_shell_only_when_the_setting_is_on(monkeypat
     assert "run_shell" not in AssistantResponder("http://server").skills.names
     monkeypatch.setattr(assistant.config, "ASSISTANT_SHELL", True)
     assert "run_shell" in AssistantResponder("http://server").skills.names
+
+
+# --- spoken progress while the decision is made
+
+ONE_MOMENT, STILL_WORKING = assistant.ONE_MOMENT, assistant.STILL_WORKING
+FILLER_SAMPLES, ANSWER_SAMPLES = 100, 2400
+
+
+class GatedBrain(FakeBrain):
+    """A brain that does not reply until `gate` is set: a slow decision."""
+
+    def __init__(self, *replies):
+        super().__init__(*replies)
+        self.gate = threading.Event()
+
+    def complete(self, messages, tools):
+        assert self.gate.wait(5)
+        return super().complete(messages, tools)
+
+
+class RecordingTurn(Turn):
+    """A Turn that keeps every assistant text it was given, in order."""
+
+    def __init__(self):
+        super().__init__()
+        self.assistant_texts = []
+
+    def set_assistant_text(self, text):
+        self.assistant_texts.append(text)
+        super().set_assistant_text(text)
+
+
+def hurried(brain, first=0.05, skills=None, confirmations=None):
+    """A responder that speaks its progress after `first` seconds."""
+    return AssistantResponder("http://server", 5.0, "Be brief.", "female", skills or disk_skills(), brain,
+                              confirmations, progress_seconds=first)
+
+
+@pytest.fixture
+def sized_tts(tts):
+    """/tts answers a filler with FILLER_SAMPLES samples and everything else with ANSWER_SAMPLES."""
+    tts._make = lambda text: FakeResponse(
+        [pcm_bytes(FILLER_SAMPLES if text in (ONE_MOMENT, STILL_WORKING) else ANSWER_SAMPLES)])
+    return tts
+
+
+def spoken_inputs(tts):
+    return [body["input"] for body in tts.bodies]
+
+
+def lengths(frames):
+    return [len(frame) for _, frame in frames]
+
+
+def test_a_fast_answer_gets_no_filler_and_leaves_no_progress_thread(sized_tts):
+    resp = hurried(FakeBrain(answer("Plenty is free.")), first=2.0)
+
+    frames = drive(resp)
+
+    assert spoken_inputs(sized_tts) == ["Plenty is free."]
+    assert lengths(frames) == [ANSWER_SAMPLES]
+    wait_until(lambda: not threads_named("vaice-assistant-progress"))
+
+
+def test_a_slow_brain_gets_one_moment_before_the_answer_and_the_record_holds_only_the_answer(sized_tts):
+    brain = GatedBrain(answer("Plenty is free."))
+    turn = RecordingTurn()
+    reply = start_thread(lambda: drive(hurried(brain), turn=turn), "reply")
+
+    wait_until(lambda: spoken_inputs(sized_tts) == [ONE_MOMENT])
+    assert turn.assistant_text == ""  # the filler is nothing the reply said
+    brain.gate.set()
+    frames = reply.join()
+
+    assert spoken_inputs(sized_tts) == [ONE_MOMENT, "Plenty is free."]
+    assert lengths(frames) == [FILLER_SAMPLES, ANSWER_SAMPLES]
+    assert turn.assistant_texts == ["Plenty is free."]
+    wait_until(lambda: not threads_named("vaice-assistant-progress"))
+
+
+def test_a_very_slow_brain_gets_still_working_at_the_repeat_interval(sized_tts, monkeypatch):
+    monkeypatch.setattr(assistant, "PROGRESS_REPEAT_SECONDS", 0.1)
+    brain = GatedBrain(answer("Plenty is free."))
+    reply = start_thread(lambda: drive(hurried(brain), turn=Turn()), "reply")
+
+    wait_until(lambda: spoken_inputs(sized_tts).count(STILL_WORKING) >= 2)
+    brain.gate.set()
+    frames = reply.join()
+
+    inputs = spoken_inputs(sized_tts)
+    assert inputs[0] == ONE_MOMENT and inputs[-1] == "Plenty is free."
+    assert set(inputs[1:-1]) == {STILL_WORKING}
+    assert lengths(frames) == [FILLER_SAMPLES] * (len(inputs) - 1) + [ANSWER_SAMPLES]
+
+
+def test_with_progress_off_there_is_never_a_filler(sized_tts):
+    brain = GatedBrain(answer("Plenty is free."))
+    reply = start_thread(lambda: drive(hurried(brain, first=0), turn=Turn()), "reply")
+
+    time.sleep(0.3)  # long enough for any filler of a 0.05 s setting
+    assert spoken_inputs(sized_tts) == []
+    assert not threads_named("vaice-assistant-progress")
+    brain.gate.set()
+    reply.join()
+
+    assert spoken_inputs(sized_tts) == ["Plenty is free."]
+
+
+@pytest.mark.parametrize(("text", "spoken"), [("", assistant.NOT_HEARD), ("Is there space?", "Plenty is free.")])
+def test_the_wait_is_counted_from_the_transcript_and_an_empty_transcript_gets_no_filler(
+        sized_tts, monkeypatch, text, spoken):
+    def slow_transcribe(url, timeout, audio):
+        time.sleep(0.3)  # much longer than the 0.1 s setting, but before the transcript is known
+        return text
+
+    monkeypatch.setattr(assistant, "_transcribe", slow_transcribe)
+
+    drive(hurried(FakeBrain(answer("Plenty is free.")), first=0.1))
+
+    assert spoken_inputs(sized_tts) == [spoken]
+
+
+def test_a_slow_approved_skill_gets_a_filler_and_then_the_result(sized_tts, heard):
+    gate = threading.Event()
+
+    def quit_run(args):
+        assert gate.wait(5)
+        return SkillResult("quit Safari")
+
+    name = {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}
+    skills = Skills([Skill("quit_app", "Quit an app.", name, quit_run, kind="confirm",
+                           ask=lambda args: f"Shall I quit {args['name']}?")])
+    resp = hurried(FakeBrain(ask(QUIT), answer("Safari is closed now.")), skills=skills,
+                   confirmations=Confirmations(Clock()))
+    drive(resp)  # the question: a fast decision, no filler
+    assert spoken_inputs(sized_tts) == [QUESTION]
+    heard.text = "yes"
+    reply = start_thread(lambda: drive(resp, turn=Turn()), "reply")
+
+    wait_until(lambda: spoken_inputs(sized_tts)[-1:] == [ONE_MOMENT])  # the command is running
+    gate.set()
+    frames = reply.join()
+
+    assert spoken_inputs(sized_tts) == [QUESTION, ONE_MOMENT, "Safari is closed now."]
+    assert lengths(frames) == [FILLER_SAMPLES, ANSWER_SAMPLES]
+
+
+def test_a_reply_stopped_during_the_wait_speaks_no_filler_and_the_late_decision_changes_nothing(sized_tts):
+    ran, brain = [], GatedBrain(ask(QUIT))
+    resp = hurried(brain, first=0.3, skills=skills_with_quit(ran, []), confirmations=Confirmations(Clock()))
+    turn = RecordingTurn()
+    gen = resp.respond(AUDIO, [], turn)
+    running = start_thread(lambda: next(gen, None), "fastrtc-stop")
+    wait_until(lambda: threads_named("vaice-assistant-progress"))
+
+    turn.closed.set()  # barge-in while the brain is still deciding
+    assert running.join() is None
+    wait_until(lambda: not threads_named("vaice-assistant-progress"))  # without waiting for the brain
+    time.sleep(0.4)  # past the moment the filler would have been due
+    assert spoken_inputs(sized_tts) == []
+    brain.gate.set()  # the decision comes back late, asking for a confirmation
+    wait_until(lambda: not threads_named("vaice-assistant"))
+
+    assert spoken_inputs(sized_tts) == []
+    assert turn.assistant_texts == []
+    assert resp.pending() is None and ran == []
+    assert turn.tool_events == []
+
+
+def test_a_brain_failure_after_a_filler_still_speaks_the_apology_and_then_raises(sized_tts):
+    brain = GatedBrain(RATE_LIMITED)
+    turn = RecordingTurn()
+    gen = hurried(brain).respond(AUDIO, [], turn)
+    frames, error = [], []
+
+    def collect():
+        while True:
+            item = next_on_fresh_thread(gen, f"fastrtc-{len(frames)}")
+            if isinstance(item, BaseException):
+                error.append(item)
+                return
+            frames.append(item)
+
+    reply = start_thread(collect, "reply")
+    wait_until(lambda: spoken_inputs(sized_tts) == [ONE_MOMENT])
+    brain.gate.set()
+    reply.join()
+
+    assert error == [RATE_LIMITED]  # raised after the apology's audio, which came after the filler
+    assert " ".join(spoken_inputs(sized_tts)[1:]) == BUSY
+    assert lengths(frames) == [FILLER_SAMPLES, ANSWER_SAMPLES, ANSWER_SAMPLES]  # the apology is two sentences
+    assert turn.assistant_texts[-1] == BUSY
+
+
+def test_a_filler_that_cannot_be_synthesized_is_a_warning_and_the_answer_is_still_spoken(
+        sized_tts, caplog, monkeypatch):
+    monkeypatch.setattr(assistant, "PROGRESS_REPEAT_SECONDS", 0.05)
+    answer_tts = sized_tts._make
+    sized_tts._make = lambda text: FakeResponse([], status=500) if text == ONE_MOMENT else answer_tts(text)
+    brain = GatedBrain(answer("Plenty is free."))
+    with caplog.at_level(logging.WARNING, logger="vaice.responders.assistant"):
+        reply = start_thread(lambda: drive(hurried(brain), turn=Turn()), "reply")
+        wait_until(lambda: "could not speak its progress" in caplog.text)
+        wait_until(lambda: not threads_named("vaice-assistant-progress"))
+        time.sleep(0.2)  # a retry or a Still working. would be due by now
+        brain.gate.set()
+        frames = reply.join()
+
+    assert "HTTP 500" in caplog.text
+    assert spoken_inputs(sized_tts) == [ONE_MOMENT, "Plenty is free."]  # one attempt, no more fillers
+    assert lengths(frames) == [ANSWER_SAMPLES]
+
+
+def test_filler_frames_come_before_a_confirmation_question_and_the_request_is_armed_only_after_it(sized_tts):
+    brain, confirmations = GatedBrain(ask(QUIT)), Confirmations(Clock())
+    resp = hurried(brain, skills=skills_with_quit([], []), confirmations=confirmations)
+    gen = resp.respond(AUDIO, [], Turn())
+    first = start_thread(lambda: next_on_fresh_thread(gen), "first")
+    wait_until(lambda: spoken_inputs(sized_tts) == [ONE_MOMENT])
+    brain.gate.set()
+    filler = first.join()
+    wait_until(lambda: confirmations.current() is not None)  # asked: on the screen while its question is spoken
+
+    assert len(filler[1]) == FILLER_SAMPLES
+    assert confirmations.current().armed_at is None  # the question has not been handed out yet
+    assert len(next_on_fresh_thread(gen)[1]) == ANSWER_SAMPLES  # the question's frame
+    assert isinstance(next_on_fresh_thread(gen), StopIteration)
+
+    assert spoken_inputs(sized_tts) == [ONE_MOMENT, QUESTION]
+    assert confirmations.current().armed_at == 100.0
+
+
+def test_an_answer_that_arrives_while_a_filler_is_being_queued_waits_for_it(tts):
+    gate = threading.Event()
+    tts._make = lambda text: (FakeResponse([pcm_bytes(FILLER_SAMPLES)] * 2, gate=gate) if text == ONE_MOMENT
+                              else FakeResponse([pcm_bytes(ANSWER_SAMPLES)]))
+    brain = GatedBrain(answer("Plenty is free."))
+    reply = start_thread(lambda: drive(hurried(brain), turn=Turn()), "reply")
+    wait_until(lambda: spoken_inputs(tts) == [ONE_MOMENT])  # the filler is streaming, held at its second chunk
+
+    brain.gate.set()  # the answer is ready
+    time.sleep(0.2)
+    assert spoken_inputs(tts) == [ONE_MOMENT]  # it is not interleaved into the filler
+    gate.set()
+    frames = reply.join()
+
+    assert spoken_inputs(tts) == [ONE_MOMENT, "Plenty is free."]
+    assert lengths(frames) == [FILLER_SAMPLES, FILLER_SAMPLES, ANSWER_SAMPLES]
+
+
+@pytest.mark.parametrize("sentence", [ONE_MOMENT, STILL_WORKING])
+def test_a_filler_is_never_taken_for_a_yes_or_a_no(sentence):
+    assert spoken_answer(sentence) is None
+
+
+def test_the_responder_takes_the_progress_setting_from_the_configuration():
+    resp = AssistantResponder("http://server", brain=FakeBrain())
+    assert resp._progress_seconds == assistant.config.ASSISTANT_PROGRESS_SECONDS
+
+
+def test_a_reply_stopped_while_a_filler_is_streaming_ends_it_without_more_audio(tts):
+    gate = threading.Event()
+    tts._make = lambda text: FakeResponse([pcm_bytes(FILLER_SAMPLES)] * 3, gate=gate)
+    turn = RecordingTurn()
+    gen = hurried(GatedBrain(answer("Plenty is free."))).respond(AUDIO, [], turn)
+    first = start_thread(lambda: next_on_fresh_thread(gen), "first")
+    assert len(first.join()[1]) == FILLER_SAMPLES  # the filler's first chunk; the rest waits at the gate
+
+    gen.close()  # barge-in
+    gate.set()
+
+    wait_until(lambda: not threads_named("vaice-assistant-progress"))
+    assert spoken_inputs(tts) == [ONE_MOMENT]
+    assert tts.responses[0].closed
+
+
+def test_a_filler_that_lost_the_race_with_the_answer_is_not_spoken(tts):
+    out = queue.Queue()
+    progress = assistant._Progress("http://server", 5.0, "female", out, lambda: False, 0.05)
+    progress._lock.acquire()  # a filler is due, but it has to wait for the lock
+    progress.start()
+    time.sleep(0.2)
+    progress._ended.set()  # the answer started meanwhile
+    progress._lock.release()
+
+    wait_until(lambda: not threads_named("vaice-assistant-progress"))
+    assert out.empty() and tts.bodies == []

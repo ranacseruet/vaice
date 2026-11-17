@@ -380,3 +380,27 @@ def test_a_bad_brain_timeout_is_a_clean_error(monkeypatch, value):
     finally:
         monkeypatch.undo()
         importlib.reload(config)
+
+
+def test_spoken_progress_is_on_after_two_and_a_half_seconds_and_can_be_turned_off(monkeypatch):
+    monkeypatch.delenv("VAICE_ASSISTANT_PROGRESS_SECONDS", raising=False)
+    try:
+        assert importlib.reload(config).ASSISTANT_PROGRESS_SECONDS == 2.5
+        monkeypatch.setenv("VAICE_ASSISTANT_PROGRESS_SECONDS", "0")
+        assert importlib.reload(config).ASSISTANT_PROGRESS_SECONDS == 0
+        monkeypatch.setenv("VAICE_ASSISTANT_PROGRESS_SECONDS", "4.5")
+        assert importlib.reload(config).ASSISTANT_PROGRESS_SECONDS == 4.5
+    finally:
+        monkeypatch.undo()
+        importlib.reload(config)
+
+
+@pytest.mark.parametrize("value", ["-1", "soon", "nan"])
+def test_a_bad_progress_setting_is_a_clean_error(monkeypatch, value):
+    monkeypatch.setenv("VAICE_ASSISTANT_PROGRESS_SECONDS", value)
+    try:
+        with pytest.raises(SystemExit, match="VAICE_ASSISTANT_PROGRESS_SECONDS must be"):
+            importlib.reload(config)
+    finally:
+        monkeypatch.undo()
+        importlib.reload(config)

@@ -39,6 +39,9 @@ TTS_CHUNK_BYTES = 8192  # read size of the streamed /tts body (about 0.17 s of s
 NOT_HEARD = "Sorry, I didn't catch that."
 NO_ANSWER = "Sorry, I couldn't work that out."
 CANCELLED = "Okay, I won't."  # spoken when the user says no to a confirmation
+ONE_MOMENT = "One moment."  # spoken once the decision has taken VAICE_ASSISTANT_PROGRESS_SECONDS (no yes/no words)
+STILL_WORKING = "Still working."  # and again every PROGRESS_REPEAT_SECONDS until the answer starts
+PROGRESS_REPEAT_SECONDS = 12.0
 _DONE = object()
 
 
@@ -212,6 +215,60 @@ def _speak(url: str, timeout: float, voice_name: str, answer: str, out: queue.Qu
     return first
 
 
+class _Progress:
+    """Spoken progress while the decision is being made, so a slow brain or skill is not silence.
+
+    A daemon thread of its own (`vaice-assistant-progress`) next to the reply's: it speaks `ONE_MOMENT` once the
+    decision has taken `first` seconds, then `STILL_WORKING` every `PROGRESS_REPEAT_SECONDS`, until `end()`.
+    The filler is queued as ordinary frames with the text `""`, so the generator never records it. The lock
+    makes "queue a filler" and "the answer starts" exclusive: `end()` waits for a filler being queued, and
+    after it returns nothing more is queued, so a filler never lands inside the answer or behind it.
+    A `/tts` failure ends the progress (a warning); the reply goes on without it.
+    """
+
+    def __init__(self, url: str, timeout: float, voice_name: str, out: queue.Queue, stop: Callable[[], bool],
+                 first: float):
+        self._url, self._timeout, self._voice = url, timeout, voice_name
+        self._out, self._stop, self._first = out, stop, first
+        self._ended = threading.Event()
+        self._lock = threading.Lock()
+
+    def start(self) -> None:
+        if self._first > 0:  # 0 = off
+            threading.Thread(target=self._run, name="vaice-assistant-progress", daemon=True).start()
+
+    def end(self) -> None:
+        """The answer is about to start: no filler is queued from here on, and one in progress is finished first."""
+        self._ended.set()
+        with self._lock:
+            pass
+
+    def cancel(self) -> None:
+        """The reply is over (any way): the thread ends at its next poll; nothing waits for it."""
+        self._ended.set()
+
+    def _run(self) -> None:
+        sentence, next_at = ONE_MOMENT, time.monotonic() + self._first
+        while not self._ended.wait(POLL_SECONDS):
+            if self._stop():
+                return
+            if time.monotonic() < next_at:
+                continue
+            with self._lock:
+                if self._ended.is_set():
+                    return
+                try:
+                    for rate, frame in _tts(self._url, self._timeout, self._voice, sentence, self._stop):
+                        self._out.put((rate, frame, ""))
+                except _Stopped:
+                    return
+                except Exception as exc:  # noqa: BLE001 - the filler is optional: the answer must not suffer for it
+                    log.warning("assistant could not speak its progress, going on without it: %s: %s",
+                                type(exc).__name__, exc)
+                    return
+            sentence, next_at = STILL_WORKING, time.monotonic() + PROGRESS_REPEAT_SECONDS
+
+
 def _approved(pending: Pending, skills: Skills, brain: ChatBrain, turn: Turn, stop: Callable[[], bool]) -> Decision:
     """The user said yes: run what was asked (the stored name and arguments, nothing the brain says now),
     record it on `turn`, and let the brain say in one tool-less call how it went."""
@@ -261,15 +318,19 @@ def _decision(prompt: str, history: Sequence[Message], transcript: str, skills: 
 
 def _work(url: str, timeout: float, prompt: str, voice_name: str, skills: Skills, brain: ChatBrain,
           confirmations: Confirmations, audio: AudioFrame, history: Sequence[Message], turn: Turn,
-          out: queue.Queue, cancelled: threading.Event) -> None:
+          out: queue.Queue, cancelled: threading.Event, progress_seconds: float = 0.0) -> None:
     """Daemon thread: one reply. Puts `(rate, frame, text so far)` tuples, then an exception if the reply
     failed, and finally `_DONE` on `out`. The question's transcript is reported on `turn` exactly once,
-    whatever happens. Takes only plain data and its helpers, never the responder."""
+    whatever happens. Takes only plain data and its helpers, never the responder.
+
+    While the decision is made, a `_Progress` thread may speak a filler (frames with the text `""`, ahead of
+    everything this thread queues for the answer); it is not part of what is recorded."""
 
     def stop() -> bool:
         return cancelled.is_set() or lifecycle.stopping.is_set()
 
     started = time.perf_counter()
+    progress = _Progress(url, timeout, voice_name, out, stop, progress_seconds)
     try:
         transcript = ""
         try:
@@ -281,6 +342,7 @@ def _work(url: str, timeout: float, prompt: str, voice_name: str, skills: Skills
             raise _Stopped
         failure: BrainError | None = None
         if transcript:
+            progress.start()
             try:
                 decision = _decision(prompt, history, transcript, skills, brain, confirmations, turn, stop)
             except BrainError as exc:  # audible first: its sentence is spoken below, then the error is raised
@@ -290,6 +352,7 @@ def _work(url: str, timeout: float, prompt: str, voice_name: str, skills: Skills
             # Nothing was understood (noise, a cough): a waiting confirmation is left alone on purpose. The
             # user still has to answer it with a whole-utterance yes, and a cough must not cancel their request.
             decision = Decision(NOT_HEARD)
+        progress.end()  # before the question's marker and the answer's first frame
         pending = decision.pending
         if pending is not None:  # on the screen at once; answerable by voice only once the question was spoken
             confirmations.ask(pending)
@@ -322,6 +385,7 @@ def _work(url: str, timeout: float, prompt: str, voice_name: str, skills: Skills
             log.warning("assistant reply failed after it was abandoned: %s: %s", type(exc).__name__, exc)
         out.put(exc)
     finally:
+        progress.cancel()
         out.put(_DONE)
 
 
@@ -350,6 +414,7 @@ class AssistantResponder:
         skills: Skills | None = None,
         brain: ChatBrain | None = None,
         confirmations: Confirmations | None = None,
+        progress_seconds: float = config.ASSISTANT_PROGRESS_SECONDS,
     ):
         self._url = url
         self._timeout = timeout
@@ -358,6 +423,7 @@ class AssistantResponder:
         self.skills = skills or default_skills(shell=config.ASSISTANT_SHELL)
         self._brain = brain or _default_brain(url, timeout)
         self._confirmations = Confirmations() if confirmations is None else confirmations
+        self._progress_seconds = progress_seconds
         self._runs: set[threading.Event] = set()  # per click-approved run: set by `clear_pending` to stop it
         self._runs_lock = threading.Lock()
 
@@ -409,7 +475,7 @@ class AssistantResponder:
         threading.Thread(
             target=_work,
             args=(self._url, self._timeout, self._prompt, self._voice, self.skills, self._brain,
-                  self._confirmations, audio, list(history), turn, chunks, cancelled),
+                  self._confirmations, audio, list(history), turn, chunks, cancelled, self._progress_seconds),
             name="vaice-assistant",
             daemon=True,
         ).start()
