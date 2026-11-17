@@ -13,7 +13,7 @@ import numpy as np
 import requests
 from fastrtc import AdditionalOutputs, Stream
 
-from vaice import config
+from vaice import config, mcp_skills
 from vaice.brain import ChatBrain
 from vaice.confirm import Pending
 from vaice.conversation import Conversation, Turn
@@ -335,12 +335,24 @@ def _open_memory() -> Memory | None:
     return memory
 
 
+def _open_mcp() -> mcp_skills.McpTools | None:
+    """Assistant mode: start the MCP servers in VAICE_MCP_CONFIG (None when it is unset) and say what each offers:
+    tool names only, never the file's `env` values."""
+    if config.MCP_CONFIG is None:
+        return None
+    tools = mcp_skills.start(config.MCP_CONFIG, config.MCP_TIMEOUT)
+    for name, offered in tools.summaries:
+        log.info("mcp server %s: %d tools offered (%s)", name, len(offered), ", ".join(offered) or "none")
+    return tools
+
+
 def main() -> None:
     up = parse_args().command == "up"
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     install_stop_handler()  # Ctrl+C: the responders give up, gradio closes the server
     managed = None  # the llama-server `vaice up` started, if any
+    mcp_tools = None  # the MCP servers started for assistant mode, if any
     try:
         if up:
             managed = ensure_server()
@@ -349,7 +361,9 @@ def main() -> None:
             if config.LLAMACPP_TOOLS:
                 log.warning("VAICE_LLAMACPP_TOOLS is ignored in assistant mode: the skills run in vaice, "
                             "not on llama-server")
-            responder = AssistantResponder(memory=_open_memory(), vision=_vision_skill())
+            mcp_tools = _open_mcp()
+            responder = AssistantResponder(memory=_open_memory(), vision=_vision_skill(),
+                                           extra_skills=mcp_tools.skills if mcp_tools else ())
             _announce_brain()
             _announce_vision()
             if config.ASSISTANT_SHELL:
@@ -362,6 +376,8 @@ def main() -> None:
                 log.warning("VAICE_BRAIN_URL is ignored in chat mode: the helper brain is for assistant mode only")
             if config.VISION_URL:
                 log.warning("VAICE_VISION_URL is ignored in chat mode: the screen skill is for assistant mode only")
+            if config.MCP_CONFIG is not None:
+                log.warning("VAICE_MCP_CONFIG is ignored in chat mode: MCP tools are for assistant mode only")
             responder = _chat_responder()
         log.info("using llama-server at %s", config.LLAMACPP_URL)
 
@@ -382,5 +398,7 @@ def main() -> None:
         log.info("stopped")
     finally:
         request_stop()  # the app is over: don't wait for a model call that may never return
+        if mcp_tools is not None:
+            mcp_tools.close()  # ends the servers' processes
         if managed is not None:
             managed.stop()

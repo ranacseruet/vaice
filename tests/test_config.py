@@ -500,3 +500,48 @@ def test_the_notes_file_lives_in_the_data_dir_and_is_none_without_one(monkeypatc
     finally:
         monkeypatch.undo()
         importlib.reload(config)
+
+
+def test_mcp_is_off_by_default(monkeypatch):
+    for name in ("VAICE_MCP_CONFIG", "VAICE_MCP_TIMEOUT"):
+        monkeypatch.delenv(name, raising=False)
+    try:
+        reloaded = importlib.reload(config)
+        assert reloaded.MCP_CONFIG is None
+        assert reloaded.MCP_TIMEOUT == 30.0
+    finally:
+        monkeypatch.undo()
+        importlib.reload(config)
+
+
+def test_the_mcp_settings_are_read_from_the_environment_and_the_path_is_expanded(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("VAICE_MCP_CONFIG", " ~/mcp.json ")
+    monkeypatch.setenv("VAICE_MCP_TIMEOUT", "7.5")
+    try:
+        reloaded = importlib.reload(config)
+        assert (tmp_path / "mcp.json") == reloaded.MCP_CONFIG
+        assert reloaded.MCP_TIMEOUT == 7.5
+    finally:
+        monkeypatch.undo()
+        importlib.reload(config)
+
+
+def test_an_empty_mcp_config_means_off(monkeypatch):
+    monkeypatch.setenv("VAICE_MCP_CONFIG", "  ")
+    try:
+        assert importlib.reload(config).MCP_CONFIG is None
+    finally:
+        monkeypatch.undo()
+        importlib.reload(config)
+
+
+@pytest.mark.parametrize("value", ["0", "-5", "soon"])
+def test_a_bad_mcp_timeout_is_a_clean_error(monkeypatch, value):
+    monkeypatch.setenv("VAICE_MCP_TIMEOUT", value)
+    try:
+        with pytest.raises(SystemExit, match="VAICE_MCP_TIMEOUT must be"):
+            importlib.reload(config)
+    finally:
+        monkeypatch.undo()
+        importlib.reload(config)

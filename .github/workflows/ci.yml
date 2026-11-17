@@ -19,6 +19,6 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
       # locked install from uv.lock; --locked fails the job when the lockfile is out of sync with pyproject.toml
-      - run: uv sync --locked --extra dev --python 3.12  # the one supported version
+      - run: uv sync --locked --extra dev --extra mcp --python 3.12  # the one supported version; mcp: its tests run
       - run: .venv/bin/ruff check src tests
       - run: .venv/bin/pytest -q

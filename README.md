@@ -141,6 +141,8 @@ Precedence: variables already in the environment (e.g. `set -a; source .env; set
 | `VAICE_VISION_MODEL` | *(empty)* | The `model` sent to the vision endpoint. Hosted endpoints need it (startup warns when it is empty); a `llama-server` serving one model does not |
 | `VAICE_VISION_API_KEY` | *(empty)* | Sent to the vision endpoint as `Authorization: Bearer …`. A secret: never logged, never in an error message. Put it in `.env` or the environment, not on a command line |
 | `VAICE_VISION_TIMEOUT` | `30` | Seconds the vision endpoint may take for one request (must be > 0) |
+| `VAICE_MCP_CONFIG` | *(empty: no MCP tools)* | Assistant mode only: path to a JSON file naming MCP servers to start and the tools to offer from them (see *MCP tools* below; `~` is expanded). Needs the optional extra: `uv sync --extra mcp`. Ignored in chat mode (one warning). **Each server is a program vaice starts with your permissions, and what its tools receive and return goes to the brain** |
+| `VAICE_MCP_TIMEOUT` | `30` | Seconds a server may take to start and, separately, to answer one tool call (must be > 0) |
 | `VAICE_LLAMACPP_PROMPT` | `Reply naturally and concisely in 1 to 2 spoken sentences.` | Reply instructions; `vaice` prepends `Respond with interleaved text and audio.` |
 | `VAICE_LLAMACPP_TIMEOUT` | `120` | Seconds to open a connection or the longest silence from `llama-server` before a reply fails. It is also the total bound for a tool call: when it passes — or the reply is stopped — vaice stops waiting for the call and discards the result (the underlying request is not cancelled; the server may still run/finish the tool). The parallel transcription session's silence budget is this setting too, but its connection **handshake** uses a fixed 2 s (transcription is best-effort and degrades to `(inaudible)`), so raising this cannot extend a slow-handshake server |
 | `VAICE_LLAMACPP_MAX_OUTPUT_TOKENS` | `1024` | Reply cap sent as the realtime session's `max_output_tokens`; text tokens and audio frames count together. Raise it for longer spoken replies |
@@ -445,6 +447,62 @@ VAICE_MODE=assistant VAICE_VISION_URL=http://127.0.0.1:8002/v1 .venv/bin/vaice
   Not verified: a hosted vision provider, and the real capture on a machine with the permission granted (the unit
   tests fake `screencapture`, `sips` and the endpoint).
 
+### MCP tools
+`VAICE_MCP_CONFIG` (assistant mode, off by default) lets the assistant use tools from [MCP](https://modelcontextprotocol.io)
+servers: vaice starts each server you list, offers the tools you name as skills called `<server>__<tool>`, and runs a
+call when the brain asks for one, subject to the approval policy you gave that tool. It needs the optional extra
+(`uv sync --extra mcp`); with the setting on and the package missing, vaice exits with that command.
+
+The file has Claude Desktop's `mcpServers` shape, **stdio servers only** (`command`, `args`, optional `env` and
+`cwd`), plus one key of vaice's own, `tools`:
+
+```json
+{
+  "mcpServers": {
+    "notes": {
+      "command": "uvx",
+      "args": ["some-notes-mcp"],
+      "env": {"NOTES_DIR": "~/Notes"},
+      "tools": {"search_notes": "run", "add_note": "voice", "delete_note": "click"}
+    }
+  }
+}
+```
+
+```bash
+uv sync --extra mcp
+VAICE_MODE=assistant VAICE_MCP_CONFIG=~/.vaice/mcp.json .venv/bin/vaice
+```
+
+- **Only the tools you list are offered.** A server can offer anything, and vaice cannot tell what a tool does, so
+  an unlisted tool does not exist for the assistant (startup logs the names of the ones left out; a listed tool the
+  server does not offer is a warning). A server's own annotations (`readOnlyHint` and the like) are claims, not facts,
+  and change nothing.
+- **Approval is a per-tool policy.** `"run"` runs at once, like the read skills; `"voice"` asks first and a spoken
+  yes or the **Run** button approves; `"click"` asks first and only the **Run** button approves (a spoken yes is
+  answered with a note and the request stays pending). **`click` is the default**, and a plain list
+  (`"tools": ["search_notes"]`) means all click: a tool you did not think about gets the strictest treatment, and
+  you loosen it tool by tool. A tool that reads and cannot be turned against you is a fair `run`; anything that
+  writes, sends, deletes or spends is not.
+- **The question names the tool and the server, never the arguments** (they come from the model and can be long or
+  misleading); the panel shows the exact call, as for `run_shell`.
+- **What a server sends is untrusted.** A tool's description (which the brain reads) is cleaned to one line, capped
+  at 300 characters and prefixed `(from <server>)`; a result reaches the brain only as a tool result, is spoken up
+  to 2000 characters (`(more on screen)` after that) and kept whole in the *Tool activity* detail; and `remember`
+  refuses once such a skill has run in the reply, so a result cannot become a lasting note. None of this makes a
+  malicious server safe: only list servers you would run anyway.
+- **Startup.** One INFO line per server (`mcp server notes: 3 tools offered (...)`, names only). A server that does
+  not start within `VAICE_MCP_TIMEOUT` is skipped with a warning and the others load; a mistake in the file (bad
+  JSON, a `url` entry, a bad policy, two skills with the same name) exits with `vaice: VAICE_MCP_CONFIG: ...` naming
+  the server and the problem, never an `env` value. A server's stderr goes to `<VAICE_DATA_DIR>/mcp-<name>.log`
+  (mode 0600; a temporary directory when `VAICE_DATA_DIR` is empty). Servers are ended when vaice stops.
+- **Calls** stop on barge-in, *New conversation* (a click-approved one) and app stop, and end after
+  `VAICE_MCP_TIMEOUT`; a failure is spoken, not raised. A server that dies mid-session is not restarted: its tools
+  fail until you restart vaice.
+- Not supported: remote (`url`) servers, resources and prompts (tools only), and reconnecting.
+  Not verified: a real-world server other than the test fixture (`tests/fixtures/mcp_server.py`), and how well the
+  2B brain chooses among many MCP tools (no eval covers them); with the helper model off, keep the list short.
+
 ### Startup & Shutdown
 At startup, `vaice` checks `llama-server`:
 - An unreachable or still-loading server (HTTP 503) logs a warning and starts the UI anyway, so the server can finish loading before your first question.
@@ -478,6 +536,7 @@ At startup, `vaice` checks `llama-server`:
 - The transcript is retained **indefinitely**, until you click **New conversation** (which clears it) or delete the file while `vaice` is stopped. New conversation is the way to forget everything, including any embarrassing questions.
 - By default `vaice` talks to one server: the `llama-server` at `VAICE_LLAMACPP_URL` (local by default, e.g. `http://localhost:8001`) over HTTP and WebSocket. The microphone audio, the transcripts, the tool results and the model's replies go there; nothing else leaves the machine through `vaice`. The exceptions are opt-in: the screenshot of the [vision skill](#vision) (next bullet) and, with a [helper model](#helper-model) (`VAICE_BRAIN_URL`, assistant mode), a second server also receives the text of what you say, the earlier turns, the skills' results (file names, process names, the computer's name, shell command output) and, with memory on, the notes you asked the assistant to keep, but never audio, which stays with `llama-server`; if that endpoint is a hosted API, all of that leaves your machine (startup warns). The model's tools run on that server with *its* permissions; in assistant mode the skills run in vaice with *vaice's* permissions, and with `VAICE_ASSISTANT_SHELL` on that includes any shell command you approve, with the same access to your files as you have, and its output goes to the model and into the conversation file. If you point `VAICE_LLAMACPP_URL` at a remote host, your audio and conversation go there instead.
 - With the [vision skill](#vision) on (`VAICE_VISION_URL`, assistant mode), a screenshot of your **main display** is taken **only when the skill runs** (you asked about your screen), sent to the vision endpoint with your question, and deleted from this Mac right after (a private temporary file, never stored by vaice, never logged). The screen can show anything: mail, messages, passwords in a visible window. If the endpoint is on another machine or a hosted API, that image leaves your machine (startup warns). The vision model's answer is stored in the conversation file like any skill result (up to 800 characters in the *Tool activity* record), and a remote helper brain receives it as a skill result too.
+- With [MCP tools](#mcp-tools) on (`VAICE_MCP_CONFIG`, assistant mode), vaice starts the servers you list as programs with **your** permissions and the `env` you give them, and the arguments the brain chooses (from what you said) go to them. A tool's result reaches the brain, is stored in the conversation file like any skill result (up to 800 characters in the *Tool activity* record), and goes to a hosted helper brain too. What a server does with your data is up to that server (an `npx` or `uvx` package fetches and runs code), so list only servers you trust. The `env` values in the file are never logged; the file itself is plain text, so keep it private.
 - In assistant mode the notes you ask it to remember are kept in `~/.vaice/memory.json` (mode **0600**, same atomic write), **indefinitely**, and are not cleared by *New conversation*: say "forget everything", delete the file while `vaice` is stopped, or turn `VAICE_ASSISTANT_MEMORY` off (the default; then the file is neither read nor written). Every reply's prompt carries the notes, so a hosted helper model receives them (startup warns).
 - Set `VAICE_DATA_DIR=""` to keep the conversation and the notes **in memory only**: nothing is read from or written to disk, and history disappears when the app stops. Persistence can also be limited with `VAICE_HISTORY_TURNS` (the prompt window), which trims context but keeps the file — set `VAICE_DATA_DIR=""` if the file itself is the concern.
 
@@ -504,7 +563,7 @@ At startup, `vaice` checks `llama-server`:
 ## Setup & Dependency Updates
 
 ```bash
-uv sync --extra dev      # creates .venv from uv.lock: the exact versions CI tests
+uv sync --extra dev      # creates .venv from uv.lock: the exact versions CI tests (add --extra mcp for the MCP tools and their tests)
 ```
 
 `uv sync` installs from the committed `uv.lock`, so every developer and CI run gets the same dependency versions (`.python-version` selects Python 3.12). A plain `uv pip install -e ".[dev]"` or `pip install -e ".[dev]"` also works and resolves against the version bounds in `pyproject.toml`.
@@ -529,7 +588,7 @@ Known compatibility bounds in `pyproject.toml`:
 .venv/bin/ruff check src tests evals                     # run linter
 ```
 
-CI (`.github/workflows/ci.yml`) runs Ruff and `pytest --cov=vaice` with `uv sync --locked` on Python 3.12 on macOS for every push to `main` and every pull request; a newer push to a pull request cancels the older run.
+CI (`.github/workflows/ci.yml`) runs Ruff and `pytest --cov=vaice` with `uv sync --locked --extra dev --extra mcp` on Python 3.12 on macOS for every push to `main` and every pull request; a newer push to a pull request cancels the older run.
 
 The unit tests never touch a real model. To measure how reliably spoken commands turn into the right tool call (with repeats, on both the interleaved and a transcribe-then-route path), run the live eval in [`evals/`](evals/README.md) against a real `llama-server`: `.venv/bin/python evals/run.py`. It is run by hand, not in CI.
 
@@ -549,6 +608,7 @@ src/vaice/
   skills.py         Assistant mode: the skills (read-only answers, plus open/quit app, volume, mute) and the Skills registry
   vision.py         Assistant mode, opt-in: the look_at_screen skill (one screenshot via screencapture + sips, asked of a vision model)
   memory.py         Assistant mode: long-term notes (Memory, kept in memory.json) and the remember / forget / forget_everything skills
+  mcp_skills.py     Assistant mode, opt-in (the `mcp` extra): MCP servers over stdio as skills, with a per-tool approval policy
   confirm.py        Assistant mode: the one pending request of a confirm skill, the spoken yes/no test and its 60 s expiry
   shell.py          Assistant mode, opt-in: the run_shell skill: how a command may be approved, and the runner (timeout, output cap, process group)
   voice.py          Assistant mode: speakable() cleans text for speech, sentences() splits it for /tts

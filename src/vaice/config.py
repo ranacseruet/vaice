@@ -205,6 +205,17 @@ VISION_TIMEOUT = _number("VAICE_VISION_TIMEOUT", default="30", kind=float)
 if VISION_TIMEOUT <= 0:
     raise SystemExit("vaice: VAICE_VISION_TIMEOUT must be > 0")
 
+# Assistant mode only: MCP (Model Context Protocol) tools as skills (mcp_skills.py). A JSON file in Claude Desktop's
+# `mcpServers` shape names the stdio servers to start and, per server, the tools to offer and how each is approved
+# (`run`, `voice` or `click`; click by default). Unset = no MCP, and the optional `mcp` package is never imported.
+# Needs `uv sync --extra mcp`. The file may hold tokens (a server's `env`): vaice never logs them. Each tool call
+# may take at most MCP_TIMEOUT seconds; a server must also start within it.
+_MCP_CONFIG = _env("VAICE_MCP_CONFIG", default="").strip()
+MCP_CONFIG = Path(_MCP_CONFIG).expanduser() if _MCP_CONFIG else None
+MCP_TIMEOUT = _number("VAICE_MCP_TIMEOUT", default="30", kind=float)
+if not MCP_TIMEOUT > 0:
+    raise SystemExit("vaice: VAICE_MCP_TIMEOUT must be > 0")
+
 PORT = _number("VAICE_PORT", default="7860", kind=int)
 
 # The conversation is kept here between runs; the last HISTORY_TURNS exchanges go into each prompt.
