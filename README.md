@@ -130,6 +130,7 @@ Precedence: variables already in the environment (e.g. `set -a; source .env; set
 | `VAICE_MODE` | `chat` | `chat` = speech-to-speech replies from the model; `assistant` = transcribe, a brain that can call vaice's own skills, then `/tts` (see *Assistant mode* below). Anything else exits at startup |
 | `VAICE_ASSISTANT_PROMPT` | `You are a voice assistant on the user's Mac. …` (answer in one or two short spoken sentences, use a tool only for questions about this computer) | Assistant mode only: the brain's system prompt (the current date and time is added) |
 | `VAICE_ASSISTANT_SHELL` | `false` | Assistant mode only: adds the `run_shell` skill, which proposes a shell command that runs only after you approve it (see *Shell commands* below). Off: the skill does not exist. A boolean: `1/true/yes/on` or `0/false/no/off` |
+| `VAICE_ASSISTANT_PROGRESS_SECONDS` | `2.5` | Assistant mode only: seconds without an answer before the assistant says "One moment." (then "Still working." every 12 s) until the answer starts; `0` turns spoken progress off. On speakers the microphone may hear it as an interruption (see *Assistant mode* below) |
 | `VAICE_VOICE` | `female` | Assistant mode only: the `/tts` voice, `female` or `male` |
 | `VAICE_BRAIN_URL` | *(empty: the local `llama-server` is the brain)* | Assistant mode only: an optional helper model, any OpenAI-compatible endpoint, as the **base URL OpenAI clients take, `/v1` included** (e.g. `http://localhost:1234/v1`, `https://api.openai.com/v1`); vaice posts to `<base>/chat/completions`. A URL that already ends in `/chat/completions`, or that holds credentials, a query or a fragment, exits at startup. Ignored in chat mode (one warning). What it receives: see *Helper model* below |
 | `VAICE_BRAIN_MODEL` | *(empty)* | The `model` sent to the helper. Most hosted endpoints require it: with a helper URL and no model, vaice warns at startup and goes on |
@@ -224,6 +225,15 @@ assistant can answer questions about your Mac from real data:
 4. the answer is cleaned for speech (markdown, links, paths and units become words), split into
    sentences, and each sentence is spoken through llama-server's `POST /tts` (`pcm16`, streamed;
    `VAICE_VOICE=female|male`).
+
+**Spoken progress.** A slow decision (a helper model can take several seconds, a command you approved up
+to 30) would be silence. When the answer has not started `VAICE_ASSISTANT_PROGRESS_SECONDS` (default 2.5)
+after your question was transcribed, the assistant says "One moment." and, if it still goes on, "Still
+working." every 12 seconds until the answer starts. A fast answer gets no filler, an unheard question
+(`Sorry, I didn't catch that.`) none, and the filler is never part of the conversation history. Set the
+variable to `0` to turn it off. On speakers the microphone can pick the filler up and treat it as you
+interrupting (the same echo problem as in #36), which cancels the reply in flight: use headphones or
+turn the progress off. This has not been tried on speakers.
 
 The skills run on your machine with vaice's own permissions, not through llama-server (its `--tools` and
 `VAICE_LLAMACPP_TOOLS` are unused in this mode and vaice warns if the latter is set). They never go through

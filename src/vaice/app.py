@@ -115,6 +115,8 @@ def make_handler(responder: Responder, conversation: Conversation):
                 if first:
                     log.info("[%s] time to first audio: %.2fs", responder.name, time.perf_counter() - start)
                     first = False
+                # Assistant mode's spoken progress ("One moment.") is handed out here too, though it is not part of
+                # the recorded reply: a barge-in then trims the text a little less than it should.
                 turn.audio_handed_out(len(chunk[1]) / chunk[0])
                 yield chunk
             log.info("[%s] reply finished in %.2fs", responder.name, time.perf_counter() - start)
