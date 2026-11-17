@@ -1,5 +1,7 @@
 """The assistant path: transcribe, brain, skills, /tts — against fakes (no server, no machine commands)."""
+import json
 import logging
+import subprocess
 import threading
 import time
 from types import SimpleNamespace
@@ -8,7 +10,7 @@ import numpy as np
 import pytest
 from threads import next_on_fresh_thread, start_thread
 
-from vaice import lifecycle
+from vaice import lifecycle, shell
 from vaice.audio import from_pcm16
 from vaice.brain import BrainReply, ToolCall
 from vaice.confirm import CONFIRM_SECONDS, Confirmations, Pending
@@ -1136,3 +1138,230 @@ def test_a_follow_up_after_a_spoken_yes_sees_the_result_on_the_yes_turn(tts, hea
 
     assert history[-3:] == [("user", "yes"), ("tool", "quit_app: quit Safari"),
                             ("assistant", "Safari is closed now.")]
+
+
+# --- shell commands: two approval levels (see shell.py)
+
+PWD = ("run_shell", json.dumps({"command": "pwd"}))  # harmless by form: a spoken yes may approve it
+PIPE = ("run_shell", json.dumps({"command": "echo hi | tr a-z A-Z"}))  # needs zsh: only the button
+SLEEP = ("run_shell", json.dumps({"command": "sleep 30"}))
+
+
+@pytest.fixture
+def home(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    return tmp_path
+
+
+@pytest.fixture
+def popen_log(monkeypatch):
+    """The argv lists subprocess.Popen was given (the real Popen still runs them)."""
+    started = []
+    real = subprocess.Popen
+    monkeypatch.setattr(shell.subprocess, "Popen", lambda argv, **kw: started.append(argv) or real(argv, **kw))
+    return started
+
+
+def shelling(*replies):
+    brain = FakeBrain(*replies)
+    confirmations = Confirmations(Clock())
+    resp = AssistantResponder("http://server", 5.0, "Be brief.", "female", Skills([shell.shell_skill()]), brain,
+                              confirmations)
+    return SimpleNamespace(resp=resp, brain=brain, confirmations=confirmations)
+
+
+def shell_asked(request, *more):
+    s = shelling(ask(request), *more)
+    s.turn = Turn()
+    drive(s.resp, turn=s.turn)
+    return s
+
+
+def test_a_harmless_command_is_asked_by_voice_and_a_spoken_yes_runs_its_argv_without_a_shell(
+        tts, heard, home, popen_log):
+    s = shell_asked(PWD, answer("You are in your home folder."))
+    pending = s.resp.pending()
+    assert pending.voice and pending.question == "Shall I run the command pwd? The full command is on the screen."
+    assert popen_log == []  # nothing runs when the model asks
+    heard.text = "yes"
+    turn = Turn()
+
+    drive(s.resp, turn=turn)
+
+    assert popen_log == [["pwd"]]
+    messages, tools = s.brain.calls[1]
+    assert tools is None
+    assert messages[-1] == {"role": "tool", "tool_call_id": "call_0",
+                            "content": f"the command finished. Output: {home.resolve()}"}
+    assert turn.assistant_text == "You are in your home folder."
+    assert s.resp.pending() is None
+
+
+def test_a_command_that_needs_the_button_is_not_approved_by_a_spoken_yes_and_stays_pending(
+        tts, heard, home, popen_log):
+    s = shell_asked(PIPE)
+    pending = s.resp.pending()
+    assert not pending.voice and pending.question == shell.ASK_CLICK
+    heard.text = "Yes, go ahead!"
+    turn = Turn()
+
+    drive(s.resp, turn=turn)
+
+    assert popen_log == []
+    assert len(s.brain.calls) == 1  # the yes was not a question for the brain either
+    spoken = [b["input"] for b in tts.bodies]  # one request per sentence
+    assert " ".join(spoken[:-1]) == shell.ASK_CLICK and spoken[-1] == shell.NEEDS_BUTTON
+    assert turn.assistant_text == shell.NEEDS_BUTTON
+    assert s.resp.pending() is pending and pending.armed_at is not None  # still there, still answerable
+    assert tool_events(s.turn) == [("run_shell", "waiting for confirmation")]
+    assert turn.tool_events == []
+
+
+def test_a_click_then_approves_the_command_that_survived_the_yes(tts, heard, home, popen_log):
+    s = shell_asked(PIPE)
+    heard.text = "yes"
+    drive(s.resp)
+    pending = s.resp.pending()
+
+    assert s.resp.approve(pending.id) == "the command finished. Output: HI"
+
+    assert popen_log == [["/bin/zsh", "-c", "echo hi | tr a-z A-Z"]]
+    events = tool_events(s.turn)
+    assert events[0] == ("run_shell", "waiting for confirmation")
+    assert events[1][1] == "$ echo hi | tr a-z A-Z\n(the command finished)\nHI"
+    assert s.resp.pending() is None and len(s.brain.calls) == 1
+
+
+@pytest.mark.parametrize("utterance", ["No.", "cancel that"])
+def test_a_no_still_cancels_a_command_that_needs_the_button(tts, heard, home, popen_log, utterance):
+    s = shell_asked(PIPE)
+    heard.text = utterance
+    turn = Turn()
+
+    drive(s.resp, turn=turn)
+
+    assert popen_log == [] and turn.assistant_text == "Okay, I won't."
+    assert tool_events(turn) == [("run_shell", "cancelled")]
+    assert s.resp.pending() is None
+
+
+def test_anything_else_still_drops_a_command_that_needs_the_button(tts, heard, home, popen_log):
+    s = shell_asked(PIPE, answer("It is sunny."))
+    heard.text = "What's the weather like?"
+
+    drive(s.resp)
+
+    assert popen_log == [] and s.resp.pending() is None
+    assert tool_events(s.turn) == [("run_shell", "waiting for confirmation"), ("run_shell", "not confirmed")]
+
+
+def test_a_yes_before_the_question_was_fully_spoken_drops_a_command_that_needs_the_button(tts, heard, home):
+    s = shelling(answer("Okay."))
+    request = Pending("run_shell", PIPE[1], shell.ASK_CLICK, "call_0", [], Turn(), voice=False)
+    s.confirmations.ask(request)  # asked, never armed
+    heard.text = "yes"
+
+    drive(s.resp)
+
+    assert s.resp.pending() is None and tool_events(request.turn) == [("run_shell", "not confirmed")]
+
+
+def test_a_click_that_wins_the_race_with_a_yes_leaves_a_question_not_an_approval():
+    brain = FakeBrain(answer("Okay, that is done."))
+    request = Pending("run_shell", PWD[1], "Shall I run the command pwd?", "call_0", [], Turn(), armed_at=1.0)
+
+    class Raced(Confirmations):
+        def current(self):
+            return request
+
+        def take(self, pending_id=None):
+            return None  # the button took it between the peek and the take
+
+    turn = Turn()
+    decision = assistant._decision("Be brief.", [], "yes", Skills([shell.shell_skill()]), brain, Raced(), turn,
+                                   lambda: False)
+
+    assert decision.answer == "Okay, that is done."  # an ordinary question: no approval, no event
+    assert turn.tool_events == [] and request.turn.tool_events == []
+
+
+def test_the_pending_request_carries_how_it_may_be_approved(tts, home):
+    assert shell_asked(PWD).resp.pending().voice is True
+    assert shell_asked(PIPE).resp.pending().voice is False
+
+
+def test_barge_in_during_a_voice_approved_command_stops_it_and_the_brain_is_not_asked_again(
+        tts, heard, home, monkeypatch):
+    monkeypatch.setattr(shell, "SAFE_PROGRAMS", frozenset({"sleep"}))  # `sleep 30` is harmless by form here
+    s = shell_asked(SLEEP)
+    assert s.resp.pending().voice
+    heard.text = "yes"
+    turn = Turn()
+    reply = start_thread(lambda: drive(s.resp, turn=turn), "reply")
+    wait_until(lambda: shell._live)  # the command is running
+
+    turn.close()  # the user talked over it
+
+    assert reply.join() == []  # no audio for a reply that was cut off
+    wait_until(lambda: not shell._live)
+    wait_until(lambda: turn.tool_events)
+    assert turn.tool_events[0]["output"].startswith("$ sleep 30\n(the command was stopped)")
+    assert len(s.brain.calls) == 1
+
+
+def test_the_app_stopping_stops_a_voice_approved_command(tts, heard, home, monkeypatch):
+    monkeypatch.setattr(shell, "SAFE_PROGRAMS", frozenset({"sleep"}))
+    s = shell_asked(SLEEP)
+    heard.text = "yes"
+    reply = start_thread(lambda: drive(s.resp), "reply")
+    wait_until(lambda: shell._live)
+
+    lifecycle.stopping.set()
+
+    reply.join()
+    wait_until(lambda: not shell._live)
+    assert len(s.brain.calls) == 1
+
+
+def test_new_conversation_stops_a_command_a_click_started(tts, home):
+    s = shell_asked(SLEEP)
+    running = start_thread(lambda: s.resp.approve(s.resp.pending().id), "click")
+    wait_until(lambda: shell._live)
+
+    s.resp.clear_pending()
+
+    assert running.join() == "the command was stopped"
+    assert s.resp._runs == set()
+    assert tool_events(s.turn)[-1][1].startswith("$ sleep 30\n(the command was stopped)")
+
+
+def test_the_app_stopping_stops_a_command_a_click_started(tts, home):
+    s = shell_asked(SLEEP)
+    running = start_thread(lambda: s.resp.approve(s.resp.pending().id), "click")
+    wait_until(lambda: shell._live)
+
+    lifecycle.stopping.set()
+
+    assert running.join() == "the command was stopped"
+
+
+def test_a_new_conversation_between_the_click_and_the_run_stops_the_run_before_it_starts(tts, home, monkeypatch):
+    s = shell_asked(SLEEP)
+    pending = s.resp.pending()
+    real_take = s.confirmations.take
+
+    def take_then_clear(pending_id=None):
+        taken = real_take(pending_id)
+        s.resp.clear_pending()  # "New conversation" lands right after the click took the request
+        return taken
+
+    monkeypatch.setattr(s.confirmations, "take", take_then_clear)
+
+    assert s.resp.approve(pending.id) == "the command was stopped"
+
+
+def test_the_default_skills_have_run_shell_only_when_the_setting_is_on(monkeypatch):
+    monkeypatch.setattr(assistant.config, "ASSISTANT_SHELL", False)
+    assert "run_shell" not in AssistantResponder("http://server").skills.names
+    monkeypatch.setattr(assistant.config, "ASSISTANT_SHELL", True)
+    assert "run_shell" in AssistantResponder("http://server").skills.names

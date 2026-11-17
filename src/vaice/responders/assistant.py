@@ -28,6 +28,7 @@ from vaice.confirm import Confirmations, Pending, spoken_answer
 from vaice.conversation import Message, Turn
 from vaice.responders.base import AudioFrame
 from vaice.responders.llamacpp import ABANDONED, _clock_line, _MarkupStripper, _Stopped, _transcribe
+from vaice.shell import NEEDS_BUTTON
 from vaice.skills import Question, SkillResult, Skills, default_skills
 
 log = logging.getLogger(__name__)
@@ -143,7 +144,8 @@ def decide(brain: ChatBrain, skills: Skills, messages: list[dict], stop: Callabl
                                 len(reply.calls) - index - 1, call.name)
                     kept = messages[asking].get("tool_calls") or []
                     messages[asking] = {**messages[asking], "tool_calls": kept[: index + 1]}
-                decision.pending = Pending(call.name, call.arguments, prepared.text, call.id, messages, turn)
+                decision.pending = Pending(call.name, call.arguments, prepared.text, call.id, messages, turn,
+                                           voice=prepared.voice)
                 decision.answer = prepared.text
                 return decision
             result = prepared if prepared is not None else skills.run(call.name, call.arguments)
@@ -208,8 +210,10 @@ def _approved(pending: Pending, skills: Skills, brain: ChatBrain, turn: Turn, st
     if stop():
         raise _Stopped
     log.info("assistant skill %s(%s) approved by voice", pending.name, pending.arguments)
-    result = skills.run(pending.name, pending.arguments)
+    result = skills.run(pending.name, pending.arguments, stop)  # a barge-in or the app ending stops a command
     turn.add_tool_event(pending.name, pending.arguments, result.detail or result.speech)
+    if stop():
+        raise _Stopped
     messages = [*pending.messages, {"role": "tool", "tool_call_id": pending.call_id, "content": result.speech}]
     started = time.perf_counter()
     reply = brain.complete(messages, None)
@@ -221,8 +225,13 @@ def _decision(prompt: str, history: Sequence[Message], transcript: str, skills: 
               confirmations: Confirmations, turn: Turn, stop: Callable[[], bool]) -> Decision:
     """What to say to `transcript`. A request waiting for confirmation is settled first, and only by the
     exact words of `spoken_answer`: yes runs it (that utterance is no question for the brain), no cancels
-    it, anything else drops it and is an ordinary question."""
-    pending = confirmations.take()
+    it, anything else drops it and is an ordinary question. A request that is not `voice` (a shell command
+    that is not provably harmless) survives a yes: it is told to use the button, and stays pending."""
+    pending = confirmations.current()
+    if pending is not None:
+        if not pending.voice and pending.armed_at is not None and spoken_answer(transcript) == "yes":
+            return Decision(NEEDS_BUTTON)
+        pending = confirmations.take(pending.id)  # atomic: a click that came in meanwhile wins, this is then a question
     if pending is not None:
         answer = spoken_answer(transcript) if pending.armed_at is not None else None
         if answer == "yes":
@@ -310,9 +319,11 @@ class AssistantResponder:
         self._timeout = timeout
         self._prompt = prompt
         self._voice = voice
-        self.skills = skills or default_skills()
+        self.skills = skills or default_skills(shell=config.ASSISTANT_SHELL)
         self._brain = brain or ChatBrain(url, timeout)
         self._confirmations = Confirmations() if confirmations is None else confirmations
+        self._runs: set[threading.Event] = set()  # per click-approved run: set by `clear_pending` to stop it
+        self._runs_lock = threading.Lock()
 
     # The UI's side of a confirmation (see Responder). These run on the caller's thread (a Gradio worker),
     # not on a reply's: there is no reply in flight to carry audio, so nothing is spoken on this path; the
@@ -323,11 +334,23 @@ class AssistantResponder:
         return self._confirmations.current()
 
     def approve(self, pending_id: str) -> str | None:
-        """Run the request `pending_id` names, if it is still the current one; its result text, else None."""
-        pending = self._confirmations.take(pending_id)
-        if pending is None:
-            return None
-        result = self.skills.run(pending.name, pending.arguments)
+        """Run the request `pending_id` names, if it is still the current one; its result text, else None.
+
+        A skill that can be stopped (a shell command) runs for as long as it takes on this thread, which is a
+        Gradio worker's: "New conversation" (`clear_pending`) or the app ending stops it; otherwise only the
+        skill's own time limit does."""
+        cancel = threading.Event()
+        with self._runs_lock:  # before `take`, so a "New conversation" in between cannot miss this run
+            self._runs.add(cancel)
+        try:
+            pending = self._confirmations.take(pending_id)
+            if pending is None:
+                return None
+            result = self.skills.run(pending.name, pending.arguments,
+                                     lambda: cancel.is_set() or lifecycle.stopping.is_set())
+        finally:
+            with self._runs_lock:
+                self._runs.discard(cancel)
         pending.turn.add_tool_event(pending.name, pending.arguments, result.detail or result.speech)
         return result.speech
 
@@ -337,8 +360,12 @@ class AssistantResponder:
             pending.turn.add_tool_event(pending.name, pending.arguments, "cancelled")
 
     def clear_pending(self) -> None:
-        """"New conversation": a request from the old one must not be approvable."""
+        """"New conversation": a request from the old one must not be approvable, and a command a click
+        started for it stops."""
         self._confirmations.clear()
+        with self._runs_lock:
+            for cancel in self._runs:
+                cancel.set()
 
     def respond(self, audio: AudioFrame, history: Sequence[Message], turn: Turn) -> Iterator[AudioFrame]:
         chunks: queue.Queue = queue.Queue()

@@ -239,6 +239,23 @@ def test_the_mode_is_chat_unless_set_and_the_assistant_settings_have_defaults(mo
         importlib.reload(config)
 
 
+def test_shell_commands_are_off_unless_asked_for(monkeypatch):
+    monkeypatch.delenv("VAICE_ASSISTANT_SHELL", raising=False)
+    try:
+        assert importlib.reload(config).ASSISTANT_SHELL is False
+        for raw in ("1", "true", "on"):
+            monkeypatch.setenv("VAICE_ASSISTANT_SHELL", raw)
+            assert importlib.reload(config).ASSISTANT_SHELL is True
+        monkeypatch.setenv("VAICE_ASSISTANT_SHELL", "off")
+        assert importlib.reload(config).ASSISTANT_SHELL is False
+        monkeypatch.setenv("VAICE_ASSISTANT_SHELL", "maybe")
+        with pytest.raises(SystemExit, match="VAICE_ASSISTANT_SHELL must be a boolean"):
+            importlib.reload(config)
+    finally:
+        monkeypatch.undo()
+        importlib.reload(config)
+
+
 def test_the_assistant_settings_can_be_overridden(monkeypatch):
     monkeypatch.setenv("VAICE_MODE", "assistant")
     monkeypatch.setenv("VAICE_ASSISTANT_PROMPT", "Be terse.")

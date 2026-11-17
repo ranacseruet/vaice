@@ -21,6 +21,7 @@ from vaice.responders.assistant import AssistantResponder
 from vaice.responders.base import Responder
 from vaice.responders.llamacpp import LlamaCppResponder, check_server, fetch_tools, write_capable_tools
 from vaice.server import ensure_server
+from vaice.shell import RUN_SHELL
 
 log = logging.getLogger(__name__)
 
@@ -29,6 +30,7 @@ VIEW_REFRESH_SECONDS = 1.0  # how often the chatbot re-checks the conversation (
 ERROR_TEXT_LIMIT = 200  # characters of a failure shown in the UI; the traceback goes to the log
 CHATBOT_HEIGHT = 500  # pixels; the default (400) leaves the transcript cramped next to the mic
 UI_TITLE = "vaice"  # the heading above the mic
+BUTTON_ONLY = "Only the Run button can approve this one; saying yes will not."
 
 
 def _subtitle() -> str:
@@ -44,7 +46,8 @@ def pending_view(pending: Pending | None) -> dict | None:
     """What the confirmation panel shows of a waiting request (None: nothing waits)."""
     if pending is None:
         return None
-    return {"id": pending.id, "question": pending.question, "name": pending.name, "arguments": pending.arguments}
+    return {"id": pending.id, "question": pending.question, "name": pending.name, "arguments": pending.arguments,
+            "voice": pending.voice}
 
 
 def _fence(text: str) -> str:
@@ -52,15 +55,28 @@ def _fence(text: str) -> str:
     return "`" * max(3, max((len(run) for run in re.findall(r"`+", text)), default=0) + 1)
 
 
+def _shell_command(view: dict) -> str | None:
+    """The command line of a `run_shell` request, parsed as the skill parses it, so it is what will run."""
+    try:
+        command = json.loads(view["arguments"])["command"]
+    except (ValueError, KeyError, TypeError):
+        return None
+    return command if isinstance(command, str) else None
+
+
 def confirmation_panel(view: dict | None) -> tuple:
     """The confirmation panel's components for `pending_view`: its visibility, its text, the request's id.
 
-    The text holds the question and, in a code block, the skill and its arguments exactly as they will run."""
+    The text holds the question and, in a code block, the skill and its arguments exactly as they will run
+    (for a shell command the command line itself). A request a spoken yes cannot approve says so."""
     if view is None:
         return gr.update(visible=False), "", ""
-    command = f"{view['name']} {view['arguments']}".rstrip()
+    command = _shell_command(view) if view["name"] == RUN_SHELL else None
+    if command is None:
+        command = f"{view['name']} {view['arguments']}".rstrip()
     fence = _fence(command)
-    return gr.update(visible=True), f"{view['question']}\n\n{fence}\n{command}\n{fence}", view["id"]
+    only_button = "" if view.get("voice", True) else f"{BUTTON_ONLY}\n\n"
+    return gr.update(visible=True), f"{view['question']}\n\n{only_button}{fence}\n{command}\n{fence}", view["id"]
 
 
 def refresh_view(conversation: Conversation, known: str, pending: Callable[[], Pending | None] | None = None) -> tuple:
@@ -249,6 +265,10 @@ def main() -> None:
                 log.warning("VAICE_LLAMACPP_TOOLS is ignored in assistant mode: the skills run in vaice, "
                             "not on llama-server")
             responder = AssistantResponder()
+            if config.ASSISTANT_SHELL:
+                log.warning("VAICE_ASSISTANT_SHELL is on: after you approve it, a shell command the assistant "
+                            "proposes runs with vaice's own permissions (harmless ones by voice or click, "
+                            "all others only by the Run button)")
             log.info("assistant mode: skills %s", ", ".join(responder.skills.names))
         else:
             responder = _chat_responder()

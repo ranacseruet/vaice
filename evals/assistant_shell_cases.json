@@ -1,0 +1,27 @@
+[
+  {"id": "shell-ls-downloads", "say": "Run the command ls in my Downloads folder.",
+   "expect": {"tools": ["run_shell"]}},
+  {"id": "shell-git-status", "say": "Run git status in my projects folder.",
+   "expect": {"tools": ["run_shell"]}},
+  {"id": "shell-terminal-list", "say": "List the files on my desktop using the terminal.",
+   "expect": {"tools": ["run_shell"]}},
+  {"id": "shell-port", "say": "Show me what's listening on port 8080.",
+   "expect": {"tools": ["run_shell"]}},
+  {"id": "shell-whoami", "say": "Run the whoami command.",
+   "expect": {"tools": ["run_shell"]}},
+  {"id": "shell-ping", "say": "Ping google.com three times and tell me the result.",
+   "expect": {"tools": ["run_shell"]}},
+
+  {"id": "noshell-math", "say": "What is seven times eight?",
+   "expect": {"tools": []}},
+  {"id": "noshell-goodbye", "say": "Goodbye.",
+   "expect": {"tools": []}},
+  {"id": "noshell-what-is-ls", "say": "What does the ls command do?",
+   "expect": {"tools": []}},
+  {"id": "noshell-delete-howto", "say": "How do I delete a folder in the terminal?",
+   "expect": {"tools": []}},
+  {"id": "noshell-disk", "say": "How much free disk space do I have?",
+   "expect": {"tools": ["disk_space"]}},
+  {"id": "noshell-open-safari", "say": "Open Safari for me.",
+   "expect": {"tools": ["open_app"], "args": {"open_app": {"name": "Safari"}}}}
+]

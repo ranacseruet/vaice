@@ -1,8 +1,9 @@
 """Confirmation of a skill that cannot be undone, held by vaice and never decided by the model.
 
 When the brain asks for a `confirm` skill, the reply speaks a question and the request waits here. The
-user approves by saying one of `YES` as the whole utterance, or by clicking *Run* in the UI; anything else
-drops it. The model never sees or interprets the answer.
+user approves by saying one of `YES` as the whole utterance, or by clicking *Run* in the UI (a request that is
+not `voice`, such as a shell command, only by the click); anything else drops it. The model never sees or
+interprets the answer.
 """
 import re
 import threading
@@ -52,6 +53,7 @@ class Pending:
     turn: Turn  # the turn that asked
     id: str = field(default_factory=lambda: uuid.uuid4().hex)
     armed_at: float | None = None  # when the question was fully handed out; None until then
+    voice: bool = True  # whether a spoken yes may approve it; False: only the UI's Run button
 
 
 class Confirmations:

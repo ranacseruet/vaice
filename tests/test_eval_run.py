@@ -50,6 +50,41 @@ def test_the_stub_skills_offer_the_real_definitions_and_run_nothing(monkeypatch)
             assert speech == eval_run.ACTION_STUBS[skill.name](json.loads(arguments))
 
 
+def test_the_shell_skill_is_offered_only_with_the_flag_and_its_stub_never_runs_a_command(monkeypatch):
+    def boom(*_args, **_kwargs):
+        raise AssertionError("the stub started a process")
+
+    monkeypatch.setattr("subprocess.Popen", boom)
+    monkeypatch.setattr("subprocess.run", boom)
+
+    assert "run_shell" not in eval_run.stub_skills().names
+    assert eval_run.stub_skills(shell=False).definitions() == default_skills().definitions()
+    stubs = eval_run.stub_skills(shell=True)
+    assert stubs.definitions() == default_skills(shell=True).definitions()
+    assert stubs.names[-1] == "run_shell"
+    (skill,) = [s for s in stubs.skills if s.name == "run_shell"]
+    assert skill.run_stoppable is None  # the real runner cannot be reached
+
+    asked = stubs.prepare("run_shell", '{"command": "rm -rf /"}')
+    assert asked == Question("Shall I run run shell?")  # always asks, never looks at the command
+    assert stubs.run("run_shell", '{"command": "rm -rf /"}', lambda: False).speech == "the command finished. Output: ok"
+
+
+def test_the_shell_flag_is_off_by_default_and_asks_for_the_stub_skill():
+    assert eval_run.parse_args(["--paths", "assistant"]).shell is False
+    assert eval_run.parse_args(["--paths", "assistant", "--shell"]).shell is True
+
+
+def test_a_shell_request_is_counted_as_the_call_though_nothing_runs(monkeypatch):
+    monkeypatch.setattr(eval_run, "_transcribe", lambda url, timeout, audio: "Run ls in my Downloads folder.")
+    brain = FakeBrain(ask("run_shell", '{"command": "ls ~/Downloads"}'))
+
+    record = eval_run.run_assistant("http://x", "prompt", eval_run.stub_skills(shell=True), object(), [], brain=brain)
+
+    assert record["calls"] == [["run_shell", '{"command": "ls ~/Downloads"}']]
+    assert eval_run.scoring.score({"tools": ["run_shell"]}, [tuple(c) for c in record["calls"]])["verdict"] == "correct"
+
+
 def test_the_action_stubs_answer_from_their_own_arguments():
     stubs = eval_run.stub_skills()
 
