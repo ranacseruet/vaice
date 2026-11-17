@@ -55,8 +55,9 @@ class _Asked:
     spoken: bool
 _RATE = re.compile(r"\brate=(\d+)")
 # An answer that is only bracket-style pseudo tool calls, `[open_file(path='old_report.docx')]` (a helper model's
-# habit, seen live), possibly several in a row: spoken, it would read out a function call
-_PSEUDO_CALLS = re.compile(r"(?:\[\s*[A-Za-z_]\w*\s*\(.*?\)\s*\]\s*)+", re.DOTALL)
+# habit, seen live), possibly several in a row: spoken, it would read out a function call. The arguments never
+# cross a `]`, or `[a()] words [b()]` would match as one call and its words would be dropped
+_PSEUDO_CALLS = re.compile(r"(?:\[\s*[A-Za-z_]\w*\s*\([^\]]*?\)\s*\]\s*)+")
 
 
 def _spoken_text(text: str) -> str:

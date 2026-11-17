@@ -2057,6 +2057,7 @@ def test_an_answer_that_is_only_bracket_style_pseudo_calls_becomes_the_no_answer
     "[Note] Two is less than three.",
     "[open file] (path a.docx)",  # not an identifier followed by parentheses
     "[open_file(path='a.docx'",  # never closed
+    "[open_file(path='a.docx')] Your sister is Nadia. [disk_space()]",  # words between two calls
 ])
 def test_text_that_merely_has_brackets_is_spoken_as_written(caplog, written):
     with caplog.at_level(logging.WARNING, logger="vaice.responders.assistant"):
