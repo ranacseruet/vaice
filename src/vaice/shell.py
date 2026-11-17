@@ -277,8 +277,8 @@ def _run(args: dict, stop: Callable[[], bool]) -> SkillResult:
 def shell_skill() -> Skill:
     return Skill(
         RUN_SHELL,
-        "Run a shell command on this Mac, only when the user asks to run a command or no other skill fits a "
-        "request about this computer. The user must approve it first.",
+        "Run a command in the terminal of this Mac. Only when the user says to run a command or to use the "
+        "terminal. The user must approve it first.",
         {"type": "object",
          "properties": {"command": {"type": "string", "description": "The exact command line to run."}},
          "required": ["command"]},
