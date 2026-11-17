@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from vaice import app, mcp_skills
+from vaice import app, config, mcp_skills
 from vaice.brain import BrainReply, ToolCall
 from vaice.confirm import NO, YES, Pending
 from vaice.conversation import Turn
@@ -370,10 +370,13 @@ def books_config(tmp_path, tools=None, env=None, name="books"):
 
 @pytest.fixture(scope="module")
 def books(sdk, tmp_path_factory):
-    """One started fixture server for the tests that only call it."""
-    tools = mcp_skills.start(books_config(tmp_path_factory.mktemp("books")), 5.0)
-    yield tools
-    tools.close()
+    """One started fixture server for the tests that only call it. Module-scoped, so conftest's per-test data
+    directory is not in place yet: it gets its own, or its stderr log would land in the real ~/.vaice."""
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(config, "DATA_DIR", tmp_path_factory.mktemp("data"))
+        tools = mcp_skills.start(books_config(tmp_path_factory.mktemp("books")), 5.0)
+        yield tools
+        tools.close()
 
 
 def call(mcp, name, arguments="{}", stop=None):
