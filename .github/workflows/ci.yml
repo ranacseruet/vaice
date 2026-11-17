@@ -4,6 +4,9 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Run by hand (Actions > CI > Run workflow, or `gh workflow run ci.yml --ref main`) when GitHub drops an event:
+  # #104's merge hit a 502 and landed on main with no push run.
+  workflow_dispatch:
 
 # A newer push to the same PR cancels the run still queued or running for the older one, so superseded runs do not
 # compete for macOS runners (#91). Pushes to main get a group per commit and are never cancelled.
