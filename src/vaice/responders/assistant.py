@@ -269,6 +269,8 @@ def _work(url: str, timeout: float, prompt: str, voice_name: str, skills: Skills
         if transcript:
             decision = _decision(prompt, history, transcript, skills, brain, confirmations, turn, stop)
         else:
+            # Nothing was understood (noise, a cough): a waiting confirmation is left alone on purpose. The
+            # user still has to answer it with a whole-utterance yes, and a cough must not cancel their request.
             decision = Decision(NOT_HEARD)
         pending = decision.pending
         if pending is not None:  # on the screen at once; answerable by voice only once the question was spoken

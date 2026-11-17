@@ -259,6 +259,8 @@ name that is not running is refused, nothing is asked), and the request waits in
   the outcome shows in *Tool activity* and in later prompts. A panel left on screen cannot approve a newer
   request: the buttons pass the id of the request they showed.
 - A request expires 60 seconds after its question was spoken, and *New conversation* drops it.
+- An utterance that could not be understood at all (noise, a cough: "Sorry, I didn't catch that.") leaves
+  the request waiting; the next understood utterance settles it.
 - A bare "yes" can be too short for the pause detection to notice as speech (seen with synthetic speech
   through the browser: "Yes." started no turn, "Go ahead." did; #95). Prefer "go ahead" or "yes please".
 

@@ -1030,6 +1030,20 @@ def test_a_yes_cannot_approve_a_request_whose_question_was_not_fully_out(tts, he
     assert tool_events(request.turn) == [("quit_app", "not confirmed")]
 
 
+def test_an_utterance_that_was_not_understood_leaves_the_request_waiting(tts, heard):
+    s = asked(answer("Safari is closed."))
+    waiting = s.resp.pending()
+
+    heard.text = ""  # noise, a cough
+    drive(s.resp, turn=Turn())
+    assert s.resp.pending() is waiting and s.ran == []
+    assert tts.bodies[-1]["input"] == assistant.NOT_HEARD
+
+    heard.text = "Go ahead."
+    drive(s.resp, turn=Turn())
+    assert s.ran == [{"name": "Safari"}]
+
+
 def test_a_request_expires_a_minute_after_its_question_was_spoken(tts, heard):
     clock = Clock()
     s = asked(answer("I am not sure what you mean."), clock=clock)
