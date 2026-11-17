@@ -1,7 +1,7 @@
 # vaice
 
 [![CI](https://github.com/ranacseruet/vaice/actions/workflows/ci.yml/badge.svg)](https://github.com/ranacseruet/vaice/actions/workflows/ci.yml)
-[![Python 3.10–3.12](https://img.shields.io/badge/python-3.10%E2%80%933.12-blue.svg)](https://www.python.org/downloads/)
+[![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 Talk to a local model and hear it answer; the spoken reply streams back as it is generated.
@@ -96,7 +96,7 @@ llama-server -hf LiquidAI/LFM3-Audio-2B-GGUF:Q4_K_M --temp 0 --port 8001
 
 ## Requirements & Compatibility
 
-- **Python 3.10–3.12** (tested in CI on macOS; dependencies also resolve on 3.13 and 3.14, but runtime behavior is not validated there).
+- **Python 3.12** (tested in CI on macOS; `uv sync` downloads it when it is missing; dependencies also resolve on 3.13 and 3.14, but runtime behavior is not validated there).
 - **[uv](https://docs.astral.sh/uv/)** for reproducible dependency management (`uv sync` installs the exact versions from `uv.lock`).
 - **llama.cpp `llama-server` b11960+** running a model with audio output.
   - **Only llama.cpp `llama-server` is supported and tested.** `vaice` speaks its `/v1/realtime` WebSocket protocol and checks `/health` and `/v1/models` at startup to verify that the loaded model advertises audio output (`output_modalities` includes `"audio"`). It also reads `/props` and warns when the server's text sampling temperature is above 0 (the LFM3-Audio model card recommends `--temp 0`); when `/props` reports no params or the read fails, `vaice` logs a distinct hint instead of staying silent, so a missing warning is never mistaken for `--temp 0` being set. Other servers (Ollama, LM Studio, oMLX, …) will not work.
@@ -473,7 +473,7 @@ At startup, `vaice` checks `llama-server`:
 uv sync --extra dev      # creates .venv from uv.lock: the exact versions CI tests
 ```
 
-`uv sync` installs from the committed `uv.lock`, so every developer and CI run gets the same dependency versions (`.python-version` selects Python 3.12; pass `--python 3.10` for Python 3.10). A plain `uv pip install -e ".[dev]"` or `pip install -e ".[dev]"` also works and resolves against the version bounds in `pyproject.toml`.
+`uv sync` installs from the committed `uv.lock`, so every developer and CI run gets the same dependency versions (`.python-version` selects Python 3.12). A plain `uv pip install -e ".[dev]"` or `pip install -e ".[dev]"` also works and resolves against the version bounds in `pyproject.toml`.
 
 To upgrade dependencies deliberately:
 
@@ -486,7 +486,6 @@ uv sync --extra dev
 Known compatibility bounds in `pyproject.toml`:
 - **`fastrtc[vad]>=0.0.34,<0.1`** — `interruptible.py` and `tests/test_interruptible.py` rely on `fastrtc` 0.0.34's `ReplyOnPause` internals and verify `ReplyOnPause.__init__`'s signature on every test run.
 - **`gradio>=5.50,<6`** — imported directly by `app.py`; capped below 6.0 to match `fastrtc` 0.0.34 and keep `gr.Chatbot(allow_tags=False)` behavior consistent.
-- **`onnxruntime<1.24; python_version < '3.11'`** — `onnxruntime` 1.24+ declares `>=3.10` but publishes only `cp311+` wheels, so Python 3.10 stays on the 1.23 line.
 
 ## Tests & Code Quality
 
@@ -496,7 +495,7 @@ Known compatibility bounds in `pyproject.toml`:
 .venv/bin/ruff check src tests evals                     # run linter
 ```
 
-CI (`.github/workflows/ci.yml`) runs Ruff and `pytest --cov=vaice` with `uv sync --locked` across Python 3.10 and 3.12 on macOS for every push to `main` and every pull request.
+CI (`.github/workflows/ci.yml`) runs Ruff and `pytest --cov=vaice` with `uv sync --locked` on Python 3.12 on macOS for every push to `main` and every pull request; a newer push to a pull request cancels the older run.
 
 The unit tests never touch a real model. To measure how reliably spoken commands turn into the right tool call (with repeats, on both the interleaved and a transcribe-then-route path), run the live eval in [`evals/`](evals/README.md) against a real `llama-server`: `.venv/bin/python evals/run.py`. It is run by hand, not in CI.
 

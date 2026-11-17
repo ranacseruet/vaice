@@ -5,17 +5,20 @@ on:
     branches: [main]
   pull_request:
 
+# A newer push to the same PR cancels the run still queued or running for the older one, so superseded runs do not
+# compete for macOS runners (#91). Pushes to main get a group per commit and are never cancelled.
+concurrency:
+  group: ci-${{ github.event_name == 'pull_request' && github.head_ref || github.sha }}
+  cancel-in-progress: true
+
 jobs:
   check:
     # macos-14 retired 2026-11-02 (actions/runner-images#13518); macos-15 is the closest supported image
     runs-on: macos-15
-    strategy:
-      matrix:
-        python-version: ["3.10", "3.12"]  # README supports 3.10–3.12; 3.12 is the pinned local version
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
       # locked install from uv.lock; --locked fails the job when the lockfile is out of sync with pyproject.toml
-      - run: uv sync --locked --extra dev --python ${{ matrix.python-version }}
+      - run: uv sync --locked --extra dev --python 3.12  # the one supported version
       - run: .venv/bin/ruff check src tests
       - run: .venv/bin/pytest -q
