@@ -37,6 +37,7 @@ from vaice.memory import Memory
 from vaice.responders.assistant import NOT_HEARD, build_messages, decide
 from vaice.responders.llamacpp import LlamaCppResponder, _transcribe
 from vaice.skills import SkillResult, Skills, default_skills
+from vaice.vision import vision_skill
 
 HERE = Path(__file__).parent
 PATHS = ("interleaved", "text", "assistant")
@@ -73,6 +74,20 @@ ACTION_STUBS = {
 }
 # run_shell (--shell): it asks, and nothing is run; the result is only there if a case gets past the question
 SHELL_STUBS = {"run_shell": lambda args: "the command finished. Output: ok"}
+# look_at_screen (--vision): a fixed fake screen, described in the wording of the real result; nothing is captured.
+# What the question is about picks what is "seen", so a call that asks about the dialog gets its text
+VISION_SCREEN = "a Numbers window titled Quarterly report"
+VISION_DIALOG = 'a dialog that says "Your disk is almost full"'
+
+
+def vision_stub(args: dict) -> str:
+    question = str(args.get("question", "")).casefold()
+    if any(word in question for word in ("error", "dialog", "message", "alert", "popup", "say")):
+        return f"the screen shows: {VISION_DIALOG} over {VISION_SCREEN}"
+    return f"the screen shows: {VISION_SCREEN}"
+
+
+VISION_STUBS = {"look_at_screen": vision_stub}
 TRANSCRIPT_WAIT = 5.0  # the interleaved path's transcript is reported after the reply; wait this long for it
 
 
@@ -211,17 +226,20 @@ def run_text(url: str, prompt: str, tools: list[dict], audio, history) -> dict:
     return record
 
 
-def stub_skills(shell: bool = False, memory: Memory | None = None) -> Skills:
+def stub_skills(shell: bool = False, memory: Memory | None = None, vision: bool = False) -> Skills:
     """The real skills' definitions with canned results: the model sees what the app offers, and nothing
     runs on this machine (the stubs replace each skill's `run`, and `run_stoppable` is dropped so the real
     command runner cannot be reached; Skills.run still checks the arguments). A `confirm` skill's `ask` is
-    stubbed to always ask, so no check of the machine (is the app running?) is made. `shell` adds `run_shell`.
+    stubbed to always ask, so no check of the machine (is the app running?) is made. `shell` adds `run_shell`,
+    `vision` adds `look_at_screen` (its stub answers from `VISION_STUBS`: no screenshot is taken, nothing is sent).
 
     `memory` adds the memory skills, which stay real: they only touch that store, which must be in memory only
     (no path), so an eval can never read or write the app's own `memory.json`."""
     if memory is not None and memory.path is not None:
         raise ValueError("the eval's memory must be in memory only: it must never touch a notes file")
-    answers = {**ACTION_STUBS, **SHELL_STUBS}
+    answers = {**ACTION_STUBS, **SHELL_STUBS, **VISION_STUBS}
+    # the real definition, over a brain that is never asked: the stub replaces the skill's `run`
+    screen = vision_skill(ChatBrain.helper("http://stub.invalid/v1", 1), "stub") if vision else None
     return Skills([
         skill if skill.name not in answers and skill.name not in SKILL_STUBS else
         replace(skill, run_stoppable=None,
@@ -229,7 +247,7 @@ def stub_skills(shell: bool = False, memory: Memory | None = None) -> Skills:
                 if skill.name in answers else (lambda _args, text=SKILL_STUBS[skill.name]: SkillResult(text)),
                 **({"ask": lambda _args, name=skill.name: f"Shall I run {name.replace('_', ' ')}?"}
                    if skill.kind == "confirm" else {}))
-        for skill in default_skills(shell=shell, memory=memory).skills])
+        for skill in default_skills(shell=shell, memory=memory, vision=screen).skills])
 
 
 def case_memory(case: dict) -> Memory:
@@ -306,6 +324,9 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
                                          "VAICE_ASSISTANT_PROMPT for assistant")
     parser.add_argument("--shell", action="store_true",
                         help="assistant path: also offer the run_shell skill (stubbed: it asks, nothing is run)")
+    parser.add_argument("--vision", action="store_true",
+                        help="assistant path: also offer the look_at_screen skill (stubbed: a fixed fake screen, "
+                             "nothing is captured or sent)")
     parser.add_argument("--no-memory", action="store_true",
                         help="assistant path: leave out the memory skills and the case notes (default: on, as in the "
                              "app); the store is always in memory, never the app's memory.json")
@@ -449,8 +470,8 @@ def main(argv: list[str] | None = None) -> None:
                             record = run_interleaved(url, prompts[path], tools, results, audio[case["id"]], history)
                         elif path == "assistant":
                             memory = None if args.no_memory else case_memory(case)  # fresh for every run
-                            record = run_assistant(url, prompts[path], stub_skills(shell=args.shell, memory=memory),
-                                                   audio[case["id"]], history, brain,
+                            skills = stub_skills(shell=args.shell, memory=memory, vision=args.vision)
+                            record = run_assistant(url, prompts[path], skills, audio[case["id"]], history, brain,
                                                    notes=[] if memory is None else memory.notes())
                         else:
                             record = run_text(url, prompts[path], tools, audio[case["id"]], history)
@@ -469,8 +490,8 @@ def main(argv: list[str] | None = None) -> None:
     summary = print_summary(runs, args.paths, [c["id"] for c in cases], brain_used)
 
     config_used = {"paths": args.paths, "cases_file": args.cases_file, "repeats": args.repeats,
-                   "shell": args.shell, "memory": not args.no_memory, "history": history, "prompts": prompts,
-                   "cases": [c["id"] for c in cases], "platform": platform.platform()}
+                   "shell": args.shell, "vision": args.vision, "memory": not args.no_memory, "history": history,
+                   "prompts": prompts, "cases": [c["id"] for c in cases], "platform": platform.platform()}
     if brain_used is not None:
         config_used["brain"] = brain_used  # the host and the model only: never the key, never the URL's path
     document = {"label": args.label, "started": started, "config": config_used, "server": info,

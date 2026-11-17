@@ -30,7 +30,7 @@ from vaice.memory import REFUSED_AFTER_TOOL, Memory
 from vaice.responders.base import AudioFrame
 from vaice.responders.llamacpp import ABANDONED, _clock_line, _MarkupStripper, _Stopped, _transcribe
 from vaice.shell import NEEDS_BUTTON
-from vaice.skills import Question, SkillResult, Skills, default_skills
+from vaice.skills import Question, Skill, SkillResult, Skills, default_skills
 
 log = logging.getLogger(__name__)
 
@@ -454,13 +454,14 @@ class AssistantResponder:
         confirmations: Confirmations | None = None,
         progress_seconds: float = config.ASSISTANT_PROGRESS_SECONDS,
         memory: Memory | None = None,
+        vision: Skill | None = None,
     ):
         self._url = url
         self._timeout = timeout
         self._prompt = prompt
         self._voice = voice
         self.memory = memory  # the user's notes (None: memory is off); the UI's Memory panel reads it
-        self.skills = skills or default_skills(shell=config.ASSISTANT_SHELL, memory=memory)
+        self.skills = skills or default_skills(shell=config.ASSISTANT_SHELL, memory=memory, vision=vision)
         self._brain = brain or _default_brain(url, timeout)
         self._confirmations = Confirmations() if confirmations is None else confirmations
         self._progress_seconds = progress_seconds

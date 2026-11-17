@@ -14,6 +14,7 @@ import requests
 from fastrtc import AdditionalOutputs, Stream
 
 from vaice import config
+from vaice.brain import ChatBrain
 from vaice.confirm import Pending
 from vaice.conversation import Conversation, Turn
 from vaice.interruptible import InterruptSafeReplyOnPause, stop_playing_reply
@@ -24,6 +25,8 @@ from vaice.responders.base import Responder
 from vaice.responders.llamacpp import LlamaCppResponder, check_server, fetch_tools, write_capable_tools
 from vaice.server import ensure_server
 from vaice.shell import RUN_SHELL
+from vaice.skills import Skill
+from vaice.vision import vision_skill
 
 log = logging.getLogger(__name__)
 
@@ -295,6 +298,29 @@ def _announce_brain() -> None:
             " and the notes you asked it to keep about you" if config.ASSISTANT_MEMORY else "")
 
 
+def _announce_vision() -> None:
+    """Assistant mode: say which vision model looks at the screen. A host off this machine gets a warning that a
+    screenshot is sent to it; nothing here touches the API key, which is never logged (not even its length)."""
+    if not config.VISION_URL:
+        return
+    parts = urlsplit(config.VISION_URL)
+    log.info("assistant vision (look_at_screen): %s, model %s", parts.netloc, config.VISION_MODEL or "(none set)")
+    if not config.VISION_MODEL:
+        log.warning("VAICE_VISION_MODEL is empty: most hosted endpoints require a model name")
+    if parts.hostname not in config.LOCAL_HOSTS:
+        log.warning(
+            "the vision model at %s is not on this machine: each time you ask about your screen, a screenshot of "
+            "your main display is sent to it (only then; it is deleted from this Mac right after)", parts.netloc)
+
+
+def _vision_skill() -> Skill | None:
+    """Assistant mode: `look_at_screen` over the configured vision endpoint (None when VAICE_VISION_URL is unset)."""
+    if not config.VISION_URL:
+        return None
+    brain = ChatBrain.helper(config.VISION_URL, config.VISION_TIMEOUT, config.VISION_MODEL, config.VISION_API_KEY)
+    return vision_skill(brain, f"{urlsplit(config.VISION_URL).netloc}, model {config.VISION_MODEL or '(none set)'}")
+
+
 def _open_memory() -> Memory | None:
     """Assistant mode: the notes it keeps (None when VAICE_ASSISTANT_MEMORY is off). The notes' text is never logged
     here, only how many there are and where."""
@@ -323,8 +349,9 @@ def main() -> None:
             if config.LLAMACPP_TOOLS:
                 log.warning("VAICE_LLAMACPP_TOOLS is ignored in assistant mode: the skills run in vaice, "
                             "not on llama-server")
-            responder = AssistantResponder(memory=_open_memory())
+            responder = AssistantResponder(memory=_open_memory(), vision=_vision_skill())
             _announce_brain()
+            _announce_vision()
             if config.ASSISTANT_SHELL:
                 log.warning("VAICE_ASSISTANT_SHELL is on: after you approve it, a shell command the assistant "
                             "proposes runs with vaice's own permissions (harmless ones by voice or click, "
@@ -333,6 +360,8 @@ def main() -> None:
         else:
             if config.BRAIN_URL:
                 log.warning("VAICE_BRAIN_URL is ignored in chat mode: the helper brain is for assistant mode only")
+            if config.VISION_URL:
+                log.warning("VAICE_VISION_URL is ignored in chat mode: the screen skill is for assistant mode only")
             responder = _chat_responder()
         log.info("using llama-server at %s", config.LLAMACPP_URL)
 

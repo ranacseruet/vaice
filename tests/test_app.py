@@ -13,7 +13,7 @@ from fake_realtime import pcm
 from fastrtc import AdditionalOutputs
 from threads import next_on_fresh_thread, run_on_thread
 
-from vaice import app, config, lifecycle
+from vaice import app, config, lifecycle, vision
 from vaice import conversation as conv
 from vaice.app import CHATBOT_HEIGHT, UI_TITLE, VIEW_REFRESH_SECONDS, build_stream, make_handler, parse_args
 from vaice.confirm import Pending
@@ -21,6 +21,7 @@ from vaice.conversation import Conversation
 from vaice.interruptible import InterruptSafeReplyOnPause
 from vaice.memory import Memory
 from vaice.responders.llamacpp import LlamaCppResponder
+from vaice.skills import Skills
 
 AUDIO = (48000, np.zeros((1, 480), dtype=np.int16))
 
@@ -777,8 +778,9 @@ class FakeAssistant:
     name = "assistant"
     skills = SimpleNamespace(names=("disk_space", "battery_status"))  # the attribute main() reads
 
-    def __init__(self, memory=None):
+    def __init__(self, memory=None, vision=None):
         self.memory = memory
+        self.vision = vision  # the look_at_screen skill main() built, if any
 
 
 def _assistant_main(monkeypatch, tmp_path, tools=None):
@@ -901,6 +903,107 @@ def test_chat_mode_without_a_helper_url_logs_nothing_about_it(monkeypatch, tmp_p
         _main_with(monkeypatch, tmp_path, tools=None)
 
     assert "VAICE_BRAIN_URL" not in caplog.text
+
+
+VISION_KEY = "fake-vision-key-do-not-log-5c1d"
+
+
+def _vision(monkeypatch, url, model="LFM3-Omni-2B"):
+    monkeypatch.setattr(app.config, "VISION_URL", url)
+    monkeypatch.setattr(app.config, "VISION_MODEL", model)
+    monkeypatch.setattr(app.config, "VISION_API_KEY", VISION_KEY)
+
+
+def test_without_a_vision_url_there_is_no_screen_skill_and_nothing_about_vision_is_logged(
+        monkeypatch, tmp_path, caplog):
+    monkeypatch.setattr(app.config, "VISION_URL", "")
+    built = []
+    monkeypatch.setattr(app, "AssistantResponder", lambda **kwargs: built.append(kwargs) or FakeAssistant(**kwargs))
+    monkeypatch.setattr(app.config, "MODE", "assistant")
+    with caplog.at_level(logging.DEBUG):
+        assert _main_with(monkeypatch, tmp_path, tools=None)
+
+    assert built[0]["vision"] is None
+    assert "assistant vision" not in caplog.text and "VAICE_VISION" not in caplog.text
+
+
+@pytest.mark.parametrize("url", ["http://localhost:8002/v1", "http://127.0.0.1:8002/v1", "http://[::1]:8002/v1"])
+def test_a_vision_model_on_this_machine_is_named_without_a_privacy_warning(monkeypatch, tmp_path, caplog, url):
+    _vision(monkeypatch, url)
+    built = []
+    monkeypatch.setattr(app, "AssistantResponder", lambda **kwargs: built.append(kwargs) or FakeAssistant(**kwargs))
+    monkeypatch.setattr(app.config, "MODE", "assistant")
+    with caplog.at_level(logging.DEBUG):
+        assert _main_with(monkeypatch, tmp_path, tools=None)
+
+    assert built[0]["vision"].name == "look_at_screen"
+    assert "assistant vision (look_at_screen): " in caplog.text and ", model LFM3-Omni-2B" in caplog.text
+    assert "not on this machine" not in caplog.text
+    assert VISION_KEY not in caplog.text
+
+
+def test_a_remote_vision_model_gets_a_warning_that_a_screenshot_is_sent(monkeypatch, tmp_path, caplog):
+    _vision(monkeypatch, "https://vision.example/v1")
+    with caplog.at_level(logging.DEBUG):
+        assert _assistant_main(monkeypatch, tmp_path)
+
+    assert "assistant vision (look_at_screen): vision.example, model LFM3-Omni-2B" in caplog.text
+    (warning,) = [r for r in caplog.records if "vision model at" in r.getMessage()]
+    assert warning.levelno == logging.WARNING
+    text = warning.getMessage()
+    assert "vision.example" in text and "not on this machine" in text
+    assert "screenshot of your main display is sent to it" in text and "deleted from this Mac" in text
+    assert VISION_KEY not in caplog.text and "key" not in caplog.text.lower()  # the key is not even mentioned
+
+
+def test_a_vision_model_without_a_name_warns_but_the_app_starts(monkeypatch, tmp_path, caplog):
+    _vision(monkeypatch, "http://localhost:8002/v1", model="")
+    with caplog.at_level(logging.INFO):
+        assert _assistant_main(monkeypatch, tmp_path)
+
+    assert "VAICE_VISION_MODEL is empty" in caplog.text and "model (none set)" in caplog.text
+
+
+def test_the_vision_skill_is_built_over_the_configured_endpoint_with_the_key_and_the_timeout(monkeypatch):
+    _vision(monkeypatch, "https://vision.example/v1")
+    monkeypatch.setattr(app.config, "VISION_TIMEOUT", 12.5)
+    sent = []
+
+    def post(url, json=None, headers=None, timeout=None):
+        sent.append((url, json, headers, timeout))
+        raise requests.ConnectionError("no network in tests")
+
+    monkeypatch.setattr("vaice.brain.requests.post", post)
+    skill = app._vision_skill()
+
+    assert skill.name == "look_at_screen"
+    monkeypatch.setattr(vision, "capture", lambda timeout: b"jpeg")
+    skill_result = Skills([skill]).run("look_at_screen", '{"question": "What is open?"}')
+
+    ((url, body, headers, timeout),) = sent
+    assert (url, timeout, body["model"]) == ("https://vision.example/v1/chat/completions", 12.5, "LFM3-Omni-2B")
+    assert headers == {"Authorization": f"Bearer {VISION_KEY}"}
+    assert VISION_KEY not in skill_result.speech and VISION_KEY not in skill_result.detail
+
+
+def test_chat_mode_ignores_a_vision_url_and_says_so_once(monkeypatch, tmp_path, caplog):
+    _vision(monkeypatch, "https://vision.example/v1")
+    monkeypatch.setattr(app.config, "MODE", "chat")
+    with caplog.at_level(logging.DEBUG):
+        _main_with(monkeypatch, tmp_path, tools=None)
+
+    assert caplog.text.count("VAICE_VISION_URL is ignored in chat mode") == 1
+    assert "assistant vision" not in caplog.text and "not on this machine" not in caplog.text
+    assert VISION_KEY not in caplog.text
+
+
+def test_chat_mode_without_a_vision_url_logs_nothing_about_it(monkeypatch, tmp_path, caplog):
+    monkeypatch.setattr(app.config, "VISION_URL", "")
+    monkeypatch.setattr(app.config, "MODE", "chat")
+    with caplog.at_level(logging.DEBUG):
+        _main_with(monkeypatch, tmp_path, tools=None)
+
+    assert "VAICE_VISION_URL" not in caplog.text
 
 
 def test_chat_mode_is_unchanged_by_the_assistant_responder_existing(monkeypatch, tmp_path, caplog):
@@ -1269,8 +1372,8 @@ def _memory_main(monkeypatch, tmp_path, notes=None, memory_file="default", on=Tr
     given = []
 
     class Responder(FakeAssistant):
-        def __init__(self, memory=None):
-            super().__init__(memory)
+        def __init__(self, memory=None, vision=None):
+            super().__init__(memory, vision)
             given.append(memory)
 
     path = tmp_path / "memory.json" if memory_file == "default" else memory_file

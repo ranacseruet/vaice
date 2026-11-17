@@ -513,10 +513,11 @@ def _mute_sound(args: dict) -> SkillResult:
     return SkillResult("sound muted" if muted else "sound unmuted")
 
 
-def default_skills(shell: bool = False, memory: "Memory | None" = None) -> Skills:
+def default_skills(shell: bool = False, memory: "Memory | None" = None, vision: Skill | None = None) -> Skills:
     """The skills the assistant path offers: five read-only checks, then the actions, with `shell`
-    (`VAICE_ASSISTANT_SHELL`) `run_shell`, which asks first, and with a `memory` (`VAICE_ASSISTANT_MEMORY`) the
-    skills that keep and forget notes (see `memory.py`)."""
+    (`VAICE_ASSISTANT_SHELL`) `run_shell`, which asks first, with a `memory` (`VAICE_ASSISTANT_MEMORY`) the
+    skills that keep and forget notes (see `memory.py`) and with a `vision` skill (`VAICE_VISION_URL`, built by
+    `vision.vision_skill`) `look_at_screen`, which comes right after the read-only checks."""
     nothing = {"type": "object", "properties": {}}
     app_name = {"type": "object",
                 "properties": {"name": {"type": "string",
@@ -563,6 +564,8 @@ def default_skills(shell: bool = False, memory: "Memory | None" = None) -> Skill
                "properties": {"muted": {"type": "boolean", "description": "true to mute, false to unmute."}}},
               _mute_sound, kind="action"),
     ]
+    if vision is not None:
+        skills.insert(next(i for i, skill in enumerate(skills) if skill.kind != "read"), vision)
     if shell:
         from vaice.shell import shell_skill  # shell imports this module: not at the top
 
