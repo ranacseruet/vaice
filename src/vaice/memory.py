@@ -25,6 +25,9 @@ MAX_NOTE_CHARS = 200
 MAX_NOTES = 30
 MIN_NOTE_WORDS = 3  # a fact about the user is a sentence, not a word
 MIN_FORGET_CHARS = 3  # `forget("a")` would otherwise erase nearly everything with no confirmation
+# Spoken as is after a refused reminder: told the refusal, the 24B helper still said "I've noted your dentist
+# appointment" (2 of 3 runs, then 1 of 3 with the refusal starting "nothing was saved")
+REMINDER_ANSWER = "I can't set reminders or timers, so I haven't saved that."
 _VERSION = 1
 
 # `<|im_start|>`, `<|anything|>`; and role/thinking tags a chat template or the markup stripper would act on
@@ -72,7 +75,8 @@ def clean_note(text) -> str:
         raise SkillError("there was nothing to remember")
     # "Call Mom tomorrow at 9": saved as a note, then announced as a reminder (live eval)
     if _REMINDER.search(note) or (_CLOCK_TIME.search(note) and not _HABIT.search(note)):
-        raise SkillError("I can't set reminders or timers; I can only keep lasting facts about you")
+        raise SkillError("nothing was saved: I can't set reminders or timers, I only keep lasting facts about you",
+                         answer=REMINDER_ANSWER)
     if len(note) > MAX_NOTE_CHARS:
         raise SkillError(f"that is too long to remember: keep a note under {MAX_NOTE_CHARS} characters")
     return note

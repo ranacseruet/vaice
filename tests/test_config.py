@@ -406,9 +406,11 @@ def test_a_bad_progress_setting_is_a_clean_error(monkeypatch, value):
         importlib.reload(config)
 
 
-def test_assistant_memory_is_on_unless_switched_off(monkeypatch):
+def test_assistant_memory_is_off_unless_switched_on(monkeypatch):
     monkeypatch.delenv("VAICE_ASSISTANT_MEMORY", raising=False)
     try:
+        assert importlib.reload(config).ASSISTANT_MEMORY is False
+        monkeypatch.setenv("VAICE_ASSISTANT_MEMORY", "true")
         assert importlib.reload(config).ASSISTANT_MEMORY is True
         for raw in ("0", "false", "off"):
             monkeypatch.setenv("VAICE_ASSISTANT_MEMORY", raw)

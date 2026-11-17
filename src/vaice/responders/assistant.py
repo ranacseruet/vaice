@@ -146,6 +146,8 @@ def decide(brain: ChatBrain, skills: Skills, messages: list[dict], stop: Callabl
     A `direct_only` skill (`remember`) is refused once another skill has run in this reply, in an earlier round or
     earlier in the same one: what the user dictates never needs a tool first, so a call after one is acting on
     what a tool reported. It runs nothing and its result says so.
+
+    A result with an `answer` (a refused reminder) ends the loop with that sentence; calls after it are dropped.
     """
     decision = Decision("")
     tool_ran = False  # a skill that is not `direct_only` has run in this reply
@@ -193,6 +195,12 @@ def decide(brain: ChatBrain, skills: Skills, messages: list[dict], stop: Callabl
             if on_call is not None:
                 on_call(skill_call)
             messages.append({"role": "tool", "tool_call_id": call.id, "content": result.speech})
+            if result.answer:  # a fixed answer: the model is not asked to report this result
+                if index + 1 < len(reply.calls):
+                    log.warning("assistant dropped %d skill call(s) requested after %s, which answered the reply",
+                                len(reply.calls) - index - 1, call.name)
+                decision.answer = result.answer
+                return decision
     decision.answer = decision.answer or NO_ANSWER
     return decision
 

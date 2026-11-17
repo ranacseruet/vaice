@@ -13,6 +13,7 @@ from fastrtc import AdditionalOutputs
 from threads import next_on_fresh_thread, start_thread
 
 from vaice import lifecycle, shell
+from vaice import memory as memory_module
 from vaice.app import make_handler
 from vaice.audio import from_pcm16
 from vaice.brain import BUSY, BrainError, BrainReply, ToolCall
@@ -2066,6 +2067,40 @@ def test_text_that_merely_has_brackets_is_spoken_as_written(caplog, written):
 
     assert decision.answer == written
     assert "carried model markup" not in caplog.text
+
+
+def test_a_refused_reminder_ends_the_reply_with_the_fixed_sentence_and_no_further_brain_call(caplog):
+    notes = Memory(None)
+    log = []
+    skills = Skills([*disk_skills(log).skills, *memory_skills(notes)])
+    brain = FakeBrain(ask(("remember", json.dumps({"note": "The user has a dentist appointment on Friday."})),
+                          ("disk_space", "{}")),
+                      answer("I've noted your dentist appointment."))  # what the helper said; never asked for
+    turn = Turn()
+
+    with caplog.at_level(logging.WARNING, logger="vaice.responders.assistant"):
+        decision = decide(brain, skills, [{"role": "user", "content": "x"}], lambda: False, turn=turn)
+
+    assert decision.answer == memory_module.REMINDER_ANSWER
+    assert len(brain.calls) == 1
+    assert notes.notes() == []
+    assert log == []  # the call after the refusal was dropped
+    assert [c.name for c in decision.calls] == ["remember"]
+    assert "reminders or timers" in decision.calls[0].result.speech
+    assert "dropped 1 skill call(s) requested after remember" in caplog.text
+
+
+def test_an_ordinary_skill_failure_is_still_reported_by_the_model():
+    def fails(args):
+        raise SkillError("the disk is not mounted")
+
+    skills = Skills([Skill("disk_space", "Report free disk space.", {"type": "object", "properties": {}}, fails)])
+    brain = FakeBrain(ask(("disk_space", "{}")), answer("Your disk is not mounted."))
+
+    decision = decide(brain, skills, [{"role": "user", "content": "x"}], lambda: False, turn=Turn())
+
+    assert decision.answer == "Your disk is not mounted."
+    assert len(brain.calls) == 2
 
 
 def test_a_pseudo_call_in_the_forced_final_round_is_not_spoken_either():

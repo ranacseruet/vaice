@@ -43,10 +43,13 @@ VOLUME_STEP = 10  # points for volume_up / volume_down
 @dataclass(frozen=True)
 class SkillResult:
     """`speech`: short plain text for the model to answer from (no paths, no raw tables).
-    `detail`: what the UI's Tool activity panel shows (paths, raw output); empty means show `speech`."""
+    `detail`: what the UI's Tool activity panel shows (paths, raw output); empty means show `speech`.
+    `answer`: when set, the reply ends with exactly this sentence and the model is not asked again (see
+    `SkillError`)."""
 
     speech: str
     detail: str = ""
+    answer: str = ""
 
 
 @dataclass(frozen=True)
@@ -78,7 +81,14 @@ class Skill:
 
 
 class SkillError(Exception):
-    """A skill could not do its job for a reason worth saying aloud (the message is spoken)."""
+    """A skill could not do its job for a reason worth saying aloud (the message is spoken).
+
+    `answer`: a fixed sentence that ends the reply instead of the model's paraphrase of the failure, for a
+    refusal the model was seen misreporting (a refused reminder announced as "I've noted it")."""
+
+    def __init__(self, message: str, *, answer: str = ""):
+        super().__init__(message)
+        self.answer = answer
 
 
 class Skills:
@@ -156,7 +166,7 @@ class Skills:
             return skill.run(args)
         except SkillError as exc:
             log.warning("skill %s failed: %s", name, exc)
-            return SkillResult(f"{label} failed: {exc}")
+            return SkillResult(f"{label} failed: {exc}", answer=exc.answer)
         except Exception as exc:
             log.exception("skill %s failed", name)
             return SkillResult(f"{label} failed: {type(exc).__name__}: {exc}")

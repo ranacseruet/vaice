@@ -144,7 +144,9 @@ if not ASSISTANT_PROGRESS_SECONDS >= 0:
 # Assistant mode only: the assistant keeps short notes you ask it to remember ("remember that I park on level
 # three") in <VAICE_DATA_DIR>/memory.json, across conversations, and puts them into every prompt (so a remote
 # helper brain gets them too). Off: no memory skills and no notes in the prompt (an existing file is left alone).
-ASSISTANT_MEMORY = _flag("VAICE_ASSISTANT_MEMORY", default=True)
+# Off by default: on the local 2B brain the memory skills cost 3 of the 51 older eval cases (225 -> 210 of 255:
+# remember("Goodbye"), a reminder sent to remember, and Calculator opened for "Who makes the calculator app?").
+ASSISTANT_MEMORY = _flag("VAICE_ASSISTANT_MEMORY", default=False)
 VOICE = _choice("VAICE_VOICE", default="female", choices=("female", "male"))
 
 

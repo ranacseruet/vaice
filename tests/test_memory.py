@@ -392,7 +392,7 @@ def test_forget_everything_erases_the_notes_once_approved(skills, kept):
 
 # -- what is not a note: a word or two, and anything bound to a moment (live eval findings)
 
-REMINDER_SENTENCE = "I can't set reminders or timers; I can only keep lasting facts about you"
+REMINDER_SENTENCE = "nothing was saved: I can't set reminders or timers, I only keep lasting facts about you"
 
 
 @pytest.mark.parametrize("raw", ["Goodbye", "Goodbye.", "Nadia", "- Hello there", "The user", "  tea   please "])
@@ -462,11 +462,13 @@ def test_a_habit_does_not_excuse_a_reminder_word():
 
 
 def test_the_remember_skill_speaks_the_refusals_and_stores_nothing(skills, kept):
-    one_word = skills.run("remember", json.dumps({"note": "Goodbye"})).speech
-    reminder = skills.run("remember", json.dumps({"note": "Call mom tomorrow at nine"})).speech
+    one_word = skills.run("remember", json.dumps({"note": "Goodbye"}))
+    reminder = skills.run("remember", json.dumps({"note": "Call mom tomorrow at nine"}))
 
-    assert one_word == "the remember skill failed: there was nothing to remember"
-    assert reminder == f"the remember skill failed: {REMINDER_SENTENCE}"
+    assert one_word.speech == "the remember skill failed: there was nothing to remember"
+    assert one_word.answer == ""  # the model answers this one
+    assert reminder.speech == f"the remember skill failed: {REMINDER_SENTENCE}"
+    assert reminder.answer == memory_module.REMINDER_ANSWER  # this one is spoken as is
     assert kept.notes() == []
 
 
