@@ -37,9 +37,12 @@ def realtime():
 
 
 @pytest.fixture(autouse=True)
-def no_real_memory_file(monkeypatch):
-    """No test reads or writes the real ~/.vaice/memory.json: a test that wants a file passes its own path.
-    (`config` is imported here, not at the top: it reads a .env at import, and conftest changes directory first.)"""
+def no_real_memory_file(monkeypatch, tmp_path):
+    """No test reads or writes the real ~/.vaice: the memory file is off (a test that wants a file passes its own
+    path) and the data directory is the test's own temp directory (MCP servers' stderr logs went to ~/.vaice before
+    this). (`config` is imported here, not at the top: it reads a .env at import, and conftest changes directory
+    first.)"""
     from vaice import config
 
     monkeypatch.setattr(config, "MEMORY_FILE", None)
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path / "data")

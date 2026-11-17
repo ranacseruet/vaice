@@ -513,11 +513,14 @@ def _mute_sound(args: dict) -> SkillResult:
     return SkillResult("sound muted" if muted else "sound unmuted")
 
 
-def default_skills(shell: bool = False, memory: "Memory | None" = None, vision: Skill | None = None) -> Skills:
+def default_skills(shell: bool = False, memory: "Memory | None" = None, vision: Skill | None = None,
+                   extra: Sequence[Skill] = ()) -> Skills:
     """The skills the assistant path offers: five read-only checks, then the actions, with `shell`
     (`VAICE_ASSISTANT_SHELL`) `run_shell`, which asks first, with a `memory` (`VAICE_ASSISTANT_MEMORY`) the
-    skills that keep and forget notes (see `memory.py`) and with a `vision` skill (`VAICE_VISION_URL`, built by
-    `vision.vision_skill`) `look_at_screen`, which comes right after the read-only checks."""
+    skills that keep and forget notes (see `memory.py`), with a `vision` skill (`VAICE_VISION_URL`, built by
+    `vision.vision_skill`) `look_at_screen`, which comes right after the read-only checks, and with `extra` (the MCP
+    tools, `VAICE_MCP_CONFIG`, see `mcp_skills.py`) last. An MCP name always holds `__` and no built-in does, so
+    the two cannot collide."""
     nothing = {"type": "object", "properties": {}}
     app_name = {"type": "object",
                 "properties": {"name": {"type": "string",
@@ -574,4 +577,4 @@ def default_skills(shell: bool = False, memory: "Memory | None" = None, vision: 
         from vaice.memory import memory_skills  # memory imports this module: not at the top
 
         skills += memory_skills(memory)
-    return Skills(skills)
+    return Skills([*skills, *extra])

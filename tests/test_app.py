@@ -4,6 +4,7 @@ import itertools
 import json
 import logging
 import signal
+import sys
 from types import SimpleNamespace
 
 import numpy as np
@@ -778,9 +779,10 @@ class FakeAssistant:
     name = "assistant"
     skills = SimpleNamespace(names=("disk_space", "battery_status"))  # the attribute main() reads
 
-    def __init__(self, memory=None, vision=None):
+    def __init__(self, memory=None, vision=None, extra_skills=()):
         self.memory = memory
         self.vision = vision  # the look_at_screen skill main() built, if any
+        self.extra_skills = extra_skills  # the MCP skills main() started, if any
 
 
 def _assistant_main(monkeypatch, tmp_path, tools=None):
@@ -1004,6 +1006,87 @@ def test_chat_mode_without_a_vision_url_logs_nothing_about_it(monkeypatch, tmp_p
         _main_with(monkeypatch, tmp_path, tools=None)
 
     assert "VAICE_VISION_URL" not in caplog.text
+
+
+class FakeMcp:
+    """What `mcp_skills.start` returns: the started servers' skills, what each offers, and a `close()`."""
+
+    def __init__(self, skills=("a skill",), summaries=(("notes", ["search_notes", "add_note"]),)):
+        self.skills, self.summaries, self.closed = list(skills), list(summaries), 0
+
+    def close(self):
+        self.closed += 1
+
+
+def _mcp(monkeypatch, tmp_path, mode="assistant", fake=None):
+    """`main()` with a config file set; returns (the fake that start() gave back, what start() was called with)."""
+    fake = fake or FakeMcp()
+    started = []
+    monkeypatch.setattr(app.config, "MCP_CONFIG", tmp_path / "mcp.json")
+    monkeypatch.setattr(app.config, "MCP_TIMEOUT", 12.5)
+    monkeypatch.setattr(app.mcp_skills, "start", lambda path, timeout: started.append((path, timeout)) or fake)
+    monkeypatch.setattr(app.config, "MODE", mode)
+    return fake, started
+
+
+def test_without_an_mcp_config_nothing_is_started_and_nothing_about_it_is_logged(monkeypatch, tmp_path, caplog):
+    monkeypatch.setattr(app.config, "MCP_CONFIG", None)
+    monkeypatch.setattr(app.mcp_skills, "start", lambda *_: pytest.fail("MCP started without a config"))
+    built = []
+    monkeypatch.setattr(app, "AssistantResponder", lambda **kwargs: built.append(kwargs) or FakeAssistant(**kwargs))
+    monkeypatch.setattr(app.config, "MODE", "assistant")
+    with caplog.at_level(logging.DEBUG):
+        assert _main_with(monkeypatch, tmp_path, tools=None)
+
+    assert built[0]["extra_skills"] == () and "mcp server" not in caplog.text and "VAICE_MCP" not in caplog.text
+
+
+def test_assistant_mode_starts_the_mcp_servers_gives_their_skills_to_the_responder_and_logs_what_each_offers(
+        monkeypatch, tmp_path, caplog):
+    _, started = _mcp(monkeypatch, tmp_path, fake=FakeMcp(summaries=[("notes", ["search_notes", "add_note"]),
+                                                                        ("idle", [])]))
+    built = []
+    monkeypatch.setattr(app, "AssistantResponder", lambda **kwargs: built.append(kwargs) or FakeAssistant(**kwargs))
+    with caplog.at_level(logging.INFO, logger="vaice.app"):
+        assert _main_with(monkeypatch, tmp_path, tools=None)
+
+    assert started == [(tmp_path / "mcp.json", 12.5)]
+    assert built[0]["extra_skills"] == ["a skill"]
+    assert "mcp server notes: 2 tools offered (search_notes, add_note)" in caplog.text
+    assert "mcp server idle: 0 tools offered (none)" in caplog.text
+
+
+def test_the_mcp_servers_are_closed_when_the_app_ends_and_when_it_fails_to_start(monkeypatch, tmp_path):
+    fake, _ = _mcp(monkeypatch, tmp_path)
+    monkeypatch.setattr(app, "AssistantResponder", FakeAssistant)
+    assert _main_with(monkeypatch, tmp_path, tools=None)
+    assert fake.closed == 1
+
+    def boom(**_):
+        raise SystemExit("the responder could not be built")
+
+    monkeypatch.setattr(app, "AssistantResponder", boom)
+    with pytest.raises(SystemExit, match="could not be built"):
+        _main_with(monkeypatch, tmp_path, tools=None)
+    assert fake.closed == 2  # started before the failure: still ended
+
+
+def test_chat_mode_ignores_an_mcp_config_says_so_once_and_starts_nothing(monkeypatch, tmp_path, caplog):
+    _, started = _mcp(monkeypatch, tmp_path, mode="chat")
+    with caplog.at_level(logging.DEBUG):
+        _main_with(monkeypatch, tmp_path, tools=None)
+
+    assert caplog.text.count("VAICE_MCP_CONFIG is ignored in chat mode") == 1
+    assert started == [] and "mcp server" not in caplog.text
+
+
+def test_a_missing_mcp_package_stops_assistant_mode_with_the_install_hint(monkeypatch, tmp_path):
+    monkeypatch.setattr(app.config, "MCP_CONFIG", tmp_path / "mcp.json")
+    monkeypatch.setattr(app.config, "MODE", "assistant")
+    monkeypatch.setitem(sys.modules, "mcp", None)
+
+    with pytest.raises(SystemExit, match="uv sync --extra mcp"):
+        _main_with(monkeypatch, tmp_path, tools=None)
 
 
 def test_chat_mode_is_unchanged_by_the_assistant_responder_existing(monkeypatch, tmp_path, caplog):
@@ -1372,7 +1455,7 @@ def _memory_main(monkeypatch, tmp_path, notes=None, memory_file="default", on=Tr
     given = []
 
     class Responder(FakeAssistant):
-        def __init__(self, memory=None, vision=None):
+        def __init__(self, memory=None, vision=None, extra_skills=()):
             super().__init__(memory, vision)
             given.append(memory)
 
