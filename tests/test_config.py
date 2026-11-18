@@ -499,6 +499,30 @@ def test_a_bad_progress_setting_is_a_clean_error(monkeypatch, value):
         importlib.reload(config)
 
 
+def test_an_auto_tool_waits_five_seconds_by_default_and_the_wait_can_be_changed_or_turned_off(monkeypatch):
+    monkeypatch.delenv("VAICE_ASSISTANT_AUTO_SECONDS", raising=False)
+    try:
+        assert importlib.reload(config).ASSISTANT_AUTO_SECONDS == 5
+        monkeypatch.setenv("VAICE_ASSISTANT_AUTO_SECONDS", "0")
+        assert importlib.reload(config).ASSISTANT_AUTO_SECONDS == 0
+        monkeypatch.setenv("VAICE_ASSISTANT_AUTO_SECONDS", "8.5")
+        assert importlib.reload(config).ASSISTANT_AUTO_SECONDS == 8.5
+    finally:
+        monkeypatch.undo()
+        importlib.reload(config)
+
+
+@pytest.mark.parametrize("value", ["-1", "soon", "nan"])
+def test_a_bad_auto_setting_is_a_clean_error(monkeypatch, value):
+    monkeypatch.setenv("VAICE_ASSISTANT_AUTO_SECONDS", value)
+    try:
+        with pytest.raises(SystemExit, match="VAICE_ASSISTANT_AUTO_SECONDS must be"):
+            importlib.reload(config)
+    finally:
+        monkeypatch.undo()
+        importlib.reload(config)
+
+
 def test_assistant_memory_is_off_unless_switched_on(monkeypatch):
     monkeypatch.delenv("VAICE_ASSISTANT_MEMORY", raising=False)
     try:

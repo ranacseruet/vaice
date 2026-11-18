@@ -55,10 +55,15 @@ class SkillResult:
 @dataclass(frozen=True)
 class Question:
     """What to ask the user before a `confirm` skill runs: built only from the skill's validated arguments.
-    `voice`: whether a spoken yes may approve it; False means only the UI's Run button can."""
+    `voice`: whether a spoken yes may approve it; False means only the UI's Run button can.
+    `auto_seconds` > 0: the request runs by itself that long after the question was fully spoken, unless the user
+    stops it (see `confirm.py`). `fallback`: the question to ask instead (click only, no timer) when anything ran
+    earlier in the same reply, because what that skill reported may be untrusted text."""
 
     text: str
     voice: bool = True
+    auto_seconds: float = 0
+    fallback: "Question | None" = None
 
 
 @dataclass(frozen=True)

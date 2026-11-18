@@ -5,7 +5,9 @@ audio -> transcribe (realtime ASR session) -> brain (chat completions + tools) <
 
 A skill that cannot be undone (`kind="confirm"`) does not run when the brain asks: the reply speaks a
 question and the request waits in `confirm.Confirmations`. The next reply (the user's answer) or a click
-in the UI settles it; the brain never interprets the answer.
+in the UI settles it; the brain never interprets the answer. A request with `auto_seconds` also runs by itself
+that long after its question was fully spoken (`AssistantResponder._countdown`, a daemon thread that goes through
+`approve`, so it is exactly as atomic as a click).
 
 Threading follows `LlamaCppResponder`: `respond()` starts one daemon thread that does all the blocking
 work and hands frames to the generator through a queue, so fastrtc may resume the generator from any
@@ -53,6 +55,7 @@ class _Asked:
 
     pending_id: str
     spoken: bool
+    auto_seconds: float = 0  # of the request: > 0 starts its countdown once it is armed
 _RATE = re.compile(r"\brate=(\d+)")
 # An answer that is only bracket-style pseudo tool calls, `[open_file(path='old_report.docx')]` (a helper model's
 # habit, seen live), possibly several in a row: spoken, it would read out a function call. The arguments never
@@ -172,13 +175,16 @@ def decide(brain: ChatBrain, skills: Skills, messages: list[dict], stop: Callabl
             log.info("assistant skill %s(%s)", call.name, call.arguments)
             prepared = skills.prepare(call.name, call.arguments)
             if isinstance(prepared, Question):
+                if prepared.auto_seconds > 0 and tool_ran and prepared.fallback is not None:
+                    log.warning("assistant will not run %s by itself: another skill had run in this reply", call.name)
+                    prepared = prepared.fallback  # what that skill reported may be untrusted text
                 if index + 1 < len(reply.calls):
                     log.warning("assistant dropped %d skill call(s) requested after %s, which waits for confirmation",
                                 len(reply.calls) - index - 1, call.name)
                     kept = messages[asking].get("tool_calls") or []
                     messages[asking] = {**messages[asking], "tool_calls": kept[: index + 1]}
                 decision.pending = Pending(call.name, call.arguments, prepared.text, call.id, messages, turn,
-                                           voice=prepared.voice)
+                                           voice=prepared.voice, auto_seconds=prepared.auto_seconds)
                 decision.answer = prepared.text
                 return decision
             if skills.direct_only(call.name):
@@ -305,6 +311,15 @@ class _Progress:
             sentence, next_at = STILL_WORKING, time.monotonic() + PROGRESS_REPEAT_SECONDS
 
 
+def _still_playing(handed_seconds: float, first_at: float | None, now: float) -> float:
+    """Seconds of the audio handed out so far that are estimated not to have played yet, assuming playback began at the
+    first frame (`first_at`) and ran without a gap. An estimate from what was handed out, not a measurement: fastrtc
+    reports no playback position. Never negative."""
+    if first_at is None:
+        return 0.0
+    return max(0.0, handed_seconds - (now - first_at))
+
+
 def _approved(pending: Pending, skills: Skills, brain: ChatBrain, turn: Turn, stop: Callable[[], bool]) -> Decision:
     """The user said yes: run what was asked (the stored name and arguments, nothing the brain says now),
     record it on `turn`, and let the brain say in one tool-less call how it went."""
@@ -410,7 +425,7 @@ def _work(url: str, timeout: float, prompt: str, voice_name: str, skills: Skills
                 log.warning("assistant dropped the request to run %s: its question produced no audio", pending.name)
                 confirmations.take(pending.id)
             else:
-                out.put(_Asked(pending.id, spoken=True))
+                out.put(_Asked(pending.id, spoken=True, auto_seconds=pending.auto_seconds))
         if failure is not None:  # after the apology was queued: the generator raises it, so the UI shows why
             raise failure
         if first is not None:
@@ -512,6 +527,24 @@ class AssistantResponder:
             for cancel in self._runs:
                 cancel.set()
 
+    def _countdown(self, pending_id: str) -> None:
+        """Daemon thread: run the armed `auto` request `pending_id` when its time is up. It ends quietly as soon as
+        the request is no longer the current one (a click, a spoken answer, "New conversation", a newer request,
+        expiry) and when the app stops. The run goes through `approve`, which `take`s the request first: whatever
+        settles it at the same moment, it runs once or not at all."""
+        while not lifecycle.stopping.wait(POLL_SECONDS):
+            pending = self._confirmations.current()
+            if pending is None or pending.id != pending_id:
+                return
+            left = self._confirmations.remaining(pending)
+            if left is None:
+                return
+            if left <= 0:
+                log.info("assistant runs %s by itself: nobody stopped it in %g seconds", pending.name,
+                         pending.auto_seconds)
+                self.approve(pending_id)
+                return
+
     def respond(self, audio: AudioFrame, history: Sequence[Message], turn: Turn) -> Iterator[AudioFrame]:
         chunks: queue.Queue = queue.Queue()
         cancelled = threading.Event()
@@ -525,6 +558,8 @@ class AssistantResponder:
             daemon=True,
         ).start()
         spoken = ""
+        handed = 0.0  # seconds of audio yielded in this reply (the progress filler's included), as app.py counts it
+        first_at: float | None = None  # when the first frame was yielded
         asked: str | None = None  # a confirmation question in flight: its request is not answerable yet
         try:
             while True:
@@ -540,8 +575,12 @@ class AssistantResponder:
                 if isinstance(item, BaseException):
                     raise item
                 if isinstance(item, _Asked):
-                    if item.spoken:  # every frame of the question was handed out
-                        self._confirmations.arm(item.pending_id)
+                    if item.spoken:  # every frame of the question was handed out, not necessarily played
+                        playing = _still_playing(handed, first_at, time.monotonic()) if item.auto_seconds > 0 else 0.0
+                        self._confirmations.arm(item.pending_id, playing)
+                        if item.auto_seconds > 0:
+                            threading.Thread(target=self._countdown, args=(item.pending_id,),
+                                             name="vaice-assistant-auto", daemon=True).start()
                     asked = None if item.spoken else item.pending_id
                     continue
                 if item is _DONE:
@@ -554,6 +593,9 @@ class AssistantResponder:
                 if text != spoken:  # a new sentence starts: only now does the record include it
                     spoken = text
                     turn.set_assistant_text(text)
+                if first_at is None:
+                    first_at = time.monotonic()
+                handed += len(frame) / rate
                 yield rate, frame
         finally:
             if asked is not None:  # the question was cut off (barge-in, stop, error): nobody can say yes to it

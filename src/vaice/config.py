@@ -143,6 +143,11 @@ ASSISTANT_SHELL = _flag("VAICE_ASSISTANT_SHELL", default=False)
 ASSISTANT_PROGRESS_SECONDS = _number("VAICE_ASSISTANT_PROGRESS_SECONDS", default="2.5", kind=float)
 if not ASSISTANT_PROGRESS_SECONDS >= 0:
     raise SystemExit("vaice: VAICE_ASSISTANT_PROGRESS_SECONDS must be >= 0 (0 = no spoken progress)")
+# Assistant mode only: an MCP tool with the policy `auto` (VAICE_MCP_CONFIG) runs by itself this many seconds after
+# its announcement was spoken, unless you press Cancel or say stop. 0 turns it off: `auto` then works like `click`.
+ASSISTANT_AUTO_SECONDS = _number("VAICE_ASSISTANT_AUTO_SECONDS", default="5", kind=float)
+if not ASSISTANT_AUTO_SECONDS >= 0:
+    raise SystemExit("vaice: VAICE_ASSISTANT_AUTO_SECONDS must be >= 0 (0 = an `auto` tool waits for the Run button)")
 # Assistant mode only: the assistant keeps short notes you ask it to remember ("remember that I park on level
 # three") in <VAICE_DATA_DIR>/memory.json, across conversations, and puts them into every prompt (so a remote
 # helper brain gets them too). Off: no memory skills and no notes in the prompt (an existing file is left alone).
