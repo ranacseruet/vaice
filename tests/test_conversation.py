@@ -688,3 +688,61 @@ def test_a_brace_entry_that_is_not_a_valid_carrier_is_read_as_a_plain_entry():
 
     assert parse_tool_entry('{not json: out') == ("{not json", "{}", "out")
     assert parse_tool_entry('{"name": "x"}') == ('{"name"', "{}", '"x"}')  # no output key: not a carrier
+
+
+# --- a call that waited for confirmation is replayed once, with its final event
+
+SAFARI = '{"name":"Safari"}'
+
+
+def test_a_call_that_waited_and_then_finished_replays_once_with_its_result():
+    assert replayed(("quit_app", SAFARI, "waiting for confirmation"),
+                    ("quit_app", SAFARI, "quit Safari")) == [("quit_app", SAFARI, "quit Safari")]
+    for final in ("cancelled", "not confirmed", "expired"):
+        assert replayed(("quit_app", SAFARI, "waiting for confirmation"),
+                        ("quit_app", SAFARI, final)) == [("quit_app", SAFARI, final)]
+
+
+def test_a_call_still_waiting_keeps_its_single_entry():
+    assert replayed(("quit_app", SAFARI, "waiting for confirmation")) == [
+        ("quit_app", SAFARI, "waiting for confirmation")]
+
+
+def test_a_later_event_with_other_arguments_or_another_name_does_not_hide_the_waiting_one():
+    waiting = ("quit_app", SAFARI, "waiting for confirmation")
+
+    assert replayed(waiting, ("quit_app", '{"name":"Mail"}', "quit Mail")) == [
+        ("quit_app", SAFARI, "waiting for confirmation"), ("quit_app", '{"name":"Mail"}', "quit Mail")]
+    assert replayed(waiting, ("open_app", SAFARI, "opened Safari")) == [
+        ("quit_app", SAFARI, "waiting for confirmation"), ("open_app", SAFARI, "opened Safari")]
+
+
+def test_an_earlier_event_does_not_hide_a_later_waiting_one():
+    assert replayed(("quit_app", SAFARI, "quit Safari"), ("quit_app", SAFARI, "waiting for confirmation")) == [
+        ("quit_app", SAFARI, "quit Safari"), ("quit_app", SAFARI, "waiting for confirmation")]
+
+
+def test_two_identical_calls_in_one_turn_each_replay_their_result_only():
+    assert replayed(("quit_app", SAFARI, "waiting for confirmation"), ("quit_app", SAFARI, "quit Safari"),
+                    ("quit_app", SAFARI, "waiting for confirmation"), ("quit_app", SAFARI, "cancelled")) == [
+        ("quit_app", SAFARI, "quit Safari"), ("quit_app", SAFARI, "cancelled")]
+    # the second one is still waiting: only the first has a later match
+    assert replayed(("quit_app", SAFARI, "waiting for confirmation"), ("quit_app", SAFARI, "quit Safari"),
+                    ("quit_app", SAFARI, "waiting for confirmation")) == [
+        ("quit_app", SAFARI, "quit Safari"), ("quit_app", SAFARI, "waiting for confirmation")]
+
+
+def test_the_stored_events_and_the_activity_panel_still_hold_both_events():
+    c = Conversation()
+    turn = c.start_turn()
+    turn.set_user_text("q")
+    turn.add_tool_event("quit_app", SAFARI, "waiting for confirmation")
+    turn.add_tool_event("quit_app", SAFARI, "quit Safari")
+    turn.set_assistant_text("a")
+    turn.finish()
+
+    assert [e["output"] for e in turn.tool_events] == ["waiting for confirmation", "quit Safari"]
+    assert [e["output"] for e in turn.to_dict()["tools"]] == ["waiting for confirmation", "quit Safari"]
+    activity = c.tool_activity_for_ui()
+    assert "waiting for confirmation" in activity and "quit Safari" in activity
+    assert len(history_of(*[(e["name"], e["arguments"], e["output"]) for e in turn.tool_events])) == 1

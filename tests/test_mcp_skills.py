@@ -401,7 +401,7 @@ def test_a_click_only_request_shows_the_button_note_in_the_panel_and_a_voice_one
         pending = decision.pending
 
         assert isinstance(pending, Pending) and pending.voice is voice and pending.name == name
-        _, text, _ = app.confirmation_panel(app.pending_view(pending))
+        text = app.confirmation_panel(app.pending_view(pending))[1]
         assert (app.BUTTON_ONLY in text) is (not voice)
         assert f"```\n{name} {arguments}\n```" in text  # the call as it will run: the arguments are on the screen
         assert pending.question == decision.answer and "buy milk" not in decision.answer

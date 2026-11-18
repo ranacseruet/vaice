@@ -27,7 +27,7 @@ from vaice import config, lifecycle, voice
 from vaice.audio import from_pcm16
 from vaice.brain import BrainError, ChatBrain
 from vaice.confirm import Confirmations, Pending, spoken_answer
-from vaice.conversation import Message, Turn, parse_tool_entry
+from vaice.conversation import WAITING_FOR_CONFIRMATION, Message, Turn, parse_tool_entry
 from vaice.memory import REFUSED_AFTER_TOOL, Memory
 from vaice.responders.base import AudioFrame
 from vaice.responders.llamacpp import ABANDONED, _clock_line, _MarkupStripper, _Stopped, _transcribe
@@ -415,7 +415,7 @@ def _work(url: str, timeout: float, prompt: str, voice_name: str, skills: Skills
         pending = decision.pending
         if pending is not None:  # on the screen at once; answerable by voice only once the question was spoken
             confirmations.ask(pending)
-            turn.add_tool_event(pending.name, pending.arguments, "waiting for confirmation")
+            turn.add_tool_event(pending.name, pending.arguments, WAITING_FOR_CONFIRMATION)
             out.put(_Asked(pending.id, spoken=False))
         try:
             first = _speak(url, timeout, voice_name, decision.answer, out, stop, started)

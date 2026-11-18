@@ -1202,6 +1202,10 @@ def confirm_page(responder):
                            clicks=clicks)
 
 
+HIDDEN = {"visible": False, "__type__": "update"}
+SHOWN = {"visible": True, "__type__": "update"}
+
+
 def test_chat_mode_has_no_confirmation_panel():
     page = confirm_page(FakeResponder())
 
@@ -1215,32 +1219,32 @@ def test_assistant_mode_has_a_hidden_panel_with_run_and_cancel_above_the_tool_ac
     page = confirm_page(responder)
     components = page.config["components"]
 
-    assert set(page.clicks) == {"New conversation", "Run", "Cancel"}
+    assert set(page.clicks) == {"New conversation", "Run", "Cancel", "Stop", "Run now"}
     (panel,) = [c for c in components if c["type"] == "column" and c["props"].get("visible") is False]
     (accordion,) = [c for c in components if c["type"] == "accordion"]
     order = [c["id"] for c in components]
     assert order.index(panel["id"]) < order.index(accordion["id"])
-    hidden, text, pending_id, _ = page.tick("")[2:]
-    assert hidden == {"visible": False, "__type__": "update"} and text == "" and pending_id == ""
+    hidden, text, pending_id, stop_row, run_row, _ = page.tick("")[2:]
+    assert hidden == stop_row == run_row == HIDDEN and text == "" and pending_id == ""
 
 
 def test_the_panel_shows_the_question_and_exactly_what_will_run_and_is_drawn_once():
     responder = ConfirmingResponder()
     page = confirm_page(responder)
-    _, _, _, _, _, seen = page.tick("")  # the first tick draws the hidden panel
+    *_, seen = page.tick("")  # the first tick draws the hidden panel
     request = waiting_request()
     responder.waiting = request
 
-    *_, shown, text, pending_id, seen = page.tick(seen)
+    *_, shown, text, pending_id, stop_row, run_row, seen = page.tick(seen)
 
-    assert shown == {"visible": True, "__type__": "update"}
+    assert shown == SHOWN and stop_row == HIDDEN and run_row == SHOWN  # an ordinary request: Run and Cancel
     assert text == 'Shall I quit Safari?\n\n```\nquit_app {"name": "Safari"}\n```'
     assert pending_id == request.id
-    assert all(item == {"__type__": "update"} for item in page.tick(seen)[:5])  # unchanged: nothing re-renders
+    assert all(item == {"__type__": "update"} for item in page.tick(seen)[:7])  # unchanged: nothing re-renders
 
     responder.waiting = None  # settled somewhere else: the panel goes away
-    *_, hidden, text, pending_id, seen = page.tick(seen)
-    assert hidden == {"visible": False, "__type__": "update"} and pending_id == ""
+    *_, hidden, text, pending_id, stop_row, run_row, seen = page.tick(seen)
+    assert hidden == stop_row == run_row == HIDDEN and pending_id == ""
 
 
 def shell_request(command, voice, question="Shall I run the command ls? The full command is on the screen."):
@@ -1250,7 +1254,7 @@ def shell_request(command, voice, question="Shall I run the command ls? The full
 def test_a_shell_request_shows_the_command_line_itself_not_the_json():
     view = app.pending_view(shell_request("ls -la ~/Downloads", voice=True))
 
-    _, text, _ = app.confirmation_panel(view)
+    text = app.confirmation_panel(view)[1]
 
     assert text == ("Shall I run the command ls? The full command is on the screen.\n\n"
                     "```\nls -la ~/Downloads\n```")
@@ -1261,7 +1265,7 @@ def test_a_request_that_needs_the_button_says_so_under_the_question():
     view = app.pending_view(shell_request("echo a | wc -l", voice=False, question="I would run a command."))
 
     assert view["voice"] is False
-    _, text, _ = app.confirmation_panel(view)
+    text = app.confirmation_panel(view)[1]
 
     assert text == ("I would run a command.\n\n"
                     "Only the Run button can approve this one; saying yes will not.\n\n"
@@ -1269,7 +1273,7 @@ def test_a_request_that_needs_the_button_says_so_under_the_question():
 
 
 def test_a_shell_command_is_shown_exactly_and_backticks_cannot_close_its_block():
-    _, text, _ = app.confirmation_panel(app.pending_view(shell_request("echo ```x```\nls", voice=False)))
+    text = app.confirmation_panel(app.pending_view(shell_request("echo ```x```\nls", voice=False)))[1]
 
     assert text.endswith("````\necho ```x```\nls\n````")  # a newline in the command is shown as it is
 
@@ -1278,7 +1282,7 @@ def test_a_shell_command_is_shown_exactly_and_backticks_cannot_close_its_block()
 def test_a_shell_request_with_odd_arguments_falls_back_to_the_raw_call(arguments):
     request = Pending("run_shell", arguments, "Q?", "call_0", [], conv.Turn(), voice=False)
 
-    _, text, _ = app.confirmation_panel(app.pending_view(request))
+    text = app.confirmation_panel(app.pending_view(request))[1]
 
     assert f"```\nrun_shell {arguments}\n```" in text
 
@@ -1302,10 +1306,10 @@ def test_an_armed_auto_request_shows_the_whole_seconds_left_rounded_up_and_how_t
     view = app.pending_view(request)
     assert view["remaining"] == 3 and view["auto_seconds"] == 5.0  # 2.8 s left, shown as 3
 
-    _, text, _ = app.confirmation_panel(view)
+    text = app.confirmation_panel(view)[1]
 
     assert text == ("Using navigate page from chrome in 5 seconds.\n\n"
-                    "Runs by itself in 3 s; press Cancel to stop it.\n\n"
+                    "Runs by itself in 3 s; press Stop to cancel it.\n\n"
                     '```\nchrome__navigate_page {"url": "x"}\n```')
     monkeypatch.setattr(app.time, "monotonic", lambda: 200.0)
     assert app.pending_view(request)["remaining"] == 0
@@ -1318,6 +1322,47 @@ def test_the_countdown_starts_above_the_wait_by_the_audio_that_was_still_to_play
     assert app.pending_view(request)["remaining"] == 8
     monkeypatch.setattr(app.time, "monotonic", lambda: 105.5)
     assert app.pending_view(request)["remaining"] == 3
+
+
+def test_a_counting_down_request_shows_stop_first_and_run_now_and_hides_run_and_cancel(monkeypatch):
+    monkeypatch.setattr(app.time, "monotonic", lambda: 100.0)
+    view = app.pending_view(auto_request(armed_at=100.0))
+
+    panel, text, pending_id, stop_row, run_row = app.confirmation_panel(view)
+
+    assert panel == SHOWN and stop_row == SHOWN and run_row == HIDDEN and pending_id == view["id"]
+    assert "Runs by itself in 5 s; press Stop to cancel it." in text and "Cancel" not in text
+
+
+def test_an_ordinary_request_shows_run_and_cancel_and_no_stop_row():
+    for request in (waiting_request(), shell_request("ls", voice=True), shell_request("ls | wc", voice=False),
+                    auto_request(armed_at=None)):  # the last one is not armed yet: no countdown
+        panel, _, _, stop_row, run_row = app.confirmation_panel(app.pending_view(request))
+
+        assert panel == SHOWN and stop_row == HIDDEN and run_row == SHOWN
+
+
+def test_a_request_with_no_view_hides_the_panel_and_both_rows():
+    assert app.confirmation_panel(None) == (HIDDEN, "", "", HIDDEN, HIDDEN)
+
+
+def test_the_page_has_the_stop_row_first_and_the_buttons_in_the_right_rows():
+    page = confirm_page(ConfirmingResponder())
+    components = {c["id"]: c for c in page.config["components"]}
+
+    def rows(node):  # the page's layout tree: the labels of the buttons of every row, in order
+        children = node.get("children", [])
+        found = []
+        if components.get(node["id"], {}).get("type") == "row":
+            buttons = [components[c["id"]] for c in children if components[c["id"]]["type"] == "button"]
+            found = [[b["props"]["value"] for b in buttons]]
+        return found + [row for child in children for row in rows(child)]
+
+    labels = [row for row in rows(page.config["layout"]) if row]
+
+    assert labels == [["Stop", "Run now"], ["Run", "Cancel"]]
+    variants = {c["props"]["value"]: c["props"]["variant"] for c in components.values() if c["type"] == "button"}
+    assert variants["Stop"] == "stop" and variants["Run"] == "primary" and variants["Run now"] == "secondary"
 
 
 def test_an_auto_request_that_is_not_armed_yet_and_an_ordinary_one_show_no_countdown():
@@ -1334,18 +1379,18 @@ def test_the_countdown_redraws_the_panel_once_a_second_and_not_in_between(monkey
     responder.waiting = auto_request(armed_at=100.0)
     now = [100.0]
     monkeypatch.setattr(app.time, "monotonic", lambda: now[0])
-    *_, text, _, seen = page.tick("")
+    *_, text, _, _, _, seen = page.tick("")
     assert "Runs by itself in 5 s" in text
 
     now[0] = 100.4  # still 4.6 s: rounds up to 5, the same view
-    assert all(item == {"__type__": "update"} for item in page.tick(seen)[:5])
+    assert all(item == {"__type__": "update"} for item in page.tick(seen)[:7])
     now[0] = 101.2  # 3.8 s: now 4
-    *_, text, _, seen = page.tick(seen)
+    *_, text, _, _, _, seen = page.tick(seen)
     assert "Runs by itself in 4 s" in text
 
 
 def test_arguments_with_backticks_cannot_close_the_code_block():
-    _, text, _ = app.confirmation_panel(app.pending_view(waiting_request('{"name": "a ``` b"}')))
+    text = app.confirmation_panel(app.pending_view(waiting_request('{"name": "a ``` b"}')))[1]
 
     assert text.splitlines()[2] == "````" and text.splitlines()[-1] == "````"
 
@@ -1363,6 +1408,17 @@ def test_run_and_cancel_pass_the_id_the_panel_showed_and_hide_it_and_redraw_on_t
     assert responder.approved == ["id-from-the-panel"] and responder.cancelled == ["another-id"]
     assert set(run_dep["outputs"]) - state_ids != set()  # the panel itself
     assert len(run_dep["outputs"]) == 3  # the panel, the id the panel holds, and `seen`: the blank forces a redraw
+
+
+def test_stop_cancels_and_run_now_approves_exactly_as_cancel_and_run_do():
+    responder = ConfirmingResponder()
+    page = confirm_page(responder)
+    stop, stop_dep = page.clicks["Stop"]
+    run_now, run_now_dep = page.clicks["Run now"]
+
+    assert stop("id-1") == run_now("id-2") == (HIDDEN, "", "")  # hidden at once; the blank `seen` redraws
+    assert responder.cancelled == ["id-1"] and responder.approved == ["id-2"]
+    assert stop_dep["outputs"] == run_now_dep["outputs"] == page.clicks["Cancel"][1]["outputs"]
 
 
 def test_new_conversation_clears_a_waiting_request_and_chat_mode_does_not_need_the_method():
@@ -1447,8 +1503,8 @@ def test_the_memory_panel_comes_after_the_confirmation_panel_when_both_exist():
     _, tick, tick_fn = _tick_fn(stream)
 
     result = tick_fn("")
-    assert len(tick["outputs"]) == len(result) == 7  # chatbot, tool, confirm x3, memory, seen
-    assert result[5] == "Nothing remembered."
+    assert len(tick["outputs"]) == len(result) == 9  # chatbot, tool, confirm x5, memory, seen
+    assert result[7] == "Nothing remembered."
 
 
 def test_new_conversation_leaves_the_notes_alone():

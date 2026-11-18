@@ -40,14 +40,14 @@ VAICE_MODE=assistant VAICE_MCP_CONFIG=~/.vaice/mcp.json .venv/bin/vaice
   tool looser.
 - **`auto` is a stop button with a timer.** The assistant says "Using navigate page from chrome in 5 seconds.";
   the panel shows the exact call and
-  "Runs by itself in N s; press **Cancel** to stop it.". The countdown (`VAICE_ASSISTANT_AUTO_SECONDS`, default 5)
+  "Runs by itself in N s; press **Stop** to cancel it.", with the red **Stop** button first and **Run now** beside it. The countdown (`VAICE_ASSISTANT_AUTO_SECONDS`, default 5)
   runs from the **end of the announcement**, as vaice estimates it from the audio handed out to your speaker (the
   speech arrives faster than it plays, so the panel starts above 5 and counts down to 0); it is an estimate, not a
-  measured playback position. A cut-off or failed announcement never starts it, so it never runs. **Cancel**, or saying "stop", "cancel", "no" (any of the phrases in
+  measured playback position. A cut-off or failed announcement never starts it, so it never runs. **Stop**, or saying "stop", "cancel", "no" (any of the phrases in
   [Confirmation](assistant-mode.md#confirmation)) cancels it; saying anything else drops it and is handled as a new
-  question; a spoken yes or **Run** runs it at once. "New conversation" and stopping vaice end it too. Limit: speech
+  question; a spoken yes or **Run now** runs it at once. "New conversation" and stopping vaice end it too. Limit: speech
   still in progress when the timer fires has not been transcribed yet, so "stop" or "anything else" only cancels
-  speech that has already ended; the **Cancel** button always works. Whatever
+  speech that has already ended; the **Stop** button always works. Whatever
   settles it first wins and it runs at most once. With `VAICE_ASSISTANT_AUTO_SECONDS=0` an `auto` tool behaves
   exactly like `click`. Use it for calls you would not mind being made while you look away (opening a page), not
   for anything that writes, sends or spends.

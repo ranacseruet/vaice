@@ -63,13 +63,13 @@ name that is not running is refused, nothing is asked), and the request waits in
   and cannot be answered before all its audio has been handed out, so hearing itself through the
   speakers does not approve it (it can drop the request, though: use headphones, see #36).
 - **By click:** while a request waits, a panel above *Tool activity* shows the question, the skill and its
-  arguments exactly as they will run, with **Run** and **Cancel** buttons. Nothing is spoken for a click;
+  arguments exactly as they will run, with **Run** and **Cancel** buttons (an `auto` request counting down shows **Stop** and **Run now** instead, see below). Nothing is spoken for a click;
   the outcome shows in *Tool activity* and in later prompts. A panel left on screen cannot approve a newer
   request: the buttons pass the id of the request they showed.
 - A request expires 60 seconds after its question was spoken, and *New conversation* drops it.
 - An MCP tool with the policy `auto` is announced instead of asked and runs by itself
   `VAICE_ASSISTANT_AUTO_SECONDS` (5) after the announcement has played, unless one of the above settles it
-  first: **Cancel** or a spoken `stop`/`no` cancels it (see [MCP tools](mcp-tools.md)).
+  first: **Stop** or a spoken `stop`/`no` cancels it (see [MCP tools](mcp-tools.md)).
 - An utterance that could not be understood at all (noise, a cough: "Sorry, I didn't catch that.") leaves
   the request waiting; the next understood utterance settles it.
 - A bare "yes" can be too short for the pause detection to notice as speech (seen with synthetic speech
