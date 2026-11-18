@@ -40,7 +40,8 @@ Principles that decide most design questions (the long form is in the [vision](v
 | Piece | Job |
 |---|---|
 | `app.py` | The CLI (`vaice`, `vaice up`) and the Gradio page: the microphone, the transcript, the *Tool activity*, confirmation and *Memory* panels, the **New conversation** button. Wraps a `Responder` and logs time to first audio |
-| `interruptible.py` | `InterruptSafeReplyOnPause`, a fastrtc `ReplyOnPause` subclass. Tunes the VAD, keeps 0.3 s of pre-roll so opening words are not clipped, and fixes the races that made barge-in drop the interrupting question |
+| `interruptible.py` | `InterruptSafeReplyOnPause`, a fastrtc `ReplyOnPause` subclass. Tunes the VAD, keeps 0.3 s of pre-roll so opening words are not clipped, fixes the races that made barge-in drop the interrupting question, and serves the outbox when no reply is playing |
+| `outbox.py` | `Outbox`: audio frames and callback markers that a worker thread queues for speech no reply carries (the outcome of a click-approved call); the handler's idle `emit()` serves it |
 | `audio.py` | Browser frames to mono PCM16 at the model's rate, and replies back to float32 |
 | `responders/base.py` | The `Responder` contract: `respond(audio, history, turn)` yields `(sample_rate, float32 samples)` chunks and reports the transcript and the spoken text on the `turn` |
 | `conversation.py` | `Conversation` and `Turn`: the windowed history that goes into each prompt, barge-in trimming, atomic JSON persistence |
@@ -114,6 +115,21 @@ conversation" or an expiry that comes first means it runs once or not at all. If
 same task (a continuation after a spoken yes included), `decide()` swaps the question for the tool's click-only `fallback` (that skill's output may be untrusted
 text); content read in an earlier turn is not tracked.
 
+**After a click or an `auto` run** there is no reply generator to carry audio, so `approve` starts the continuation on
+a daemon thread (`vaice-assistant-task`, `_continue`): the same `Task` (tainted by the approved result), `decide()` over
+the stored chat plus the tool message, events recorded on the asking turn. A brain failure after the call ran is not
+reported as one: the call's own result is spoken. The outcome goes to an `Outbox` (`app.build_stream` creates it, passes
+it to the handler and calls the responder's optional `attach_outbox`): frames, a marker after each sentence that appends
+that sentence to the asking turn (`Turn.append_assistant_text`, the one write a closed turn accepts), and, when the
+continuation ends in another question, an arming marker whose `on_drop` takes the request back. The handler's idle
+`emit()` (no pause, no reply generator, the user not talking) serves it **paced**: fastrtc's playback queue is unbounded,
+so the next item is served only while the audio served so far (a reply's included) is estimated to end less than `LEAD_SECONDS` (0.4 s) ahead,
+which keeps the markers close to real playback. Starting to talk with no reply running clears the outbox (the drop
+hooks run) and, when proactive audio is estimated still playing, fastrtc's playback queue; with `VAICE_CAN_INTERRUPT=0`
+it does neither. A new reply, a second approval and *New conversation* cancel the continuation (one task at a time) and
+clear the outbox; speech queued while no connection polled for 30 s is dropped. Step 2 (a countdown inside a
+continuation, narration, a whole-task Stop) is not built: the question a continuation asks waits for you.
+
 ### The skills and their extensions
 
 | Skill group | Module | Notes |
@@ -178,7 +194,8 @@ repeats per build and quantization, on the chat and assistant paths; only its sc
 ```
 src/vaice/
   app.py            CLI + Gradio/WebRTC UI; wraps a Responder, logs time to first audio, transcript + reset
-  interruptible.py  ReplyOnPause subclass fixing fastrtc 0.0.34 barge-in races, VAD tuning, pre-roll buffer, reset silencing, and idle CPU polling
+  interruptible.py  ReplyOnPause subclass fixing fastrtc 0.0.34 barge-in races, VAD tuning, pre-roll buffer, reset silencing, idle CPU polling, and serving the outbox
+  outbox.py         Outbox: audio + markers for speech with no reply in flight (a click's outcome), drained by the idle emit()
   server.py         `vaice up`: reuse a running llama-server or start one (log in the data dir), wait for /health, stop it at exit
   lifecycle.py      Stop signal handler: Ctrl+C asks the app and its responders to abandon in-flight calls
   config.py         Environment-driven settings (.env.example lists them with defaults)

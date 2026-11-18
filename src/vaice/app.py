@@ -21,6 +21,7 @@ from vaice.conversation import Conversation, Turn
 from vaice.interruptible import InterruptSafeReplyOnPause, stop_playing_reply
 from vaice.lifecycle import install_stop_handler, request_stop
 from vaice.memory import Memory
+from vaice.outbox import Outbox
 from vaice.responders.assistant import AssistantResponder
 from vaice.responders.base import Responder
 from vaice.responders.llamacpp import LlamaCppResponder, check_server, fetch_tools, write_capable_tools
@@ -188,8 +189,15 @@ def make_handler(responder: Responder, conversation: Conversation):
 
 def build_stream(responder: Responder, conversation: Conversation) -> Stream:
     chatbot = gr.Chatbot(type="messages", label="Conversation", height=CHATBOT_HEIGHT, allow_tags=False)
+    # a responder that can speak with no reply in flight (assistant mode: the outcome of a click-approved call) gets the
+    # outbox the audio handler drains; chat mode has no `attach_outbox`, so no outbox either
+    attach_outbox = getattr(responder, "attach_outbox", None)
+    outbox = Outbox() if attach_outbox is not None else None
+    if attach_outbox is not None:
+        attach_outbox(outbox)
     stream = Stream(
-        handler=InterruptSafeReplyOnPause(make_handler(responder, conversation), can_interrupt=config.CAN_INTERRUPT),
+        handler=InterruptSafeReplyOnPause(make_handler(responder, conversation), can_interrupt=config.CAN_INTERRUPT,
+                                          outbox=outbox),
         modality="audio",
         mode="send-receive",
         additional_outputs=[chatbot],

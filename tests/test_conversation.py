@@ -746,3 +746,83 @@ def test_the_stored_events_and_the_activity_panel_still_hold_both_events():
     activity = c.tool_activity_for_ui()
     assert "waiting for confirmation" in activity and "quit Safari" in activity
     assert len(history_of(*[(e["name"], e["arguments"], e["output"]) for e in turn.tool_events])) == 1
+
+
+# --- append_assistant_text: the outcome of a click-approved call, joined to the question the turn asked
+
+def test_appended_text_joins_the_question_with_one_space_on_a_closed_turn():
+    c = Conversation()
+    first = exchange(c, "Open example dot com.", "Using new page from chrome in 5 seconds.")
+    c.start_turn()  # closes the turn: set_assistant_text would now be ignored
+
+    first.append_assistant_text("The page is open.")
+
+    assert first.assistant_text == "Using new page from chrome in 5 seconds. The page is open."
+    assert first.complete  # not reopened or otherwise changed
+    first.append_assistant_text("It says hello.")
+    assert first.assistant_text.endswith("The page is open. It says hello.")
+
+
+def test_appended_text_on_an_empty_turn_has_no_leading_space():
+    turn = Turn()
+
+    turn.append_assistant_text("Done.")
+
+    assert turn.assistant_text == "Done."
+
+
+def test_blank_appended_text_is_ignored_and_does_not_save():
+    saves = []
+    turn = Turn(on_change=lambda: saves.append(1))
+    turn.set_assistant_text("Question?")
+    saves.clear()
+
+    turn.append_assistant_text("")
+    turn.append_assistant_text("   \n ")
+
+    assert turn.assistant_text == "Question?" and saves == []
+
+
+def test_appended_text_is_saved_and_survives_a_reload(tmp_path):
+    path = tmp_path / "conversation.json"
+    c = Conversation(path)
+    turn = exchange(c, "Do it.", "Shall I?")
+    c.start_turn()
+
+    turn.append_assistant_text("Done.")
+
+    reloaded = Conversation(path)
+    assert reloaded.messages_for_ui()[1] == {"role": "assistant", "content": "Shall I? Done."}
+    assert json.loads(path.read_text())["turns"][0]["assistant"] == "Shall I? Done."
+    assert Turn.from_dict(turn.to_dict(), threading.RLock(), lambda: None).assistant_text == "Shall I? Done."
+
+
+def test_the_appended_outcome_is_part_of_the_turns_assistant_message_for_the_next_prompt():
+    c = Conversation()
+    turn = exchange(c, "Open it.", "Shall I open it?")
+    turn.append_assistant_text("It is open.")
+
+    history = c.history(before=c.start_turn())
+
+    assert history == [("user", "Open it."), ("assistant", "Shall I open it? It is open.")]
+
+
+def test_the_chatbot_bubble_shows_the_question_and_the_outcome():
+    c = Conversation()
+    turn = exchange(c, "Open it.", "Shall I open it?")
+    c.start_turn()
+
+    turn.append_assistant_text("It is open.")
+
+    assert c.messages_for_ui()[1] == {"role": "assistant", "content": "Shall I open it? It is open."}
+
+
+def test_appending_is_thread_safe():
+    turn = Turn()
+    threads = [threading.Thread(target=turn.append_assistant_text, args=(f"w{i}",)) for i in range(50)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(5)
+
+    assert sorted(turn.assistant_text.split()) == sorted(f"w{i}" for i in range(50))

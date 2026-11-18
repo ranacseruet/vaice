@@ -1,8 +1,13 @@
 """fastrtc's ReplyOnPause, minus the two barge-in races of fastrtc 0.0.34: the stale chunk that
 plays after the interrupt, and the interrupting utterance lost when the reply ends mid-interrupt,
-with tuned VAD options to reject brief room noise and pre-roll preservation to prevent clipped opening words."""
+with tuned VAD options to reject brief room noise and pre-roll preservation to prevent clipped opening words.
+
+It also serves an `Outbox` (outbox.py): speech queued by a worker thread outside any reply (the outcome of a call
+the user approved with a click or an `auto` countdown) is returned by the idle `emit()`, paced by the estimated end
+of its playback, and dropped when the user starts talking."""
 import logging
 import threading
+import time
 
 import numpy as np
 from fastrtc import ReplyOnPause
@@ -10,6 +15,7 @@ from fastrtc.pause_detection.silero import SileroVadOptions
 from fastrtc.utils import split_output
 
 from vaice import config
+from vaice.outbox import Marker, Outbox, run_hook
 
 log = logging.getLogger(__name__)
 
@@ -34,6 +40,11 @@ DEFAULT_VAD_OPTIONS = SileroVadOptions(
 # Tail of the last pre-speech chunk kept and prepended when `started_talking` flips to True, so an
 # utterance that begins in the last ~250 ms of a 600 ms VAD chunk does not lose its opening words.
 PREROLL_SECONDS = 0.3
+# Proactive speech is paced: fastrtc's playback queue is unbounded and emit() runs ~37 times a second, so serving
+# the outbox as fast as it is polled would queue a whole outcome at once, and its markers would fire long before the
+# audio played. The next item is served only while the audio served so far is estimated to finish less than this far
+# ahead, which keeps markers (recorded text, arming a question) within this of the real playback.
+LEAD_SECONDS = 0.4
 
 
 class InterruptSafeReplyOnPause(ReplyOnPause):
@@ -68,10 +79,22 @@ class InterruptSafeReplyOnPause(ReplyOnPause):
     It also throttles the idle polling: fastrtc calls `emit()` in a tight loop while nobody is
     talking, which burns most of a core. The idle `emit()` waits for the pause event instead of
     returning at once (the wait ends as soon as the pause is detected, so no latency is added).
+
+    And it speaks when no reply is in flight: with an `outbox` (kept by `copy()`, so every connection drains the
+    same one), an idle `emit()` — no pause pending, no reply generator, the user not talking — returns the next audio
+    frame from it and runs the markers it reaches, but only while the audio served so far is estimated to finish less
+    than `LEAD_SECONDS` ahead (`_proactive_until`; served is not played, see above), so a marker fires about when the
+    audio before it has played. When the user starts talking with no reply running (`receive()`, and only with
+    `can_interrupt`, as on the reply path), the outbox is cleared (the markers' `on_drop`s run) and, if proactive
+    audio is estimated still playing, fastrtc's playback queue is cleared too. "New conversation" clears it too.
     """
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, outbox: Outbox | None = None, **kwargs):
         super().__init__(*args, **kwargs)
+        self.outbox = outbox
+        self._clock = time.monotonic  # tests substitute a fake
+        self._proactive_lock = threading.Lock()  # emit() runs on a different worker thread per call
+        self._proactive_until = 0.0  # when the proactive audio served so far is estimated to finish playing
         if self.model_options is None:
             self.model_options = DEFAULT_VAD_OPTIONS
         if not hasattr(self, "generator"):  # the attribute the fix relies on; a fastrtc upgrade may drop it
@@ -109,6 +132,7 @@ class InterruptSafeReplyOnPause(ReplyOnPause):
         # one frame is one atomic step against the #13 restore in emit(): the state the restore
         # reads or replaces is never a half-processed frame. Holding the lock across the VAD work
         # costs emit() at most one frame of waiting, after its idle wait and reply are done.
+        speech_started = over_reply = False
         with self._state_lock:
             state = self.state
             was_talking = state.started_talking
@@ -116,6 +140,10 @@ class InterruptSafeReplyOnPause(ReplyOnPause):
             super().receive(frame)
             if not was_talking and not (state.responding and not self.can_interrupt):
                 if state.started_talking:
+                    # no reply generator: the user talks over proactive speech, not over a reply (whose own
+                    # barge-in below handles it); with can_interrupt off speech never clears what is playing
+                    speech_started = self.can_interrupt
+                    over_reply = self.generator is not None
                     preroll = getattr(state, "_preroll", None)
                     if preroll is not None and state.stream is not None:
                         state.stream = np.concatenate((preroll, state.stream))
@@ -128,6 +156,11 @@ class InterruptSafeReplyOnPause(ReplyOnPause):
                     chunk = array if buf_before is None else np.concatenate((buf_before, array))
                     keep = int((state.sampling_rate or rate) * PREROLL_SECONDS)
                     state._preroll = chunk[-keep:] if keep > 0 else None
+        if speech_started and over_reply:  # fastrtc drops the reply's queued audio: it will never play
+            with self._proactive_lock:
+                self._proactive_until = 0.0
+        elif speech_started:  # after the lock: the drop hooks may take locks of their own
+            self._drop_proactive_speech(clear_playing_audio=True)
 
     def copy(self):
         """fastrtc copies the handler for each connection, and ReplyOnPause.copy() builds a plain ReplyOnPause.
@@ -135,7 +168,9 @@ class InterruptSafeReplyOnPause(ReplyOnPause):
         The arguments go by keyword: a fastrtc release that adds, drops or reorders a parameter
         then fails loudly here instead of silently handing the handler the wrong value.
         """
-        return type(self)(**self._copy_kwargs())
+        handler = type(self)(**self._copy_kwargs())
+        handler.outbox = self.outbox  # not one of fastrtc's arguments: set here, so `_copy_kwargs` stays theirs
+        return handler
 
     def _copy_kwargs(self) -> dict:
         """The arguments `ReplyOnPause.__init__` takes, taken from this handler."""
@@ -153,7 +188,45 @@ class InterruptSafeReplyOnPause(ReplyOnPause):
             "needs_args": self.needs_args,
         }
 
+    def _serve_outbox(self):
+        """The next proactive audio frame, or None. Only when idle: no reply generator, the user not talking (a
+        pause pending is the caller's `event` check). Markers reached on the way run here, on the emit thread."""
+        outbox = self.outbox
+        if outbox is None or self.generator is not None or self.state.started_talking:
+            return None
+        while True:
+            now = self._clock()
+            with self._proactive_lock:
+                allowed = self._proactive_until - now < LEAD_SECONDS  # the audio served so far is nearly played
+            item = outbox.poll(allowed)
+            if item is None:
+                return None
+            if isinstance(item, Marker):
+                run_hook(item.callback, "marker")
+                continue
+            rate, samples = item
+            with self._proactive_lock:
+                self._proactive_until = max(self._proactive_until, now) + len(samples) / rate
+            return item
+
+    def _drop_proactive_speech(self, clear_playing_audio: bool) -> None:
+        """Forget what is queued for proactive speech (the markers' `on_drop`s run). `clear_playing_audio`: also
+        drop what fastrtc queued for playback, when proactive audio is estimated still playing (the user started
+        talking), the same queue clear fastrtc's own barge-in does."""
+        if self.outbox is None:
+            return
+        self.outbox.clear()
+        with self._proactive_lock:
+            playing = self._clock() < self._proactive_until
+            self._proactive_until = 0.0
+        if clear_playing_audio and playing:
+            clear_queue = getattr(self, "_clear_queue", None)  # wired up when the audio track starts
+            if clear_queue is not None:
+                clear_queue()
+
     def emit(self):
+        if self.outbox is not None:
+            self.outbox.touch()  # a connection is polling: what is queued is not stale, even during a long reply
         if not self.event.is_set():
             # Nobody is talking: fastrtc calls emit() in a tight loop (utils.py:
             # player_worker_decode), which burns most of a core (~32k calls/s, measured). Waiting
@@ -162,7 +235,7 @@ class InterruptSafeReplyOnPause(ReplyOnPause):
             # wait ends as soon as the pause is detected, so the reply still starts right away.
             self.event.wait(timeout=IDLE_WAIT_SECONDS)
             if not self.event.is_set():
-                return None  # still nobody talking: fastrtc skips a None
+                return self._serve_outbox()  # still nobody talking: proactive speech, else None (fastrtc skips it)
         started_with = self.generator
         with self._state_lock:
             self._emit_thread = threading.current_thread()
@@ -191,13 +264,29 @@ class InterruptSafeReplyOnPause(ReplyOnPause):
                 self.event.set()
                 log.debug("restored the barge-in pause the ending reply's reset() wiped")
         interrupted = self.generator is None or (started_with is not None and self.generator is not started_with)
-        if output is None or not interrupted:
+        if output is None:
             return output
         audio, extra = split_output(output)
-        if audio is None:
-            return output
-        log.debug("dropped a chunk of the interrupted reply")
-        return extra
+        if interrupted and audio is not None:
+            log.debug("dropped a chunk of the interrupted reply")
+            return extra
+        if audio is not None:
+            self._note_playing(audio)
+        return output
+
+    def _note_playing(self, audio) -> None:
+        """Reply audio just handed to fastrtc plays before anything served after it: count it in the estimated playback
+        end that paces proactive speech, so an outcome queued while a question is still playing waits behind it."""
+        if self.outbox is None:
+            return
+        try:
+            rate, samples = audio
+            seconds = np.size(samples) / rate
+        except (TypeError, ValueError, ZeroDivisionError):  # not an audio tuple: nothing to count
+            return
+        now = self._clock()
+        with self._proactive_lock:
+            self._proactive_until = max(self._proactive_until, now) + seconds
 
 
 def stop_playing_reply(handler: ReplyOnPause) -> None:
@@ -213,6 +302,9 @@ def stop_playing_reply(handler: ReplyOnPause) -> None:
         log.warning("cannot stop the reply: fastrtc's ReplyOnPause has no reset()")
         return
     handler.reset()
+    drop_proactive = getattr(handler, "_drop_proactive_speech", None)
+    if drop_proactive is not None:  # speech queued with no reply (a click's outcome) belongs to the old conversation
+        drop_proactive(clear_playing_audio=False)
     clear_queue = getattr(handler, "_clear_queue", None)  # wired up when the audio track starts
     if clear_queue is not None:
         clear_queue()

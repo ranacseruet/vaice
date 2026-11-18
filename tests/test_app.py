@@ -1647,3 +1647,28 @@ def test_a_remote_helper_warning_says_the_saved_notes_are_sent_too_only_while_me
 
     (warning,) = [r for r in caplog.records if "not on this machine" in r.getMessage()]
     assert "notes" not in warning.getMessage()
+
+
+class OutboxResponder(FakeResponder):
+    """An assistant-like responder: it takes an outbox from `build_stream` (the optional `attach_outbox`)."""
+
+    outbox = None
+
+    def attach_outbox(self, outbox):
+        self.outbox = outbox
+
+
+def test_an_assistant_like_responder_gets_the_outbox_the_handler_serves():
+    responder = OutboxResponder()
+
+    stream = build_stream(responder, Conversation())
+
+    assert responder.outbox is not None
+    assert stream.event_handler.outbox is responder.outbox
+    assert stream.event_handler.copy().outbox is responder.outbox  # every connection's copy drains the same outbox
+
+
+def test_a_responder_without_attach_outbox_gets_a_stream_without_one():
+    stream = build_stream(FakeResponder(), Conversation())
+
+    assert stream.event_handler.outbox is None
