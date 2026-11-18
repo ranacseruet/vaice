@@ -124,7 +124,7 @@ skill call lands in the collapsed *Tool activity* panel. Limits: the skills use 
 assistant mode is macOS only; a request can use one or two skills (the brain is told to use a tool
 only for questions about this computer, and answers everything else itself); and because each
 sentence is synthesized separately, prosody is less natural than the speech-to-speech path. The
-prompt is `VAICE_ASSISTANT_PROMPT`. `python evals/run.py --paths assistant` measures how reliably
+prompt is `VAICE_ASSISTANT_PROMPT` (its last sentence makes the brain use a tool again for live facts such as the screen instead of answering from an earlier answer; keep it if you replace the prompt). `python evals/run.py --paths assistant` measures how reliably
 spoken questions reach the right skill (see `evals/README.md`).
 
 ## Memory
