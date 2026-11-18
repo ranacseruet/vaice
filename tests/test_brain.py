@@ -89,6 +89,14 @@ def test_the_helper_posts_to_its_base_plus_chat_completions_without_doubling_v1(
     assert "/v1/v1" not in post.sent[0][0]
 
 
+def test_the_helper_sends_no_token_cap_unless_given_one(post):
+    ChatBrain.helper("http://h/v1", 5).complete(MESSAGES, None)
+    ChatBrain.helper("http://h/v1", 5, max_tokens=200).complete(MESSAGES, None)
+
+    assert "max_tokens" not in post.sent[0][1]
+    assert post.sent[1][1]["max_tokens"] == 200
+
+
 def test_a_helper_base_without_v1_is_used_as_given(post):
     ChatBrain.helper("http://localhost:11434", 5).complete(MESSAGES, None)
     assert post.sent[0][0] == "http://localhost:11434/chat/completions"

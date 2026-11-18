@@ -35,6 +35,7 @@ Precedence: variables already in the environment (e.g. `set -a; source .env; set
 | `VAICE_VISION_MODEL` | *(empty)* | The `model` sent to the vision endpoint. Hosted endpoints need it (startup warns when it is empty); a `llama-server` serving one model does not |
 | `VAICE_VISION_API_KEY` | *(empty)* | Sent to the vision endpoint as `Authorization: Bearer …`. A secret: never logged, never in an error message. Put it in `.env` or the environment, not on a command line |
 | `VAICE_VISION_TIMEOUT` | `30` | Seconds the vision endpoint may take for one request (must be > 0) |
+| `VAICE_VISION_MAX_TOKENS` | `200` | Upper bound on the vision model's answer, in tokens (`0` = send none; for a hosted model that rejects `max_tokens`) |
 | `VAICE_MCP_CONFIG` | *(empty: no MCP tools)* | Assistant mode only: path to a JSON file naming MCP servers to start and the tools to offer from them (see [MCP tools](mcp-tools.md); `~` is expanded). Needs the optional extra: `uv sync --extra mcp`. Ignored in chat mode (one warning). **Each server is a program vaice starts with your permissions, and what its tools receive and return goes to the brain** |
 | `VAICE_MCP_TIMEOUT` | `30` | Seconds a server may take to start and, separately, to answer one tool call (must be > 0) |
 | `VAICE_LLAMACPP_PROMPT` | `Reply naturally and concisely in 1 to 2 spoken sentences.` | Reply instructions; `vaice` prepends `Respond with interleaved text and audio.` |

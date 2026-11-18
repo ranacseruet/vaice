@@ -206,6 +206,13 @@ VISION_API_KEY = _env("VAICE_VISION_API_KEY", default="").strip()
 VISION_TIMEOUT = _number("VAICE_VISION_TIMEOUT", default="30", kind=float)
 if VISION_TIMEOUT <= 0:
     raise SystemExit("vaice: VAICE_VISION_TIMEOUT must be > 0")
+# Upper bound on the vision model's answer, in tokens (0 = send none). Without one, LFM3-Omni-2B described a busy
+# screen at 400 to 830 tokens (5 to 9 s) and sometimes ran on until VISION_TIMEOUT ("I can't reach my vision
+# model"); only the first MAX_ANSWER_CHARS of the answer are used anyway. Some hosted models reject `max_tokens`
+# (they want `max_completion_tokens`): set 0 for those.
+VISION_MAX_TOKENS = _number("VAICE_VISION_MAX_TOKENS", default="200", kind=int)
+if VISION_MAX_TOKENS < 0:
+    raise SystemExit("vaice: VAICE_VISION_MAX_TOKENS must be >= 0")
 
 # Assistant mode only: MCP (Model Context Protocol) tools as skills (mcp_skills.py). A JSON file in Claude Desktop's
 # `mcpServers` shape names the stdio servers to start and, per server, the tools to offer and how each is approved

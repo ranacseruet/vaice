@@ -69,10 +69,12 @@ class ChatBrain:
         return cls(chat_endpoint(f"{url.rstrip('/')}/v1"), timeout)
 
     @classmethod
-    def helper(cls, base_url: str, timeout: float, model: str = "", api_key: str = "") -> "ChatBrain":
-        """Any OpenAI-compatible endpoint at `base_url` (`/v1` included): only messages, tools and the model."""
+    def helper(cls, base_url: str, timeout: float, model: str = "", api_key: str = "",
+               max_tokens: int | None = None) -> "ChatBrain":
+        """Any OpenAI-compatible endpoint at `base_url` (`/v1` included): only messages, tools and the model, plus
+        `max_tokens` when given (the vision model needs one: see `config.VISION_MAX_TOKENS`)."""
         return cls(chat_endpoint(base_url), timeout, model or None, api_key or None, temperature=None,
-                   max_tokens=None)
+                   max_tokens=max_tokens)
 
     def complete(self, messages: list[dict], tools: list[dict] | None) -> BrainReply:
         """One completion. `tools` are chat-completions definitions; none = a plain answer."""
