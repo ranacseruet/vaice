@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **"What do you see now?" answered from the earlier screen answer** instead of taking a new screenshot (assistant mode, `look_at_screen`). The model answered from the conversation history without calling the skill (replaying a real conversation: 0 of 5 looked again). The default assistant prompt now says the screen, battery, disk and other live facts change so the tool must be used again, and the skill's description says every call takes a new screenshot; the same replay then looks again 5 of 5. Eval cases can carry their own `history`, and three follow-up cases were added (plus two for the battery: `battery-again` still misses, 0/5).
+
 ### Changed
 - **Default model is now LFM3-Omni-2B `Q8_0`** (`VAICE_LLAMACPP_MODEL`, was LFM3-Audio-2B `Q4_K_M`): it speaks, listens and reads images, so one server can serve chat mode, assistant mode and `look_at_screen`. The download is about 2.4 GB (4 GB of memory loaded, was about 1 GB). On the 51 assistant cases it scored 250/255 against 225/255 for the old default; chat mode and assistant mode were checked in a browser. Memory, shell and vision stay off by default because each costs points on ordinary requests (measured numbers in AGENTS.md). Set `VAICE_LLAMACPP_MODEL=LiquidAI/LFM3-Audio-2B-GGUF:Q4_K_M` for the old one.
 - **Docs: the Jarvis name is explained** (J.A.R.V.I.S., the AI in the *Iron Man* films) in the README and `docs/vision.md`.

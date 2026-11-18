@@ -465,16 +465,18 @@ def main(argv: list[str] | None = None) -> None:
             # repeats outermost: a drifting server (thermals, cache) spreads over the cases instead of one
             for repeat in range(1, args.repeats + 1):
                 for case in cases:
+                    # a case may carry its own earlier turns (even with --no-history: that is what it tests)
+                    turns = [tuple(entry) for entry in case["history"]] if "history" in case else history
                     for path in args.paths:
                         if path == "interleaved":
-                            record = run_interleaved(url, prompts[path], tools, results, audio[case["id"]], history)
+                            record = run_interleaved(url, prompts[path], tools, results, audio[case["id"]], turns)
                         elif path == "assistant":
                             memory = None if args.no_memory else case_memory(case)  # fresh for every run
                             skills = stub_skills(shell=args.shell, memory=memory, vision=args.vision)
-                            record = run_assistant(url, prompts[path], skills, audio[case["id"]], history, brain,
+                            record = run_assistant(url, prompts[path], skills, audio[case["id"]], turns, brain,
                                                    notes=[] if memory is None else memory.notes())
                         else:
-                            record = run_text(url, prompts[path], tools, audio[case["id"]], history)
+                            record = run_text(url, prompts[path], tools, audio[case["id"]], turns)
                         record.update(case=case["id"], say=case["say"], path=path, repeat=repeat)
                         if not record["error"]:
                             calls = [tuple(c) for c in record["calls"]]

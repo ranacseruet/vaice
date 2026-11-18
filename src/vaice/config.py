@@ -130,7 +130,9 @@ ASSISTANT_PROMPT = _env(
     "VAICE_ASSISTANT_PROMPT",
     default="You are a voice assistant on the user's Mac. Your reply is spoken aloud: answer in one or two short "
             "plain sentences, with no lists, symbols or file paths. Use a tool only when the question is about "
-            "this computer; answer everything else yourself.",
+            "this computer; answer everything else yourself. The computer changes all the time: for each question "
+            "about the screen, the battery, the disk or other live facts, use the tool again, even if you answered "
+            "the same kind of question earlier.",
 )
 # Assistant mode only: adds the `run_shell` skill (shell.py). Every command is approved first; only a short
 # list of harmless ones by voice, the rest only by the UI's Run button. Off: the skill does not exist.

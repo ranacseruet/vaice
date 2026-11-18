@@ -65,7 +65,7 @@ The results file holds the config, server info, label, and every run's raw recor
 
 ## Cases
 
-`cases.json` is a list of `{"id", "say", "expect"}`. `expect` is one of:
+`cases.json` is a list of `{"id", "say", "expect"}`, plus an optional `"history"`: a list of `["user" | "assistant" | "tool", text]` earlier turns that replaces the default history for that case (also under `--no-history`), for a follow-up that only makes sense after an earlier answer (`vision-look-again`: "what do you see now?" after a screen answer). `expect` is one of:
 
 ```json
 {"tools": ["open_app"], "args": {"open_app": {"name": "Safari"}}}

@@ -151,6 +151,28 @@ def test_the_vision_cases_run_with_the_flag_and_record_it_in_the_results(monkeyp
     assert "Numbers" in document["runs"][0]["answer"]
 
 
+def test_a_case_with_its_own_history_runs_with_it_even_without_the_history_flag(monkeypatch, tmp_path):
+    monkeypatch.setattr(eval_run.config, "BRAIN_URL", "")
+    monkeypatch.setattr(eval_run, "server_info", lambda url: {"url": url})
+    monkeypatch.setattr(eval_run, "audio_for", lambda case, scratch: (16000, None))
+    seen = {}
+
+    def run(url, prompt, skills, audio, history, brain=None, notes=()):
+        seen.setdefault(len(seen), history)
+        return {"error": None, "calls": [], "transcript": "x", "answer": "a", "pending": False, "latency_s": 0.1}
+
+    monkeypatch.setattr(eval_run, "run_assistant", run)
+
+    eval_run.main(["--paths", "assistant", "--no-history", "--vision", "--no-memory", "--repeats", "1",
+                   "--cases-file", "assistant_vision_cases.json", "--cases", "vision-look-again,vision-whats-on",
+                   "--out", str(tmp_path / "out.json")])
+
+    with_own, without = seen[0], seen[1]
+    assert [role for role, _ in with_own] == ["user", "tool", "assistant"]  # the case's own turns, as tuples
+    assert all(isinstance(entry, tuple) for entry in with_own)
+    assert without == []  # a case with none follows --no-history
+
+
 def test_the_action_stubs_answer_from_their_own_arguments():
     stubs = eval_run.stub_skills()
 
