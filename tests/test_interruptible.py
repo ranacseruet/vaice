@@ -983,3 +983,23 @@ def test_reply_audio_still_queued_in_fastrtc_holds_back_the_proactive_frames_beh
     assert len(rig.handler.outbox) == 2
     clock.now += 0.7
     assert rig.start_emit().join() is outcome  # 0.3 s left: it may be queued now
+
+
+def test_interrupting_an_ordinary_reply_forgets_its_audio_in_the_playback_estimate(monkeypatch):
+    # fastrtc drops the queued reply audio when it is interrupted: the pacing must not wait for audio that never plays
+    monkeypatch.setattr(interruptible, "IDLE_WAIT_SECONDS", 0.001)
+    clock = FakeClock()
+    rig = Rig(InterruptSafeReplyOnPause, lambda _audio: iter([second_of_speech(1.0), second_of_speech(2.0)]),
+              outbox=Outbox(clock))
+    rig.handler._clock = clock
+    dropped = []
+    rig.handler.outbox.touch()  # a connection is draining it, so nothing is stale
+    rig.user_speaks_then_pauses()
+    assert rig.start_emit().join() is not None  # a second of reply audio queued: the estimate now runs ahead
+    rig.handler.outbox.put_marker(lambda: None, on_drop=lambda: dropped.append(1))  # queued while the reply plays
+    assert rig.handler._proactive_until > clock.now
+
+    speech_only(rig)  # the user talks over the reply (the reply generator is still attached)
+
+    assert rig.handler._proactive_until == 0.0
+    assert dropped == []  # the outbox itself is for the reply path's own barge-in: untouched here

@@ -3234,3 +3234,22 @@ def test_a_new_conversation_between_the_run_and_its_continuation_starts_no_conti
 
     assert not brain.entered.is_set() and len(outbox) == 0
     assert [b["input"] for b in tts.bodies] == [QUESTION]
+
+
+def test_a_new_utterance_while_a_click_approved_skill_runs_starts_no_continuation_afterwards(tts, monkeypatch):
+    brain = ContinuationBrain(answer("Safari is closed."))
+    s = asked()
+    s.resp._brain = brain
+    outbox = with_outbox(s)
+    real_run = s.resp.skills.run
+
+    def run_after_a_new_utterance(*args, **kwargs):
+        s.resp._cancel_task()  # what respond() does when the user speaks while the approved skill is still running
+        return real_run(*args, **kwargs)
+
+    monkeypatch.setattr(s.resp.skills, "run", run_after_a_new_utterance)
+
+    s.resp.approve(s.resp.pending().id)
+    wait_for_continuation()
+
+    assert not brain.entered.is_set() and len(outbox) == 0

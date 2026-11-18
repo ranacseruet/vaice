@@ -132,7 +132,7 @@ class InterruptSafeReplyOnPause(ReplyOnPause):
         # one frame is one atomic step against the #13 restore in emit(): the state the restore
         # reads or replaces is never a half-processed frame. Holding the lock across the VAD work
         # costs emit() at most one frame of waiting, after its idle wait and reply are done.
-        speech_started = False
+        speech_started = over_reply = False
         with self._state_lock:
             state = self.state
             was_talking = state.started_talking
@@ -142,7 +142,8 @@ class InterruptSafeReplyOnPause(ReplyOnPause):
                 if state.started_talking:
                     # no reply generator: the user talks over proactive speech, not over a reply (whose own
                     # barge-in below handles it); with can_interrupt off speech never clears what is playing
-                    speech_started = self.generator is None and self.can_interrupt
+                    speech_started = self.can_interrupt
+                    over_reply = self.generator is not None
                     preroll = getattr(state, "_preroll", None)
                     if preroll is not None and state.stream is not None:
                         state.stream = np.concatenate((preroll, state.stream))
@@ -155,7 +156,10 @@ class InterruptSafeReplyOnPause(ReplyOnPause):
                     chunk = array if buf_before is None else np.concatenate((buf_before, array))
                     keep = int((state.sampling_rate or rate) * PREROLL_SECONDS)
                     state._preroll = chunk[-keep:] if keep > 0 else None
-        if speech_started:  # after the lock: the drop hooks may take locks of their own
+        if speech_started and over_reply:  # fastrtc drops the reply's queued audio: it will never play
+            with self._proactive_lock:
+                self._proactive_until = 0.0
+        elif speech_started:  # after the lock: the drop hooks may take locks of their own
             self._drop_proactive_speech(clear_playing_audio=True)
 
     def copy(self):

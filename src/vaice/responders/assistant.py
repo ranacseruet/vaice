@@ -650,6 +650,7 @@ class AssistantResponder:
         self._outbox: Outbox | None = None  # where a continuation speaks (see `attach_outbox`)
         self._task_cancel: threading.Event | None = None  # the running continuation's; one task at a time
         self._task_lock = threading.Lock()
+        self._task_epoch = 0  # bumped by every `_cancel_task`: an approval begun before it must not continue
 
     def attach_outbox(self, outbox: Outbox) -> None:
         """Where the outcome of a call approved by a click or an `auto` countdown is spoken: no reply is in flight
@@ -672,6 +673,8 @@ class AssistantResponder:
         Gradio worker's: "New conversation" (`clear_pending`) or the app ending stops it; otherwise only the
         skill's own time limit does."""
         cancel = threading.Event()
+        with self._task_lock:
+            epoch = self._task_epoch  # a new utterance or "New conversation" after this ends the task this starts
         with self._runs_lock:  # before `take`, so a "New conversation" in between cannot miss this run
             self._runs.add(cancel)
         try:
@@ -684,21 +687,24 @@ class AssistantResponder:
             # The task goes on (#110), as after a spoken yes (`_approved`), but outside any reply: on a thread of its
             # own, speaking through the outbox. `cancel` stays registered until it is: "New conversation" lands either
             # before (it sets `cancel`) or after (it cancels the registered task), never in between.
-            self._start_continuation(pending, result, cancel)
+            self._start_continuation(pending, result, cancel, epoch)
         finally:
             with self._runs_lock:
                 self._runs.discard(cancel)
         return result.speech
 
-    def _start_continuation(self, pending: Pending, result: SkillResult, run_cancel: threading.Event) -> None:
+    def _start_continuation(self, pending: Pending, result: SkillResult, run_cancel: threading.Event,
+                            epoch: int) -> None:
         """One task at a time: a continuation already running is cancelled (its queued audio stays; what it has not
         queued yet is never queued) and this one starts, unless the run that led to it was stopped (`run_cancel`, set
-        by "New conversation" before it takes the task lock) or the app is ending. Checked under the task lock, so it
-        is atomic with the registration `_cancel_task` looks at."""
+        by "New conversation" before it takes the task lock), `epoch` is stale (`_cancel_task` ran since the approval
+        began: a new utterance ends the task a click started, even while the approved call itself is allowed to
+        finish) or the app is ending. Checked under the task lock, so it is atomic with the registration
+        `_cancel_task` looks at."""
         cancelled = threading.Event()
         with self._task_lock:
-            if run_cancel.is_set() or lifecycle.stopping.is_set():
-                return
+            if run_cancel.is_set() or epoch != self._task_epoch or lifecycle.stopping.is_set():
+                return  # stopped, or a new utterance / "New conversation" came while the approved call ran
             if self._task_cancel is not None:
                 self._task_cancel.set()
             self._task_cancel = cancelled
@@ -713,6 +719,7 @@ class AssistantResponder:
     def _cancel_task(self) -> None:
         """Stop the running continuation, if any, and drop what it queued: it is no longer wanted."""
         with self._task_lock:
+            self._task_epoch += 1
             cancelled, self._task_cancel = self._task_cancel, None
         if cancelled is not None:
             cancelled.set()
