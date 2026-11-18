@@ -48,7 +48,9 @@ VAICE_MODE=assistant VAICE_MCP_CONFIG=~/.vaice/mcp.json .venv/bin/vaice
   question; a spoken yes or **Run now** runs it at once. "New conversation" and stopping vaice end it too. Limit: speech
   still in progress when the timer fires has not been transcribed yet, so "stop" or "anything else" only cancels
   speech that has already ended; the **Stop** button always works. Whatever
-  settles it first wins and it runs at most once. With `VAICE_ASSISTANT_AUTO_SECONDS=0` an `auto` tool behaves
+  settles it first wins and it runs at most once. After an `auto` run (and after **Run** on any request) the task goes
+  on: the assistant checks the result, may call more tools and says how it went, a few seconds later and with no new
+  utterance from you; starting to talk over it stops it. With `VAICE_ASSISTANT_AUTO_SECONDS=0` an `auto` tool behaves
   exactly like `click`. Use it for calls you would not mind being made while you look away (opening a page), not
   for anything that writes, sends or spends.
 - **`auto` never follows another skill in the same task.** If any other skill ran earlier in the task (the reply, and

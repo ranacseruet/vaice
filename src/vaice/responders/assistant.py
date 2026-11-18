@@ -7,7 +7,9 @@ A skill that cannot be undone (`kind="confirm"`) does not run when the brain ask
 question and the request waits in `confirm.Confirmations`. The next reply (the user's answer) or a click
 in the UI settles it; the brain never interprets the answer. A request with `auto_seconds` also runs by itself
 that long after its question was fully spoken (`AssistantResponder._countdown`, a daemon thread that goes through
-`approve`, so it is exactly as atomic as a click).
+`approve`, so it is exactly as atomic as a click). A call approved by a click or a countdown runs outside any reply,
+so its task continues on a daemon thread of its own (`_continue`) and the outcome is spoken through the `Outbox` that
+the handler's idle emit() serves (see `outbox.py`).
 
 Threading follows `LlamaCppResponder`: `respond()` starts one daemon thread that does all the blocking
 work and hands frames to the generator through a queue, so fastrtc may resume the generator from any
@@ -30,6 +32,7 @@ from vaice.brain import BrainError, ChatBrain
 from vaice.confirm import Confirmations, Pending, spoken_answer
 from vaice.conversation import WAITING_FOR_CONFIRMATION, Message, Turn, parse_tool_entry
 from vaice.memory import REFUSED_AFTER_TOOL, Memory
+from vaice.outbox import Outbox
 from vaice.responders.base import AudioFrame
 from vaice.responders.llamacpp import ABANDONED, _clock_line, _MarkupStripper, _Stopped, _transcribe
 from vaice.shell import NEEDS_BUTTON
@@ -274,10 +277,11 @@ def _tts(url: str, timeout: float, voice_name: str, text: str, stop: Callable[[]
         r.close()
 
 
-def _speak(url: str, timeout: float, voice_name: str, answer: str, out: queue.Queue, stop: Callable[[], bool],
-           started: float) -> float | None:
-    """Put the audio of `answer` on `out`, a sentence at a time, each frame with the text spoken so far
-    (the sentences up to and including its own). Returns the seconds to the first audio, if there was any."""
+def _speak(url: str, timeout: float, voice_name: str, answer: str, out: "queue.Queue | _OutboxSink",
+           stop: Callable[[], bool], started: float) -> float | None:
+    """Put the audio of `answer` on `out` (anything with `put`), a sentence at a time, each frame with the text
+    spoken so far (the sentences up to and including its own). Returns the seconds to the first audio, if there was
+    any."""
     first: float | None = None
     said: list[str] = []
     for sentence in voice.sentences(voice.speakable(answer)):
@@ -390,6 +394,109 @@ def _approved(pending: Pending, skills: Skills, brain: ChatBrain, turn: Turn, st
         return Decision(result.speech, ran)
     decision.calls = ran
     return decision
+
+
+class _OutboxSink:
+    """Where `_speak` puts an outcome that no reply carries: the frames go to the `Outbox`, and after each
+    sentence's frames a marker records that sentence on the asking turn, so the text is recorded when its audio was
+    served, never earlier (a barge-in that clears the outbox leaves the unspoken part out of the record). Nothing but
+    the text of one sentence is held, so memory stays small however long the outcome is."""
+
+    def __init__(self, outbox: Outbox, turn: Turn, stop: Callable[[], bool]):
+        self._outbox, self._turn, self._stop = outbox, turn, stop
+        self.generation = outbox.generation  # what a clear since then (a barge-in, a new reply) refuses
+        self._current = ""  # the text so far, as of the latest frame put
+        self._recorded = ""  # the text so far that a marker already covers
+        self.frames = 0
+
+    def put(self, item: tuple) -> None:  # (rate, frame, the text so far), as `_speak` puts it
+        rate, frame, text = item
+        if self._stop():  # cancelled meanwhile: nothing more goes out
+            raise _Stopped
+        if text != self._current:  # a new sentence starts: the one before it is complete
+            self.finish()
+            self._current = text
+        if not self._outbox.put((rate, frame), self.generation):  # the outbox was cleared: this is over
+            raise _Stopped
+        self.frames += 1
+
+    def finish(self) -> None:
+        """Queue the marker that records the sentence whose frames were put last, if one is not queued yet."""
+        sentence = self._current[len(self._recorded):].strip()
+        self._recorded = self._current
+        if sentence:
+            self._outbox.put_marker(partial(self._turn.append_assistant_text, sentence), generation=self.generation)
+
+
+def _continue(url: str, timeout: float, voice_name: str, skills: Skills, brain: ChatBrain,
+              confirmations: Confirmations, pending: Pending, result: SkillResult, cancelled: threading.Event,
+              outbox: Outbox | None, new_task: Callable[[], Task] = Task.start) -> None:
+    """Daemon thread: the task goes on after a call the user approved with a click or an `auto` countdown (`pending`,
+    which ran with `result`), as `_approved` does after a spoken yes, but with no reply in flight to carry the outcome.
+
+    The brain sees the result in the same task (tainted: it is a tool result), may call more skills and ends in an
+    answer or another confirmation question; both are recorded on the asking turn (`pending.turn`) and spoken through
+    `outbox` (nothing is spoken without one). A question is on the screen at once and answerable only once its audio
+    was served: the last marker arms it, and a drop of that marker (nobody heard it) takes it back. It has no
+    countdown here (the next stage). The call already ran, so a failure of the brain is not reported as one: the call's
+    own result is spoken, as `_approved` does. Takes only plain data, never the responder."""
+
+    def stop() -> bool:
+        return cancelled.is_set() or lifecycle.stopping.is_set()
+
+    turn = pending.turn
+    question: Pending | None = None
+    try:
+        task = pending.task if isinstance(pending.task, Task) else new_task()
+        task.tainted = True
+        messages = [*pending.messages, {"role": "tool", "tool_call_id": pending.call_id, "content": result.speech}]
+        try:
+            decision = decide(brain, skills, messages, stop,
+                              lambda call: turn.add_tool_event(call.name, call.arguments,
+                                                               call.result.detail or call.result.speech),
+                              turn=turn, task=task, empty_answer=result.speech)
+        except _Stopped:
+            return
+        except Exception as exc:  # noqa: BLE001 - the skill already ran: say what it did, whatever went wrong after
+            log.warning("assistant brain failed after %s ran: %s: %s", pending.name, type(exc).__name__, exc)
+            decision = Decision(result.speech)
+        if stop():
+            return
+        question = decision.pending
+        if question is not None:  # on the screen at once, like `_work` does
+            if question.auto_seconds > 0:
+                log.info("assistant does not count down %s in a continuation: it waits for the user", question.name)
+                question.auto_seconds = 0
+            confirmations.ask(question)
+            turn.add_tool_event(question.name, question.arguments, WAITING_FOR_CONFIRMATION)
+        if outbox is None:  # nothing can be spoken: the question can only be answered from the screen, now
+            if question is not None:
+                confirmations.arm(question.id)
+            return
+        sink = _OutboxSink(outbox, turn, stop)
+        try:
+            _speak(url, timeout, voice_name, decision.answer, sink, stop, time.perf_counter())
+            if stop():  # cancelled as its last audio was being fetched: nothing of it may be recorded or armed
+                raise _Stopped
+        except _Stopped:
+            raise
+        except Exception as exc:  # noqa: BLE001 - nothing escapes a daemon thread; what was queued still counts
+            log.warning("assistant could not speak the outcome of %s: %s: %s", pending.name, type(exc).__name__, exc)
+            sink.finish()
+            if question is not None:
+                confirmations.take(question.id)
+            return
+        sink.finish()
+        if question is not None:
+            if sink.frames == 0:  # /tts sent no audio: the question was never heard, so nobody can say yes to it
+                log.warning("assistant dropped the request to run %s: its question produced no audio", question.name)
+                confirmations.take(question.id)
+            else:  # armed when the handler reaches this marker, i.e. once the question's audio was served
+                outbox.put_marker(partial(confirmations.arm, question.id),
+                                  on_drop=partial(confirmations.take, question.id), generation=sink.generation)
+    except _Stopped:  # cancelled while speaking: a question nobody heard to the end must not stay answerable
+        if question is not None:
+            confirmations.take(question.id)
 
 
 def _decision(prompt: str, history: Sequence[Message], transcript: str, skills: Skills, brain: ChatBrain,
@@ -540,10 +647,19 @@ class AssistantResponder:
         self._task_seconds = task_seconds
         self._runs: set[threading.Event] = set()  # per click-approved run: set by `clear_pending` to stop it
         self._runs_lock = threading.Lock()
+        self._outbox: Outbox | None = None  # where a continuation speaks (see `attach_outbox`)
+        self._task_cancel: threading.Event | None = None  # the running continuation's; one task at a time
+        self._task_lock = threading.Lock()
 
-    # The UI's side of a confirmation (see Responder). These run on the caller's thread (a Gradio worker),
-    # not on a reply's: there is no reply in flight to carry audio, so nothing is spoken on this path; the
-    # outcome lands on the asking turn's tool events, which the Tool activity panel shows.
+    def attach_outbox(self, outbox: Outbox) -> None:
+        """Where the outcome of a call approved by a click or an `auto` countdown is spoken: no reply is in flight
+        then, so the audio goes to `outbox`, which the audio handler drains (see Responder and `outbox.py`)."""
+        self._outbox = outbox
+
+    # The UI's side of a confirmation (see Responder). These run on the caller's thread (a Gradio worker, or the
+    # countdown's), not on a reply's: there is no reply in flight to carry audio, so what follows a click is a
+    # continuation of its own (`_continue`) that speaks through the outbox; the outcome of the call itself also lands
+    # on the asking turn's tool events, which the Tool activity panel shows.
 
     def pending(self) -> Pending | None:
         """The request waiting for the user, if any."""
@@ -568,9 +684,36 @@ class AssistantResponder:
             with self._runs_lock:
                 self._runs.discard(cancel)
         pending.turn.add_tool_event(pending.name, pending.arguments, result.detail or result.speech)
-        # Nothing goes on from here: the brain continues the task only after a spoken yes (`_approved`). A click or an
-        # auto run happens outside any reply, so its follow-up needs proactive speech (see issue #110).
+        # The task goes on (#110), as after a spoken yes (`_approved`), but outside any reply: on a thread of its own,
+        # speaking through the outbox. Not for a run that was stopped ("New conversation", the app ending).
+        if not (cancel.is_set() or lifecycle.stopping.is_set()):
+            self._start_continuation(pending, result)
         return result.speech
+
+    def _start_continuation(self, pending: Pending, result: SkillResult) -> None:
+        """One task at a time: a continuation already running is cancelled (its queued audio stays; what it has not
+        queued yet is never queued) and this one starts."""
+        cancelled = threading.Event()
+        with self._task_lock:
+            if self._task_cancel is not None:
+                self._task_cancel.set()
+            self._task_cancel = cancelled
+        threading.Thread(
+            target=_continue,
+            args=(self._url, self._timeout, self._voice, self.skills, self._brain, self._confirmations, pending, result,
+                  cancelled, self._outbox, partial(Task.start, self._max_steps, self._task_seconds)),
+            name="vaice-assistant-task",
+            daemon=True,
+        ).start()
+
+    def _cancel_task(self) -> None:
+        """Stop the running continuation, if any, and drop what it queued: it is no longer wanted."""
+        with self._task_lock:
+            cancelled, self._task_cancel = self._task_cancel, None
+        if cancelled is not None:
+            cancelled.set()
+        if self._outbox is not None:
+            self._outbox.clear()  # after the cancel: whatever it was about to queue is refused by its own stop check
 
     def cancel(self, pending_id: str) -> None:
         pending = self._confirmations.take(pending_id)
@@ -578,12 +721,13 @@ class AssistantResponder:
             pending.turn.add_tool_event(pending.name, pending.arguments, "cancelled")
 
     def clear_pending(self) -> None:
-        """"New conversation": a request from the old one must not be approvable, and a command a click
-        started for it stops."""
+        """"New conversation": a request from the old one must not be approvable, a command a click started for
+        it stops, and so does the continuation that followed one (its speech is dropped)."""
         self._confirmations.clear()
         with self._runs_lock:
             for cancel in self._runs:
                 cancel.set()
+        self._cancel_task()
 
     def _countdown(self, pending_id: str) -> None:
         """Daemon thread: run the armed `auto` request `pending_id` when its time is up. It ends quietly as soon as
@@ -604,6 +748,7 @@ class AssistantResponder:
                 return
 
     def respond(self, audio: AudioFrame, history: Sequence[Message], turn: Turn) -> Iterator[AudioFrame]:
+        self._cancel_task()  # a new utterance ends the task a click started, and what it had queued to say
         chunks: queue.Queue = queue.Queue()
         cancelled = threading.Event()
         notes = self.memory.notes() if self.memory is not None else []  # as they are when this reply starts

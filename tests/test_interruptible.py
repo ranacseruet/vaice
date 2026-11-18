@@ -1,6 +1,7 @@
 """The real fastrtc ReplyOnPause, driven the way fastrtc drives it: emit() on a fresh thread per chunk
 (`loop.run_in_executor`), receive() on another thread. Only the VAD model and the playback queue are fakes."""
 import inspect
+import logging
 import threading
 import time
 
@@ -12,6 +13,7 @@ from threads import run_on_thread, start_thread
 
 from vaice import interruptible
 from vaice.interruptible import InterruptSafeReplyOnPause, stop_playing_reply
+from vaice.outbox import Outbox
 
 ONE_SECOND = (48000, np.zeros((1, 48000), dtype=np.int16))  # at least AlgoOptions.audio_chunk_duration
 
@@ -33,9 +35,9 @@ def chunk(value):
 class Rig:
     """A handler plus the helpers to speak to it, pause, and pull chunks like fastrtc does."""
 
-    def __init__(self, handler_class, fn):
+    def __init__(self, handler_class, fn, **options):
         self.vad = FakeVad()
-        self.handler = handler_class(fn, model=self.vad)
+        self.handler = handler_class(fn, model=self.vad, **options)
         self.handler.send_message_sync = lambda msg: None  # needs a running event loop
         self.queue_clears = 0
         self.handler._clear_queue = self._clear_queue
@@ -707,3 +709,257 @@ def test_a_fastrtc_without_the_pause_event_fails_at_construction(monkeypatch):
     monkeypatch.setattr(ReplyOnPause, "__init__", bare_init)
     with pytest.raises(RuntimeError, match="event` attribute"):
         InterruptSafeReplyOnPause(lambda _: iter(()))
+
+
+# --- proactive speech: the outbox the idle emit() serves, paced by the estimated end of playback
+
+class FakeClock:
+    def __init__(self):
+        self.now = 1000.0
+
+    def __call__(self):
+        return self.now
+
+
+def second_of_speech(value=0.0):
+    """One second of audio at 24 kHz: it takes one second to play."""
+    return 24000, np.full(24000, value, dtype=np.float32)
+
+
+def proactive_rig(monkeypatch, **options):
+    """A handler with an outbox, both on one fake clock, and an idle wait too short to slow the tests."""
+    monkeypatch.setattr(interruptible, "IDLE_WAIT_SECONDS", 0.001)
+    clock = FakeClock()
+    rig = Rig(InterruptSafeReplyOnPause, lambda _audio: iter([]), outbox=Outbox(clock), **options)
+    rig.handler._clock = clock
+    rig.clock = clock
+    rig.outbox = rig.handler.outbox
+    assert rig.start_emit().join() is None  # a first poll: from here on a connection is draining the outbox
+    return rig
+
+
+def speech_only(rig):
+    """The user starts talking and has not stopped: `started_talking` flips, no pause is detected."""
+    rig.vad.speech = 1.0
+    run_on_thread(lambda: rig.handler.receive(ONE_SECOND), "fastrtc-receive")
+
+
+def test_an_idle_emit_serves_the_frames_in_the_outbox(monkeypatch):
+    rig = proactive_rig(monkeypatch)
+    frame = second_of_speech(1.0)
+    rig.outbox.put(frame)
+
+    assert rig.start_emit().join() is frame
+    assert rig.start_emit().join() is None  # nothing else queued
+
+
+def test_an_emit_with_no_outbox_attached_behaves_as_before():
+    rig = Rig(InterruptSafeReplyOnPause, lambda _audio: iter([]))
+
+    assert rig.handler.outbox is None
+    assert rig.start_emit().join() is None
+
+
+def test_frames_are_served_only_while_the_estimated_playback_end_is_less_than_the_lead_ahead(monkeypatch):
+    rig = proactive_rig(monkeypatch)
+    frames = [second_of_speech(n) for n in (1.0, 2.0, 3.0)]
+    for f in frames:
+        rig.outbox.put(f)
+
+    assert rig.start_emit().join() is frames[0]  # now plays for 1 s
+    assert rig.start_emit().join() is None  # 1 s ahead: not yet
+    rig.clock.now += 0.5
+    assert rig.start_emit().join() is None  # 0.5 s ahead is still more than the lead
+    rig.clock.now += 0.2 + 0.001
+    assert rig.start_emit().join() is frames[1]  # 0.3 s ahead: the next one may be queued
+    assert rig.start_emit().join() is None
+    assert len(rig.outbox) == 1  # the third waits for its turn, it is not dropped
+
+
+def test_markers_run_in_order_after_the_frames_in_front_of_them_and_within_the_lead_of_their_playback(monkeypatch):
+    rig = proactive_rig(monkeypatch)
+    events = []
+    first, second = second_of_speech(1.0), second_of_speech(2.0)
+    rig.outbox.put(first)
+    rig.outbox.put_marker(lambda: events.append("after first"))
+    rig.outbox.put(second)
+    rig.outbox.put_marker(lambda: events.append("after second"))
+
+    assert rig.start_emit().join() is first
+    assert events == []  # the first frame has only just been handed out, not played
+    assert rig.start_emit().join() is None and events == []
+
+    rig.clock.now += 0.7  # 0.3 s of the first frame left: the marker behind it is due, and the next frame
+    assert rig.start_emit().join() is second  # one emit call: the marker ran, then the frame was returned
+    assert events == ["after first"]
+    assert rig.start_emit().join() is None and events == ["after first"]
+
+    rig.clock.now += 1.0  # the second frame was queued at 1000.7 and runs to 1002: 0.3 s left at 1001.7
+    assert rig.start_emit().join() is None  # the last marker needs no frame to follow it
+    assert events == ["after first", "after second"]
+
+
+def test_a_marker_on_its_own_runs_at_once_when_nothing_is_playing(monkeypatch):
+    rig = proactive_rig(monkeypatch)
+    events = []
+    rig.outbox.put_marker(lambda: events.append(1))
+
+    assert rig.start_emit().join() is None
+    assert events == [1]
+
+
+def test_a_failing_marker_callback_is_logged_and_the_next_item_is_still_served(monkeypatch, caplog):
+    rig = proactive_rig(monkeypatch)
+    frame = second_of_speech(1.0)
+
+    def broken():
+        raise RuntimeError("marker blew up")
+
+    rig.outbox.put_marker(broken)
+    rig.outbox.put(frame)
+
+    with caplog.at_level(logging.WARNING, logger="vaice.interruptible"):
+        assert rig.start_emit().join() is frame
+
+    assert "marker blew up" in caplog.text
+
+
+def test_nothing_is_served_while_a_reply_is_starting_or_running_or_the_user_is_talking(monkeypatch):
+    rig = proactive_rig(monkeypatch)
+    rig.outbox.put(second_of_speech(1.0))
+
+    rig.handler.event.set()  # a pause was detected: the reply (empty here) takes over
+    assert rig.start_emit().join() is None
+    assert len(rig.outbox) == 1
+    rig.handler.reset()
+
+    rig.handler.generator = iter([])  # a reply generator exists
+    assert rig.start_emit().join() is None
+    assert len(rig.outbox) == 1
+    rig.handler.generator = None
+
+    rig.handler.state.started_talking = True  # the user is talking
+    assert rig.start_emit().join() is None
+    assert len(rig.outbox) == 1
+    rig.handler.state.started_talking = False
+
+    assert rig.start_emit().join() is not None  # all clear: served
+
+
+def test_a_connection_busy_with_a_reply_is_still_a_live_connection_for_the_staleness_check(monkeypatch):
+    rig = proactive_rig(monkeypatch)
+    frame = second_of_speech(1.0)
+    rig.outbox.put(frame)
+    rig.handler.generator = iter([])  # a long reply: nothing is served meanwhile
+    for _ in range(2):
+        rig.clock.now += 20
+        assert rig.start_emit().join() is None
+    rig.handler.generator = None
+
+    assert rig.start_emit().join() is frame  # 40 s since the last serving poll, but emit() was called throughout
+
+
+def test_speech_starting_clears_the_outbox_runs_the_drop_hooks_and_cuts_the_audio_still_playing(monkeypatch):
+    rig = proactive_rig(monkeypatch)
+    dropped = []
+    rig.outbox.put(second_of_speech(1.0))
+    rig.outbox.put_marker(lambda: None, on_drop=lambda: dropped.append("arm"))
+    rig.outbox.put(second_of_speech(2.0))
+    assert rig.start_emit().join() is not None  # the first second is queued for playback
+
+    speech_only(rig)
+
+    assert len(rig.outbox) == 0 and dropped == ["arm"]
+    assert rig.queue_clears == 1  # what fastrtc had queued is dropped too
+    assert rig.handler._proactive_until == 0
+
+
+def test_speech_starting_after_the_proactive_audio_finished_clears_no_queue(monkeypatch):
+    rig = proactive_rig(monkeypatch)
+    dropped = []
+    rig.outbox.put(second_of_speech(1.0))
+    assert rig.start_emit().join() is not None
+    rig.clock.now += 2.0  # it has played
+    rig.outbox.put_marker(lambda: None, on_drop=lambda: dropped.append("late"))
+
+    speech_only(rig)
+
+    assert dropped == ["late"] and rig.queue_clears == 0
+
+
+def test_speech_starting_with_nothing_queued_and_nothing_playing_changes_nothing(monkeypatch):
+    rig = proactive_rig(monkeypatch)
+
+    speech_only(rig)
+
+    assert rig.queue_clears == 0 and len(rig.outbox) == 0
+
+
+def test_speech_does_not_clear_proactive_audio_when_interrupting_is_off(monkeypatch):
+    rig = proactive_rig(monkeypatch, can_interrupt=False)
+    dropped = []
+    rig.outbox.put(second_of_speech(1.0))
+    rig.outbox.put_marker(lambda: None, on_drop=lambda: dropped.append(1))
+    assert rig.start_emit().join() is not None
+
+    speech_only(rig)
+
+    assert dropped == [] and len(rig.outbox) == 1 and rig.queue_clears == 0
+
+
+def test_speech_during_a_reply_is_left_to_the_barge_in_which_does_not_touch_the_outbox(monkeypatch):
+    monkeypatch.setattr(interruptible, "IDLE_WAIT_SECONDS", 0.001)
+    clock = FakeClock()
+    rig = Rig(InterruptSafeReplyOnPause, lambda _audio: iter([chunk(1.0), chunk(2.0)]), outbox=Outbox(clock))
+    rig.handler._clock = clock
+    dropped = []
+    rig.user_speaks_then_pauses()
+    assert rig.start_emit().join()[1][0] == 1.0  # the reply is running
+    rig.handler.outbox.poll(True)
+    rig.handler.outbox.put_marker(lambda: None, on_drop=lambda: dropped.append(1))
+
+    speech_only(rig)
+
+    assert dropped == [] and len(rig.handler.outbox) == 1
+
+
+def test_the_copy_made_for_a_connection_keeps_the_outbox_and_the_clock_free_constructor_argument():
+    outbox = Outbox()
+    original = InterruptSafeReplyOnPause(lambda _audio: iter([]), model=FakeVad(), outbox=outbox)
+
+    copy = original.copy()
+
+    assert type(copy) is InterruptSafeReplyOnPause and copy.outbox is outbox
+    assert "outbox" not in original._copy_kwargs()  # fastrtc's own signature, pinned by the test above
+
+
+def test_a_copy_of_a_handler_without_an_outbox_has_none():
+    assert InterruptSafeReplyOnPause(lambda _audio: iter([]), model=FakeVad()).copy().outbox is None
+
+
+def test_stop_playing_reply_also_clears_the_outbox_and_forgets_the_playing_estimate(monkeypatch):
+    rig = proactive_rig(monkeypatch)
+    dropped = []
+    rig.outbox.put(second_of_speech(1.0))
+    rig.outbox.put_marker(lambda: None, on_drop=lambda: dropped.append(1))
+    rig.outbox.put(second_of_speech(2.0))
+    assert rig.start_emit().join() is not None
+
+    stop_playing_reply(rig.handler)  # "New conversation"
+
+    assert len(rig.outbox) == 0 and dropped == [1]
+    assert rig.handler._proactive_until == 0
+    assert rig.queue_clears == 1
+
+
+def test_the_idle_emit_rate_with_an_outbox_attached_is_still_bounded():
+    rig = Rig(InterruptSafeReplyOnPause, lambda _audio: iter([]), outbox=Outbox())
+
+    started = time.monotonic()
+    calls = 0
+    while time.monotonic() - started < 0.2:
+        rig.handler.emit()
+        calls += 1
+
+    assert calls <= 30
+

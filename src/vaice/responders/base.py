@@ -34,7 +34,14 @@ class Responder(Protocol):
     `getattr`; absent means no confirmation panel): `pending()` returns the request waiting for the user
     (a `confirm.Pending`) or None; `approve(pending_id)` runs it and returns the result text, or None when
     `pending_id` is no longer the current request; `cancel(pending_id)` drops it; `clear_pending()` drops
-    any (a new conversation). Nothing is spoken for a click: there is no reply in flight to carry audio.
+    any (a new conversation). A click or an `auto` countdown happens with no reply in flight, so its follow-up
+    cannot go through a reply generator.
+
+    Optional method `attach_outbox(outbox)` (`outbox.Outbox`; `app.build_stream` calls it with `getattr`, a responder
+    without it gets no outbox): where that follow-up is spoken. After `approve` ran a call, the responder may continue
+    the task on a thread of its own and put the outcome's audio frames, and callbacks to run once they were served
+    (recording the spoken text with `Turn.append_assistant_text`, arming a question), on the outbox, which the audio
+    handler's idle emit() drains. A new utterance (`respond`) and `clear_pending` cancel it and drop what it queued.
     """
 
     name: str  # short label shown in logs, e.g. "llamacpp"

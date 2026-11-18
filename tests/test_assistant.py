@@ -20,10 +20,11 @@ from vaice.brain import BUSY, BrainError, BrainReply, ToolCall
 from vaice.confirm import CONFIRM_SECONDS, Confirmations, Pending, spoken_answer
 from vaice.conversation import Conversation, Turn, tool_entry
 from vaice.memory import Memory, memory_skills
+from vaice.outbox import Marker, Outbox
 from vaice.responders import assistant
 from vaice.responders.assistant import AssistantResponder, decide
 from vaice.responders.llamacpp import _Stopped
-from vaice.skills import Skill, SkillError, SkillResult, Skills
+from vaice.skills import Question, Skill, SkillError, SkillResult, Skills
 
 AUDIO = (48000, np.zeros((1, 480), dtype=np.int16))
 CONTENT_TYPE = "audio/pcm;rate=24000;encoding=signed-int;bits=16"
@@ -1226,17 +1227,18 @@ def test_a_plain_question_with_nothing_waiting_leaves_no_request(tts):
 
 
 def test_a_click_on_the_current_request_runs_it_and_records_the_result_on_the_asking_turn(tts):
-    s = asked()
+    s = asked(answer("Safari is closed."))
     pending = s.resp.pending()
 
     assert s.resp.approve(pending.id) == "quit Safari"
+    wait_for_continuation()
 
     assert s.ran == [{"name": "Safari"}]
     assert tool_events(s.turn) == [("quit_app", "waiting for confirmation"), ("quit_app", "quit Safari")]
     assert s.resp.pending() is None
     assert s.resp.approve(pending.id) is None  # once only
     assert s.ran == [{"name": "Safari"}]
-    assert len(s.brain.calls) == 1  # nothing is spoken or asked of the brain on a click
+    assert len(s.brain.calls) == 2  # the click continues the task: the brain is asked to report it (#110)
 
 
 def test_a_click_on_a_stale_panel_changes_nothing(tts):
@@ -1273,14 +1275,15 @@ def test_cancel_by_click_drops_the_request_and_records_it(tts):
 
 
 def test_a_voice_yes_after_a_click_is_an_ordinary_question_and_the_skill_ran_once(tts, heard):
-    s = asked(answer("Hello to you too."))
+    s = asked(answer("Safari is closed."), answer("Hello to you too."))  # the click's continuation takes the first
     s.resp.approve(s.resp.pending().id)
+    wait_for_continuation()
     heard.text = "yes"
 
     drive(s.resp)
 
     assert s.ran == [{"name": "Safari"}]
-    assert s.brain.calls[1][0][-1] == {"role": "user", "content": "yes"}
+    assert s.brain.calls[2][0][-1] == {"role": "user", "content": "yes"}  # calls[1] is the click's continuation
 
 
 def test_new_conversation_clears_a_waiting_request(tts):
@@ -1299,6 +1302,7 @@ def test_a_follow_up_after_a_click_sees_what_the_action_did(tts):
     drive(s.resp, turn=first)
     first.finish()  # as the app does when the reply ran to its end
     s.resp.approve(s.resp.pending().id)
+    wait_for_continuation()  # (the brain has no reply left for it: the call's own result is the outcome)
 
     history = conversation.history(before=conversation.start_turn(), tools=True)
 
@@ -1406,18 +1410,19 @@ def test_a_command_that_needs_the_button_is_not_approved_by_a_spoken_yes_and_sta
 
 
 def test_a_click_then_approves_the_command_that_survived_the_yes(tts, heard, home, popen_log):
-    s = shell_asked(PIPE)
+    s = shell_asked(PIPE, answer("It printed HI."))
     heard.text = "yes"
     drive(s.resp)
     pending = s.resp.pending()
 
     assert s.resp.approve(pending.id) == "the command finished. Output: HI"
+    wait_for_continuation()
 
     assert popen_log == [["/bin/zsh", "-c", "echo hi | tr a-z A-Z"]]
     events = tool_events(s.turn)
     assert events[0] == ("run_shell", "waiting for confirmation")
     assert events[1][1] == "$ echo hi | tr a-z A-Z\n(the command finished)\nHI"
-    assert s.resp.pending() is None and len(s.brain.calls) == 1
+    assert s.resp.pending() is None and len(s.brain.calls) == 2  # the click's continuation asked the brain once
 
 
 @pytest.mark.parametrize("utterance", ["No.", "cancel that"])
@@ -2249,7 +2254,7 @@ def let_the_deadline_pass(s):
 
 def test_an_announced_auto_request_runs_by_itself_after_its_time_and_not_before(tts, monkeypatch):
     monkeypatch.setattr(assistant, "time", FakeMonotonic(1000.0))  # the 0.2 s of announcement audio is still to play
-    s = auto_asked()
+    s = auto_asked(answer("Done, the page is open."))
 
     assert spoken(tts) == ANNOUNCEMENT
     pending = s.resp.pending()
@@ -2268,7 +2273,8 @@ def test_an_announced_auto_request_runs_by_itself_after_its_time_and_not_before(
     assert s.resp.pending() is None
     assert tool_events(s.turn) == [("chrome__navigate_page", "waiting for confirmation"),
                                    ("chrome__navigate_page", "opened the page")]
-    assert len(s.brain.calls) == 1  # like a click: nobody is asked to report it
+    wait_for_continuation()
+    assert len(s.brain.calls) == 2  # like a click: the task goes on and the brain reports it (#110)
 
 
 def test_the_countdown_runs_in_real_time_too(tts):
@@ -2770,3 +2776,441 @@ def test_an_approval_with_no_task_on_the_request_starts_a_fresh_one():
     decision = assistant._approved(request, s.resp.skills, s.brain, Turn(), lambda: False)
 
     assert decision.answer == "Safari is closed." and s.brain.calls[0][1] is not None
+
+
+# --- a click or an auto run continues the task and speaks the outcome through the outbox (#110)
+
+def continuation_over():
+    return not threads_named("vaice-assistant-task")
+
+
+def wait_for_continuation():
+    wait_until(continuation_over)
+
+
+def with_outbox(s):
+    """Attach an outbox to the responder, primed like a connection that is draining it; returns it."""
+    s.outbox = Outbox()
+    s.outbox.poll(True)
+    s.resp.attach_outbox(s.outbox)
+    return s.outbox
+
+
+def serve(outbox, until_marker=None):
+    """What the handler's idle emit() does, without pacing: the frames served and the markers run, in order.
+    With `until_marker`, stops after that many markers (so a test can look in between)."""
+    frames, markers = [], 0
+    while (item := outbox.poll(True)) is not None:
+        if isinstance(item, Marker):
+            item.callback()
+            markers += 1
+            if markers == until_marker:
+                break
+        else:
+            frames.append(item)
+    return frames
+
+
+class ContinuationBrain(FakeBrain):
+    """A FakeBrain whose first call made after a skill result (the continuation's) waits for `release`."""
+
+    def __init__(self, *replies):
+        super().__init__(*replies)
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self._gated = False
+
+    def complete(self, messages, tools):
+        gate = not self._gated and messages[-1]["role"] == "tool"
+        self._gated = self._gated or gate
+        reply = super().complete(messages, tools)  # the reply this call gets is fixed when it is made
+        if gate:
+            self.entered.set()
+            assert self.release.wait(5)
+        return reply
+
+
+def test_a_click_continues_the_task_and_the_outcome_is_spoken_through_the_outbox_and_recorded_when_served(tts):
+    s = asked(answer("Safari is closed."))
+    outbox = with_outbox(s)
+
+    assert s.resp.approve(s.resp.pending().id) == "quit Safari"  # as before
+    wait_for_continuation()
+
+    first_messages, tools = s.brain.calls[1]
+    assert tools is not None and first_messages[-1] == {"role": "tool", "tool_call_id": "call_0",
+                                                        "content": "quit Safari"}
+    assert [b["input"] for b in tts.bodies] == [QUESTION, "Safari is closed."]
+    assert s.turn.assistant_text == QUESTION  # queued, not served: not recorded yet
+    frames = serve(outbox)
+    assert [rate for rate, _ in frames] == [24000]
+    np.testing.assert_array_equal(frames[0][1], from_pcm16(pcm_bytes(2400)))
+    assert s.turn.assistant_text == f"{QUESTION} Safari is closed."
+    assert tool_events(s.turn) == [("quit_app", "waiting for confirmation"), ("quit_app", "quit Safari")]
+
+
+def test_the_outcome_text_is_recorded_sentence_by_sentence_as_each_sentences_audio_is_served(tts):
+    s = asked(answer(f"{FIRST} {SECOND}"))
+    outbox = with_outbox(s)
+
+    s.resp.approve(s.resp.pending().id)
+    wait_for_continuation()
+
+    assert [b["input"] for b in tts.bodies] == [QUESTION, FIRST, SECOND]
+    assert len(serve(outbox, until_marker=1)) == 1
+    assert s.turn.assistant_text == f"{QUESTION} {FIRST}"  # the second sentence's audio has not been served
+    assert len(serve(outbox)) == 1
+    assert s.turn.assistant_text == f"{QUESTION} {FIRST} {SECOND}"
+
+
+def test_a_barge_in_that_clears_the_outbox_leaves_the_unserved_text_unrecorded(tts):
+    s = asked(answer(f"{FIRST} {SECOND}"))
+    outbox = with_outbox(s)
+    s.resp.approve(s.resp.pending().id)
+    wait_for_continuation()
+    serve(outbox, until_marker=1)
+
+    outbox.clear()  # the user started talking
+
+    assert serve(outbox) == []
+    assert s.turn.assistant_text == f"{QUESTION} {FIRST}"
+
+
+def test_the_continuation_runs_on_a_daemon_thread_named_for_it(tts):
+    gate = threading.Event()
+    s = asked(answer("Done."))
+    with_outbox(s)
+    s.resp._brain = brain = FakeBrain()
+    brain.complete = lambda messages, tools: (gate.wait(5), answer("Done."))[1]
+
+    s.resp.approve(s.resp.pending().id)
+
+    (thread,) = threads_named("vaice-assistant-task")
+    assert thread.daemon
+    gate.set()
+    wait_for_continuation()
+
+
+def test_the_continuation_may_call_more_skills_which_are_recorded_on_the_asking_turn_in_order(tts):
+    s = tasked_and_asked(ask(DISK), answer("Safari is closed and 160 gigabytes are free."))
+    outbox = with_outbox(s)
+
+    s.resp.approve(s.resp.pending().id)
+    wait_for_continuation()
+
+    assert s.disk_ran == [1] and len(s.brain.calls) == 3
+    assert s.brain.calls[2][1] is not None  # still offered tools: the task goes on
+    assert tool_events(s.turn) == [("quit_app", "waiting for confirmation"), ("quit_app", "quit Safari"),
+                                   ("disk_space", "160 gigabytes free of 926 gigabytes")]
+    serve(outbox)
+    assert s.turn.assistant_text == f"{QUESTION} Safari is closed and 160 gigabytes are free."
+
+
+def test_the_continuation_is_tainted_so_an_auto_tool_is_asked_as_a_click(tts):
+    s = tasked_and_asked(ask(AUTO))
+    outbox = with_outbox(s)
+
+    s.resp.approve(s.resp.pending().id)
+    wait_for_continuation()
+
+    pending = s.resp.pending()
+    assert pending.question == CLICK_ONLY and pending.voice is False and pending.auto_seconds == 0
+    assert s.auto_ran == [] and pending.task.tainted
+    assert pending.armed_at is None  # asked at once (the panel shows it), armed once the question was served
+    assert tool_events(s.turn)[-1] == ("chrome__navigate_page", "waiting for confirmation")
+    serve(outbox)
+    assert s.resp.pending().armed_at is not None
+    assert s.turn.assistant_text == f"{QUESTION} {CLICK_ONLY}"
+
+
+def test_remember_is_refused_in_the_continuation_because_the_approved_call_was_a_tool_result(tts):
+    s = tasked_and_asked(ask(REMEMBER), answer("Okay."))
+    with_outbox(s)
+
+    s.resp.approve(s.resp.pending().id)
+    wait_for_continuation()
+
+    assert s.memory.notes() == []
+    assert s.brain.calls[2][0][-1] == {"role": "tool", "tool_call_id": "call_0", "content": REFUSED}
+
+
+def test_a_question_asked_in_the_continuation_has_its_countdown_forced_off(tts, caplog):
+    page = Skill("open_page", "Open a page.", {"type": "object", "properties": {}}, lambda _args: SkillResult("opened"),
+                 kind="confirm", ask=lambda _args: Question("Opening the page in five seconds.", auto_seconds=5.0))
+    ran, disk_ran = [], []
+    base = skills_with_quit(ran, disk_ran)
+    brain = FakeBrain(ask(QUIT), ask(("open_page", "{}")))
+    resp = AssistantResponder("http://server", 5.0, "Be brief.", "female", Skills([*base.skills, page]), brain,
+                              Confirmations(Clock()), progress_seconds=0)
+    turn = Turn()
+    drive(resp, turn=turn)
+    s = SimpleNamespace(resp=resp)
+    with_outbox(s)
+    timers_before = set(threads_named("vaice-assistant-auto"))  # other tests may have left one running
+
+    with caplog.at_level(logging.INFO, logger="vaice.responders.assistant"):
+        resp.approve(resp.pending().id)
+        wait_for_continuation()
+
+    pending = resp.pending()
+    assert pending.name == "open_page" and pending.auto_seconds == 0
+    assert set(threads_named("vaice-assistant-auto")) == timers_before  # no countdown is started in a continuation
+    assert "does not count down open_page" in caplog.text
+
+
+def test_the_question_is_armed_only_when_its_audio_was_served_and_dropped_when_it_never_was(tts):
+    mail = ("quit_app", '{"name": "Mail"}')
+    s = tasked_and_asked(ask(mail))
+    outbox = with_outbox(s)
+    s.resp.approve(s.resp.pending().id)
+    wait_for_continuation()
+
+    pending = s.resp.pending()
+    assert pending.arguments == mail[1] and pending.armed_at is None and pending.turn is s.turn
+    assert [b["input"] for b in tts.bodies] == [QUESTION, "Shall I quit Mail?"]
+    assert tool_events(s.turn)[-1] == ("quit_app", "waiting for confirmation")
+
+    outbox.clear()  # the user talked over it: nobody heard the question
+    assert s.resp.pending() is None
+    assert s.resp.approve(pending.id) is None  # and it can no longer be clicked either
+    assert s.ran == [{"name": "Safari"}]
+
+
+def test_a_served_question_is_armed_and_can_then_be_approved(tts):
+    mail = ("quit_app", '{"name": "Mail"}')
+    s = tasked_and_asked(ask(mail), answer("Mail is closed."))
+    outbox = with_outbox(s)
+    s.resp.approve(s.resp.pending().id)
+    wait_for_continuation()
+
+    serve(outbox)
+
+    pending = s.resp.pending()
+    assert pending.armed_at is not None
+    assert s.turn.assistant_text == f"{QUESTION} Shall I quit Mail?"
+    assert s.resp.approve(pending.id) == "quit Safari"  # the fake skill's result for any app
+    wait_for_continuation()
+    assert s.ran == [{"name": "Safari"}, {"name": "Mail"}]
+
+
+def test_a_question_whose_audio_failed_or_was_empty_is_dropped(tts, monkeypatch):
+    mail = ("quit_app", '{"name": "Mail"}')
+    s = tasked_and_asked(ask(mail))
+    with_outbox(s)
+    tts._make = lambda text: FakeResponse([])  # no audio at all
+    s.resp.approve(s.resp.pending().id)
+    wait_for_continuation()
+    assert s.resp.pending() is None
+    tts._make = lambda text: FakeResponse([pcm_bytes(2400)])
+
+    s = tasked_and_asked(ask(mail))
+    with_outbox(s)
+    monkeypatch.setattr(assistant.requests, "post", FakeTTS(lambda text: FakeResponse([], status=503)))
+    s.resp.approve(s.resp.pending().id)  # must not raise out of the thread
+    wait_for_continuation()
+    assert s.resp.pending() is None
+
+
+@pytest.mark.parametrize("failure", [RATE_LIMITED, RuntimeError("the brain exploded")])
+def test_a_failure_in_the_continuation_speaks_the_calls_own_result_and_raises_nothing(tts, failure, caplog):
+    s = asked(failure)
+    outbox = with_outbox(s)
+
+    with caplog.at_level(logging.WARNING, logger="vaice.responders.assistant"):
+        assert s.resp.approve(s.resp.pending().id) == "quit Safari"
+        wait_for_continuation()
+
+    assert tts.bodies[-1]["input"] == "quit Safari"  # not an apology: the call ran
+    serve(outbox)
+    assert s.turn.assistant_text == f"{QUESTION} quit Safari"
+    assert tool_events(s.turn) == [("quit_app", "waiting for confirmation"), ("quit_app", "quit Safari")]
+    assert "after quit_app ran" in caplog.text
+
+
+def test_a_new_utterance_cancels_the_running_continuation_and_clears_the_outbox(tts):
+    gated = ContinuationBrain(answer("Safari is closed."), answer("Hello."))
+    s = asked()
+    s.resp._brain = gated
+    outbox = with_outbox(s)
+    dropped = []
+    outbox.put_marker(lambda: None, on_drop=lambda: dropped.append(1))  # something an earlier task left
+    s.resp.approve(s.resp.pending().id)
+    assert gated.entered.wait(5)  # the continuation is waiting for the brain
+
+    frames = drive(s.resp, turn=Turn())  # the user speaks again
+
+    assert dropped == [1] and [rate for rate, _ in frames] == [24000]  # cleared when the new reply started
+    gated.release.set()
+    wait_for_continuation()
+    assert len(outbox) == 0  # the cancelled continuation spoke nothing
+    assert s.turn.assistant_text == QUESTION
+    assert [b["input"] for b in tts.bodies] == [QUESTION, "Hello."]
+
+
+def test_new_conversation_cancels_the_running_continuation_and_clears_the_outbox(tts):
+    gated = ContinuationBrain(answer("Safari is closed."))
+    s = asked()
+    s.resp._brain = gated
+    outbox = with_outbox(s)
+    s.resp.approve(s.resp.pending().id)
+    assert gated.entered.wait(5)
+
+    s.resp.clear_pending()
+    gated.release.set()
+    wait_for_continuation()
+
+    assert len(outbox) == 0 and s.turn.assistant_text == QUESTION
+    assert [b["input"] for b in tts.bodies] == [QUESTION]
+
+
+def test_a_second_approval_cancels_the_continuation_of_the_first(tts):
+    gated = ContinuationBrain(answer("The first outcome."), answer("The second outcome."))
+    s = asked()
+    s.resp._brain = gated
+    outbox = with_outbox(s)
+    s.resp.approve(s.resp.pending().id)
+    assert gated.entered.wait(5)
+    second = Pending("quit_app", '{"name": "Mail"}', "Shall I quit Mail?", "call_9", [], Turn())
+    s.confirmations.ask(second)
+
+    s.resp.approve(second.id)  # its own continuation starts while the first still waits for the brain
+    gated.release.set()
+    wait_for_continuation()
+
+    assert [b["input"] for b in tts.bodies if b["input"] != QUESTION] == ["The second outcome."]
+    serve(outbox)
+    assert second.turn.assistant_text == "The second outcome."
+    assert "The first outcome." not in s.turn.assistant_text
+
+
+def test_without_an_outbox_the_continuation_still_runs_records_and_asks_but_speaks_nothing(tts):
+    mail = ("quit_app", '{"name": "Mail"}')
+    s = tasked_and_asked(ask(DISK), ask(mail))
+
+    s.resp.approve(s.resp.pending().id)
+    wait_for_continuation()
+
+    assert s.disk_ran == [1]
+    assert tool_events(s.turn) == [("quit_app", "waiting for confirmation"), ("quit_app", "quit Safari"),
+                                   ("disk_space", "160 gigabytes free of 926 gigabytes"),
+                                   ("quit_app", "waiting for confirmation")]
+    pending = s.resp.pending()
+    assert pending.arguments == mail[1] and pending.armed_at is not None  # nothing to wait for: armed right away
+    assert [b["input"] for b in tts.bodies] == [QUESTION]  # no outcome, no question spoken
+    assert s.turn.assistant_text == QUESTION
+
+
+def test_a_click_whose_run_was_stopped_does_not_continue(tts, home):
+    s = shell_asked(SLEEP, answer("It was stopped."))  # a command that runs until it is stopped
+    running = start_thread(lambda: s.resp.approve(s.resp.pending().id), "click")
+    wait_until(lambda: shell._live)
+
+    s.resp.clear_pending()
+
+    assert running.join() == "the command was stopped"
+    assert continuation_over() and len(s.brain.calls) == 1  # nobody asked the brain about a stopped command
+
+
+def test_an_auto_run_continues_the_task_and_speaks_the_outcome_too(tts):
+    s = auto_asked(answer("Done, the page is open."))
+    outbox = with_outbox(s)
+
+    s.clock.now += AUTO_SECONDS + 1  # the countdown ends (its thread is not waited for: other tests leave timers)
+    wait_until(lambda: s.ran)
+    wait_for_continuation()
+
+    assert s.ran == [{"url": "https://example.com"}]
+    assert spoken(tts) == f"{ANNOUNCEMENT} Done, the page is open."
+    serve(outbox)
+    assert s.turn.assistant_text == f"{ANNOUNCEMENT} Done, the page is open."
+
+
+def test_a_continuation_cancelled_before_it_starts_asks_no_one_and_records_nothing(tts):
+    s = asked(answer("Safari is closed."))
+    outbox = with_outbox(s)
+    request = s.resp.pending()
+    cancelled = threading.Event()
+    cancelled.set()
+
+    assistant._continue("http://server", 5.0, "female", s.resp.skills, s.brain, s.confirmations, request,
+                        SkillResult("quit Safari"), cancelled, outbox)
+
+    assert len(s.brain.calls) == 1 and len(outbox) == 0  # only the original question's call
+    assert tool_events(s.turn) == [("quit_app", "waiting for confirmation")]
+
+
+def test_the_outbox_sink_refuses_audio_once_cancelled():
+    outbox = Outbox()
+    sink = assistant._OutboxSink(outbox, Turn(), lambda: True)
+
+    with pytest.raises(_Stopped):
+        sink.put((24000, np.zeros(10, dtype=np.float32), "Some words."))
+
+    assert len(outbox) == 0
+
+
+def test_a_continuation_cancelled_while_its_question_is_being_spoken_drops_the_question(monkeypatch):
+    mail = ("quit_app", '{"name": "Mail"}')
+    gate = threading.Event()
+    monkeypatch.setattr(assistant.requests, "post",
+                        FakeTTS(lambda text: FakeResponse([pcm_bytes(50), pcm_bytes(50)], gate=gate)
+                                if text == "Shall I quit Mail?" else FakeResponse([pcm_bytes(50)])))
+    s = tasked(ask(QUIT), ask(mail))
+    s.turn = Turn()
+    drive(s.resp, turn=s.turn)
+    outbox = with_outbox(s)
+    s.resp.approve(s.resp.pending().id)
+    wait_until(lambda: len(outbox) >= 1 and s.resp.pending() is not None and s.resp.pending().arguments == mail[1])
+
+    s.resp._cancel_task()  # the user spoke: the question was cut off after its first chunk
+    gate.set()
+    wait_for_continuation()
+
+    assert s.resp.pending() is None  # nobody heard it to the end: it cannot be answered or clicked
+    assert len(outbox) == 0
+
+
+class SlowEndResponse(FakeResponse):
+    """A /tts response whose stream does not end until `gate` is set, after its last chunk was delivered."""
+
+    def iter_content(self, chunk_size):
+        yield from self._chunks
+        assert self._gate.wait(5)
+
+
+def test_a_cancel_while_the_last_audio_is_still_being_fetched_records_and_arms_nothing(monkeypatch):
+    mail = ("quit_app", '{"name": "Mail"}')
+    gate = threading.Event()
+    monkeypatch.setattr(assistant.requests, "post",
+                        FakeTTS(lambda text: SlowEndResponse([pcm_bytes(50)], gate=gate)
+                                if text == "Shall I quit Mail?" else FakeResponse([pcm_bytes(50)])))
+    s = tasked(ask(QUIT), ask(mail))
+    s.turn = Turn()
+    drive(s.resp, turn=s.turn)
+    outbox = with_outbox(s)
+    text_before = s.turn.assistant_text
+    s.resp.approve(s.resp.pending().id)
+    wait_until(lambda: len(outbox) >= 1 and s.resp.pending() is not None and s.resp.pending().arguments == mail[1])
+
+    s.resp._cancel_task()  # the user spoke: cancelled and cleared while the last chunk's stream is still open
+    gate.set()  # the stream ends; the worker is back in the continuation, past its last stop check inside /tts
+    wait_for_continuation()
+
+    assert s.resp.pending() is None and len(outbox) == 0
+    assert serve(outbox) == []  # nothing, markers included, was queued behind the clear
+    assert s.turn.assistant_text == text_before  # nothing that was not served was recorded
+
+
+def test_a_clear_between_the_stop_check_and_the_put_cannot_queue_a_marker_behind_it(tts):
+    # the generation closes the window `stop()` leaves: the outbox was cleared after the sink's check
+    s = tasked_and_asked(ask(("quit_app", '{"name": "Mail"}')))
+    outbox = with_outbox(s)
+    dropped = []
+    sink = assistant._OutboxSink(outbox, s.turn, lambda: False)
+    outbox.clear()  # a barge-in landed after the sink was made
+
+    assert outbox.put_marker(lambda: None, on_drop=lambda: dropped.append(1), generation=sink.generation) is None
+    with pytest.raises(_Stopped):
+        sink.put((24000, np.zeros(10, dtype=np.float32), "A sentence."))
+
+    assert dropped == [1] and len(outbox) == 0

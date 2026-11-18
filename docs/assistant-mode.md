@@ -62,13 +62,20 @@ name that is not running is refused, nothing is asked), and the request waits in
   not an approval. `no`, `cancel`, `stop`, `never mind` and similar cancel it ("Okay, I won't."). Anything
   else drops the request and is treated as a new question. After a yes the call runs and the brain goes on
   in the same task: it says how it went, may call more skills (the step budget keeps counting) or ask another
-  question. A click or an `auto` run only runs the call; the brain does not go on after them yet (#110).
+  question. A click or an `auto` run goes on the same way (#110): the call runs, the brain continues the task and
+  the outcome is spoken even though no reply is in flight (see "By click" below).
   The question contains none of the yes words
   and cannot be answered before all its audio has been handed out, so hearing itself through the
   speakers does not approve it (it can drop the request, though: use headphones, see #36).
 - **By click:** while a request waits, a panel above *Tool activity* shows the question, the skill and its
-  arguments exactly as they will run, with **Run** and **Cancel** buttons (an `auto` request counting down shows **Stop** and **Run now** instead, see below). Nothing is spoken for a click;
-  the outcome shows in *Tool activity* and in later prompts. A panel left on screen cannot approve a newer
+  arguments exactly as they will run, with **Run** and **Cancel** buttons (an `auto` request counting down shows **Stop** and **Run now** instead, see below). The
+  click (or the countdown) runs the call, then the task continues: the brain sees the result, may call more skills or
+  ask another question, and what it ends with is **spoken** a moment later, with no new utterance from you. The spoken
+  text is added to the same chat bubble as the question ("Using navigate page from chrome in 5 seconds. The page is
+  open.") when its audio plays, the calls show in *Tool activity*, and everything is in later prompts. If it ends in
+  another question it is shown at once but can be answered (by voice, or armed for a click) only after it was spoken;
+  it has no countdown there, even for an `auto` tool. Starting to talk, a new reply, a second approval or *New
+  conversation* cancels the continuation and what it had queued to say. A panel left on screen cannot approve a newer
   request: the buttons pass the id of the request they showed.
 - A request expires 60 seconds after its question was spoken, and *New conversation* drops it.
 - An MCP tool with the policy `auto` is announced instead of asked and runs by itself

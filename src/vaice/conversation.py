@@ -101,6 +101,17 @@ class Turn:
             self.assistant_text = text
             self._changed()
 
+    def append_assistant_text(self, text: str) -> None:
+        """Add `text` to what was said, joined by one space: the outcome of a call the user approved with a click or
+        a countdown, spoken after the reply that asked has ended. The one deliberate exception to the freeze (a
+        closed turn takes it): it is an explicit follow-up of this turn, never a late write by a dropped generator."""
+        text = text.strip()
+        if not text:
+            return
+        with self._lock:
+            self.assistant_text = f"{self.assistant_text} {text}" if self.assistant_text else text
+            self._changed()
+
     def add_tool_event(self, name: str, arguments: str, output: str) -> None:
         """A tool call the reply made, for the UI's tool-activity panel; never sent to the model.
 
