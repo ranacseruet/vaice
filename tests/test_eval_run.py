@@ -557,3 +557,39 @@ def test_the_memory_cases_are_consistent_with_the_notes_and_the_skills():
     assert {c["expect"]["tools"][0] for i, c in memory_cases.items() if c["expect"]["tools"]} == {
         "remember", "forget", "forget_everything"}
     assert all(not c.get("notes") for i, c in memory_cases.items() if i.startswith("memory-no-"))
+
+
+def test_a_case_history_accepts_plain_and_argument_carrying_tool_entries():
+    from vaice.conversation import tool_entry
+    from vaice.responders.assistant import build_messages
+
+    turns = eval_run.case_history([
+        ["user", "q"],
+        ["tool", "battery_status: 80 percent"],
+        ["tool", {"name": "look_at_screen", "arguments": {"question": "What is open?"}, "output": "an editor"}],
+        ["tool", tool_entry("disk_space", '{"path": "/"}', "160 free")],
+        ["assistant", "a"],
+    ])
+
+    assert all(isinstance(entry, tuple) for entry in turns)
+    messages = build_messages("p", turns, "next")
+    calls = messages[2]["tool_calls"]
+    assert [(c["function"]["name"], c["function"]["arguments"]) for c in calls] == [
+        ("battery_status", "{}"), ("look_at_screen", '{"question":"What is open?"}'), ("disk_space", '{"path":"/"}')]
+    assert [m["content"] for m in messages if m["role"] == "tool"] == ["80 percent", "an editor", "160 free"]
+
+
+def test_the_shipped_cases_replay_realistic_arguments():
+    from vaice.responders.assistant import build_messages
+
+    replayed = {}
+    for name in ("assistant_cases.json", "assistant_vision_cases.json"):
+        for case in json.loads((eval_run.HERE / name).read_text()):
+            if any(role == "tool" for role, _ in case.get("history", [])):
+                messages = build_messages("p", eval_run.case_history(case["history"]), "x")
+                call = next(c for m in messages for c in m.get("tool_calls", []))["function"]
+                replayed[case["id"]] = (call["name"], json.loads(call["arguments"]))
+
+    assert len(replayed) == 5
+    assert {v[0]: v[1] for k, v in replayed.items() if k.startswith("battery")} == {"battery_status": {}}
+    assert all(isinstance(v[1].get("question"), str) for k, v in replayed.items() if k.startswith("vision"))

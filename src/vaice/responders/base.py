@@ -26,7 +26,9 @@ class Responder(Protocol):
 
     Optional attribute `tool_history: bool` (False when absent): a responder that sets it True also gets
     the earlier turns' tool results in `history`, as `("tool", "<name>: <output>")` entries between a
-    turn's user and assistant messages (output capped). The others never see them.
+    turn's user and assistant messages (output capped); a call that had arguments is a `("tool", ...)` entry
+    from `conversation.tool_entry`, which carries them (`conversation.parse_tool_entry` reads either).
+    The others never see them.
 
     Optional methods for a responder that asks the user to confirm an action (the UI reads them with
     `getattr`; absent means no confirmation panel): `pending()` returns the request waiting for the user

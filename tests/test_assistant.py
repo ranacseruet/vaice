@@ -18,7 +18,7 @@ from vaice.app import make_handler
 from vaice.audio import from_pcm16
 from vaice.brain import BUSY, BrainError, BrainReply, ToolCall
 from vaice.confirm import CONFIRM_SECONDS, Confirmations, Pending, spoken_answer
-from vaice.conversation import Conversation, Turn
+from vaice.conversation import Conversation, Turn, tool_entry
 from vaice.memory import Memory, memory_skills
 from vaice.responders import assistant
 from vaice.responders.assistant import AssistantResponder, decide
@@ -1298,10 +1298,12 @@ def test_a_follow_up_after_a_click_sees_what_the_action_did(tts):
     history = conversation.history(before=conversation.start_turn(), tools=True)
 
     assert history == [("user", "How much disk space is free?"),
-                       ("tool", "quit_app: waiting for confirmation"), ("tool", "quit_app: quit Safari"),
+                       ("tool", tool_entry("quit_app", '{"name":"Safari"}', "waiting for confirmation")),
+                       ("tool", tool_entry("quit_app", '{"name":"Safari"}', "quit Safari")),
                        ("assistant", QUESTION)]
     messages = assistant.build_messages("Be brief.", history, "Now start it again.")
     assert [m["content"] for m in messages if m["role"] == "tool"] == ["waiting for confirmation", "quit Safari"]
+    assert [c["function"]["arguments"] for c in messages[2]["tool_calls"]] == ['{"name":"Safari"}'] * 2
 
 
 def test_a_follow_up_after_a_spoken_yes_sees_the_result_on_the_yes_turn(tts, heard):
@@ -1317,7 +1319,7 @@ def test_a_follow_up_after_a_spoken_yes_sees_the_result_on_the_yes_turn(tts, hea
 
     history = conversation.history(before=conversation.start_turn(), tools=True)
 
-    assert history[-3:] == [("user", "yes"), ("tool", "quit_app: quit Safari"),
+    assert history[-3:] == [("user", "yes"), ("tool", tool_entry("quit_app", '{"name":"Safari"}', "quit Safari")),
                             ("assistant", "Safari is closed now.")]
 
 
