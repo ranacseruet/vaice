@@ -2504,13 +2504,22 @@ def test_decide_hands_the_timer_to_the_pending_request():
 # --- the countdown runs from the estimated end of the announcement, not from when it was handed out
 
 
-def test_the_audio_still_to_play_is_what_was_handed_out_less_what_has_elapsed_since_the_first_frame():
-    assert assistant._still_playing(4.0, None, 50.0) == 0.0  # nothing was handed out
-    assert assistant._still_playing(4.0, 100.0, 100.0) == 4.0
-    assert assistant._still_playing(4.0, 100.0, 101.5) == 2.5
-    assert assistant._still_playing(4.0, 100.0, 109.0) == 0.0  # long since played: never negative
-    # a progress filler earlier counts as handed out and as elapsed: 1 s of filler + 4 s of announcement, 1.2 s in
-    assert assistant._still_playing(1.0 + 4.0, 100.0, 101.2) == pytest.approx(3.8)
+def test_the_audio_still_to_play_is_what_is_queued_beyond_now():
+    assert assistant._still_playing(0.0, 50.0) == 0.0  # nothing was handed out
+    assert assistant._still_playing(104.0, 100.0) == 4.0
+    assert assistant._still_playing(104.0, 101.5) == 2.5
+    assert assistant._still_playing(104.0, 109.0) == 0.0  # long since played: never negative
+
+
+def test_a_gap_between_a_filler_and_the_announcement_is_not_playback_time():
+    # 1 s filler handed out at t=0 (plays 0-1), then the brain takes 10 s, then a 4 s announcement at t=10
+    end = assistant._playback_end(0.0, 0.0, 1.0)
+    assert end == 1.0
+    end = assistant._playback_end(end, 10.0, 4.0)
+    assert end == 14.0 and assistant._still_playing(end, 10.0) == 4.0  # all 4 s are still to play
+    # frames handed out back to back queue behind each other: 2 s then 2 s at t=100 end at 104
+    end = assistant._playback_end(assistant._playback_end(0.0, 100.0, 2.0), 100.0, 2.0)
+    assert end == 104.0
 
 
 def two_second_sentences(tts):

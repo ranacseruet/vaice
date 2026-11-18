@@ -311,13 +311,17 @@ class _Progress:
             sentence, next_at = STILL_WORKING, time.monotonic() + PROGRESS_REPEAT_SECONDS
 
 
-def _still_playing(handed_seconds: float, first_at: float | None, now: float) -> float:
-    """Seconds of the audio handed out so far that are estimated not to have played yet, assuming playback began at the
-    first frame (`first_at`) and ran without a gap. An estimate from what was handed out, not a measurement: fastrtc
-    reports no playback position. Never negative."""
-    if first_at is None:
-        return 0.0
-    return max(0.0, handed_seconds - (now - first_at))
+def _playback_end(play_end: float, now: float, seconds: float) -> float:
+    """When the audio handed out so far is estimated to finish playing, after a frame of `seconds` was handed out at
+    `now`: it plays after what is queued (`play_end`), or at once when the queue had drained (silence between a
+    progress filler and the answer is not playback time). An estimate from what was handed out, not a measurement:
+    fastrtc reports no playback position."""
+    return max(play_end, now) + seconds
+
+
+def _still_playing(play_end: float, now: float) -> float:
+    """Seconds of the handed-out audio estimated not to have played yet at `now` (never negative)."""
+    return max(0.0, play_end - now)
 
 
 def _approved(pending: Pending, skills: Skills, brain: ChatBrain, turn: Turn, stop: Callable[[], bool]) -> Decision:
@@ -558,8 +562,7 @@ class AssistantResponder:
             daemon=True,
         ).start()
         spoken = ""
-        handed = 0.0  # seconds of audio yielded in this reply (the progress filler's included), as app.py counts it
-        first_at: float | None = None  # when the first frame was yielded
+        play_end = 0.0  # monotonic time the audio yielded so far is estimated to finish playing (a filler's included)
         asked: str | None = None  # a confirmation question in flight: its request is not answerable yet
         try:
             while True:
@@ -576,7 +579,7 @@ class AssistantResponder:
                     raise item
                 if isinstance(item, _Asked):
                     if item.spoken:  # every frame of the question was handed out, not necessarily played
-                        playing = _still_playing(handed, first_at, time.monotonic()) if item.auto_seconds > 0 else 0.0
+                        playing = _still_playing(play_end, time.monotonic()) if item.auto_seconds > 0 else 0.0
                         self._confirmations.arm(item.pending_id, playing)
                         if item.auto_seconds > 0:
                             threading.Thread(target=self._countdown, args=(item.pending_id,),
@@ -593,9 +596,7 @@ class AssistantResponder:
                 if text != spoken:  # a new sentence starts: only now does the record include it
                     spoken = text
                     turn.set_assistant_text(text)
-                if first_at is None:
-                    first_at = time.monotonic()
-                handed += len(frame) / rate
+                play_end = _playback_end(play_end, time.monotonic(), len(frame) / rate)
                 yield rate, frame
         finally:
             if asked is not None:  # the question was cut off (barge-in, stop, error): nobody can say yes to it
