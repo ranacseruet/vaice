@@ -48,7 +48,7 @@ class Env:
         self.version = VERSION_LINE
         self.binary = "/opt/bin/llama-server"
         monkeypatch.setattr(server.config, "LLAMACPP_URL", "http://localhost:8001")
-        monkeypatch.setattr(server.config, "LLAMACPP_MODEL", "LiquidAI/LFM3-Audio-2B-GGUF:Q4_K_M")
+        monkeypatch.setattr(server.config, "LLAMACPP_MODEL", "LiquidAI/LFM3-Omni-2B-GGUF:Q8_0")
         monkeypatch.setattr(server.config, "LLAMACPP_SERVER_ARGS", [])
         monkeypatch.setattr(server.config, "LLAMACPP_START_TIMEOUT", 5.0)
         monkeypatch.setattr(server.config, "DATA_DIR", tmp_path / "data")

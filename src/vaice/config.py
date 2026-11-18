@@ -107,8 +107,8 @@ LLAMACPP_TOOLS = _tools("VAICE_LLAMACPP_TOOLS")
 
 # `vaice up` starts llama-server when none answers at LLAMACPP_URL: the `-hf` model, extra command-line
 # arguments (e.g. `--tools get_info,read_file`), and how long to wait for it (the first run downloads
-# about 1 GB). Plain `vaice` never starts a server.
-LLAMACPP_MODEL = _env("VAICE_LLAMACPP_MODEL", default="LiquidAI/LFM3-Audio-2B-GGUF:Q4_K_M")
+# about 2.4 GB). Plain `vaice` never starts a server.
+LLAMACPP_MODEL = _env("VAICE_LLAMACPP_MODEL", default="LiquidAI/LFM3-Omni-2B-GGUF:Q8_0")
 
 
 def _arguments(name: str) -> list[str]:
@@ -185,7 +185,7 @@ def _brain_url(name: str) -> str:
 # Assistant mode only: an optional helper for the brain step, any OpenAI-compatible chat-completions endpoint
 # (a local server such as LM Studio or Ollama, or a hosted one); vaice does not tell them apart. Unset = the
 # local llama-server answers. Only the brain moves: speech recognition and speech output stay on llama-server.
-# Everything the brain sees is sent to that endpoint (see README, Privacy). The key is a secret: never logged.
+# Everything the brain sees is sent to that endpoint (see docs/privacy.md). The key is a secret: never logged.
 BRAIN_URL = _brain_url("VAICE_BRAIN_URL")
 BRAIN_MODEL = _env("VAICE_BRAIN_MODEL", default="").strip()
 BRAIN_API_KEY = _env("VAICE_BRAIN_API_KEY", default="").strip()
@@ -196,7 +196,7 @@ if BRAIN_TIMEOUT <= 0:
 # Assistant mode only: the `look_at_screen` skill (vision.py) takes a screenshot when the user asks about their
 # screen and asks this vision model about it: any OpenAI-compatible endpoint that accepts images (LFM3-Omni-2B on
 # a llama-server of its own, a hosted model). Unset = no skill, no screenshot is ever taken. The screenshot is
-# sent to that endpoint, so a host off this machine receives an image of the screen (see README, Privacy). The key
+# sent to that endpoint, so a host off this machine receives an image of the screen (see docs/privacy.md). The key
 # is a secret: never logged.
 VISION_URL = _brain_url("VAICE_VISION_URL")
 VISION_MODEL = _env("VAICE_VISION_MODEL", default="").strip()

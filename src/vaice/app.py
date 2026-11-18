@@ -275,7 +275,7 @@ def _chat_responder() -> LlamaCppResponder:
         else:
             log.warning(
                 "tools requested (VAICE_LLAMACPP_TOOLS), but llama-server advertises none; start it with "
-                "--tools (see README)"
+                "--tools (see docs/chat-mode.md)"
             )
     return LlamaCppResponder(tools=tools or None)
 

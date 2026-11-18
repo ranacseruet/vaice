@@ -7,7 +7,7 @@ Thank you for your interest in contributing to `vaice`! This document covers set
 ### Prerequisites
 - **Python 3.12** (`.python-version`; `uv sync` downloads it when it is missing)
 - **[uv](https://docs.astral.sh/uv/)**
-- *(For manual end-to-end audio testing)* A local `llama.cpp` `llama-server` (**b11960+**, e.g. `brew install llama.cpp`) running an audio-output model such as `LiquidAI/LFM3-Audio-2B-GGUF:Q4_K_M`
+- *(For manual end-to-end audio testing)* A local `llama.cpp` `llama-server` (**b11960+**, e.g. `brew install llama.cpp`) running an audio-output model such as `LiquidAI/LFM3-Omni-2B-GGUF:Q8_0`
 
 ### Install Dependencies
 ```bash
@@ -56,7 +56,7 @@ Unit tests run completely offline without a real `llama-server` or microphone by
 
 ## Keeping Documentation in Sync
 
-- Any behavior or configuration change must update `README.md` in the same pull request.
+- Any behavior or configuration change must update the page in `docs/` that describes it (and `README.md` when the quickstart or the feature list changes) in the same pull request. `docs/README.md` is the index.
 - Adding, removing, or changing the default of a `VAICE_*` environment variable must also update `.env.example`.
 - If you change `pyproject.toml` dependencies, run `uv lock` and commit the updated `uv.lock` (CI runs `uv sync --locked` and will fail if `uv.lock` is out of date).
 

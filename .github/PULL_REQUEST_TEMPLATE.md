@@ -11,5 +11,5 @@
 
 - [ ] `.venv/bin/ruff check src tests` passes
 - [ ] `.venv/bin/pytest --cov=vaice` passes
-- [ ] `README.md` and `.env.example` updated if behavior or configuration changed
+- [ ] `docs/` (and `README.md` if the quickstart or features changed) and `.env.example` updated if behavior or configuration changed
 - [ ] *(If touching audio/WebSocket/UI paths)* Verified manually with `llama-server` and browser microphone

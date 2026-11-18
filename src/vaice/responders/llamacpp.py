@@ -864,7 +864,7 @@ def check_server(url: str = config.LLAMACPP_URL) -> None:
     if not speaks:
         raise RuntimeError(
             f"the model on llama-server at {url} ({', '.join(names) or 'none listed'}) does not output audio; "
-            "the llamacpp backend needs an audio-output model such as LiquidAI/LFM3-Audio-2B-GGUF"
+            "the llamacpp backend needs an audio-output model such as LiquidAI/LFM3-Omni-2B-GGUF"
         )
     _probe_realtime(url, unavailable)
     _warn_text_temperature(url)

@@ -16,7 +16,7 @@ from vaice import config, lifecycle
 log = logging.getLogger(__name__)
 
 BINARY = "llama-server"
-MIN_BUILD = 11960  # the first llama.cpp build with the /v1/realtime WebSocket (README "Requirements")
+MIN_BUILD = 11960  # the first llama.cpp build with the /v1/realtime WebSocket (docs/installation.md, "Requirements")
 INSTALL_HINT = "brew install llama.cpp (other platforms: https://github.com/ggml-org/llama.cpp#usage)"
 LOCAL_HOSTS = ("localhost", "127.0.0.1", "::1")
 HEALTH_TIMEOUT = 2  # seconds for one /health probe
