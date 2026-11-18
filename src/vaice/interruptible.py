@@ -260,13 +260,29 @@ class InterruptSafeReplyOnPause(ReplyOnPause):
                 self.event.set()
                 log.debug("restored the barge-in pause the ending reply's reset() wiped")
         interrupted = self.generator is None or (started_with is not None and self.generator is not started_with)
-        if output is None or not interrupted:
+        if output is None:
             return output
         audio, extra = split_output(output)
-        if audio is None:
-            return output
-        log.debug("dropped a chunk of the interrupted reply")
-        return extra
+        if interrupted and audio is not None:
+            log.debug("dropped a chunk of the interrupted reply")
+            return extra
+        if audio is not None:
+            self._note_playing(audio)
+        return output
+
+    def _note_playing(self, audio) -> None:
+        """Reply audio just handed to fastrtc plays before anything served after it: count it in the estimated playback
+        end that paces proactive speech, so an outcome queued while a question is still playing waits behind it."""
+        if self.outbox is None:
+            return
+        try:
+            rate, samples = audio
+            seconds = np.size(samples) / rate
+        except (TypeError, ValueError, ZeroDivisionError):  # not an audio tuple: nothing to count
+            return
+        now = self._clock()
+        with self._proactive_lock:
+            self._proactive_until = max(self._proactive_until, now) + seconds
 
 
 def stop_playing_reply(handler: ReplyOnPause) -> None:

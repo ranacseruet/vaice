@@ -3214,3 +3214,23 @@ def test_a_clear_between_the_stop_check_and_the_put_cannot_queue_a_marker_behind
         sink.put((24000, np.zeros(10, dtype=np.float32), "A sentence."))
 
     assert dropped == [1] and len(outbox) == 0
+
+
+def test_a_new_conversation_between_the_run_and_its_continuation_starts_no_continuation(tts, monkeypatch):
+    brain = ContinuationBrain(answer("Safari is closed."))
+    s = asked()
+    s.resp._brain = brain
+    outbox = with_outbox(s)
+    real_add = s.turn.add_tool_event
+
+    def add_then_clear(*args, **kwargs):
+        real_add(*args, **kwargs)
+        s.resp.clear_pending()  # "New conversation" lands after the run, before its continuation is registered
+
+    monkeypatch.setattr(s.turn, "add_tool_event", add_then_clear)
+
+    s.resp.approve(s.resp.pending().id)
+    wait_for_continuation()
+
+    assert not brain.entered.is_set() and len(outbox) == 0
+    assert [b["input"] for b in tts.bodies] == [QUESTION]

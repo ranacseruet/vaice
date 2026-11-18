@@ -963,3 +963,23 @@ def test_the_idle_emit_rate_with_an_outbox_attached_is_still_bounded():
 
     assert calls <= 30
 
+
+
+def test_reply_audio_still_queued_in_fastrtc_holds_back_the_proactive_frames_behind_it(monkeypatch):
+    # a click while the question is still playing: the reply generator is done, but its second of audio is queued
+    monkeypatch.setattr(interruptible, "IDLE_WAIT_SECONDS", 0.001)
+    clock = FakeClock()
+    reply_frame, outcome = second_of_speech(1.0), second_of_speech(2.0)
+    rig = Rig(InterruptSafeReplyOnPause, lambda _audio: iter([reply_frame]), outbox=Outbox(clock))
+    rig.handler._clock = clock
+    rig.handler.outbox.touch()
+    rig.user_speaks_then_pauses()
+    assert rig.start_emit().join() is reply_frame  # handed out: it plays for the next second
+    assert rig.start_emit().join() is None  # the generator ends here
+    rig.handler.outbox.put(outcome)
+    rig.handler.outbox.put_marker(lambda: None)
+
+    assert rig.start_emit().join() is None  # 1 s of the question still to play: the outcome waits behind it
+    assert len(rig.handler.outbox) == 2
+    clock.now += 0.7
+    assert rig.start_emit().join() is outcome  # 0.3 s left: it may be queued now

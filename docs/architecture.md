@@ -123,7 +123,7 @@ it to the handler and calls the responder's optional `attach_outbox`): frames, a
 that sentence to the asking turn (`Turn.append_assistant_text`, the one write a closed turn accepts), and, when the
 continuation ends in another question, an arming marker whose `on_drop` takes the request back. The handler's idle
 `emit()` (no pause, no reply generator, the user not talking) serves it **paced**: fastrtc's playback queue is unbounded,
-so the next item is served only while the audio served so far is estimated to end less than `LEAD_SECONDS` (0.4 s) ahead,
+so the next item is served only while the audio served so far (a reply's included) is estimated to end less than `LEAD_SECONDS` (0.4 s) ahead,
 which keeps the markers close to real playback. Starting to talk with no reply running clears the outbox (the drop
 hooks run) and, when proactive audio is estimated still playing, fastrtc's playback queue; with `VAICE_CAN_INTERRUPT=0`
 it does neither. A new reply, a second approval and *New conversation* cancel the continuation (one task at a time) and

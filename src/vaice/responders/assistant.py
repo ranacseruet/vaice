@@ -680,21 +680,25 @@ class AssistantResponder:
                 return None
             result = self.skills.run(pending.name, pending.arguments,
                                      lambda: cancel.is_set() or lifecycle.stopping.is_set())
+            pending.turn.add_tool_event(pending.name, pending.arguments, result.detail or result.speech)
+            # The task goes on (#110), as after a spoken yes (`_approved`), but outside any reply: on a thread of its
+            # own, speaking through the outbox. `cancel` stays registered until it is: "New conversation" lands either
+            # before (it sets `cancel`) or after (it cancels the registered task), never in between.
+            self._start_continuation(pending, result, cancel)
         finally:
             with self._runs_lock:
                 self._runs.discard(cancel)
-        pending.turn.add_tool_event(pending.name, pending.arguments, result.detail or result.speech)
-        # The task goes on (#110), as after a spoken yes (`_approved`), but outside any reply: on a thread of its own,
-        # speaking through the outbox. Not for a run that was stopped ("New conversation", the app ending).
-        if not (cancel.is_set() or lifecycle.stopping.is_set()):
-            self._start_continuation(pending, result)
         return result.speech
 
-    def _start_continuation(self, pending: Pending, result: SkillResult) -> None:
+    def _start_continuation(self, pending: Pending, result: SkillResult, run_cancel: threading.Event) -> None:
         """One task at a time: a continuation already running is cancelled (its queued audio stays; what it has not
-        queued yet is never queued) and this one starts."""
+        queued yet is never queued) and this one starts, unless the run that led to it was stopped (`run_cancel`, set
+        by "New conversation" before it takes the task lock) or the app is ending. Checked under the task lock, so it
+        is atomic with the registration `_cancel_task` looks at."""
         cancelled = threading.Event()
         with self._task_lock:
+            if run_cancel.is_set() or lifecycle.stopping.is_set():
+                return
             if self._task_cancel is not None:
                 self._task_cancel.set()
             self._task_cancel = cancelled
