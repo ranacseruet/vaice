@@ -120,7 +120,9 @@ def vision_skill(brain: _Brain, where: str, timeout: float = CAPTURE_TIMEOUT) ->
     return Skill(
         "look_at_screen",
         "Look at the user's screen right now and answer a question about what it shows (an open window, an error "
-        "message, text on screen). Only when the user asks about their screen or what they are looking at.",
+        "message, text on screen). Only when the user asks about their screen or what they are looking at. Every call "
+        "takes a new screenshot and the screen changes between questions, so call it again for each such question "
+        "(\"what do you see now?\"), never answer from an earlier look.",
         {"type": "object",
          "properties": {"question": {"type": "string",
                                      "description": "What to look for on the screen, in the user's words."}},

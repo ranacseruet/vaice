@@ -234,6 +234,7 @@ def test_the_mode_is_chat_unless_set_and_the_assistant_settings_have_defaults(mo
         assert reloaded.VOICE == "female"
         assert reloaded.ASSISTANT_PROMPT.startswith("You are a voice assistant on the user's Mac.")
         assert "Use a tool only when the question is about this computer" in reloaded.ASSISTANT_PROMPT
+        assert "use the tool again" in reloaded.ASSISTANT_PROMPT  # live eval: follow-ups are not answered from history
     finally:
         monkeypatch.undo()
         importlib.reload(config)

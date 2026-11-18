@@ -18,6 +18,13 @@ It is off by default because it is not free: offering the skill to the 2B brain 
 was not inspected). The 11 vision cases themselves score 50/55 (the dialog-box question misses). A separate vision
 model (a bigger local one or a hosted one) is just another `VAICE_VISION_URL`.
 
+- **Every question looks again.** A screenshot is taken each time the skill runs, never reused. The 2B model used to
+  answer "what do you see now?" from its own earlier answer, which stays in the conversation, without calling the
+  skill (replaying a real conversation: 0 of 5 looked again). The prompt now says live facts change and the skill's
+  description says each call takes a new screenshot; replayed, 20 of 20 realistic histories look again, and the
+  cases `vision-look-again`, `vision-look-again-changed` and `vision-recall-earlier` (a question about the earlier
+  answer must not look again) pass 5/5. A reply that says "the same as before" without a new look is still possible
+  with a 2B model: say "look at my screen again" to force it.
 - **Screen Recording permission.** macOS gives it to the app that runs `vaice` (your terminal), not to `vaice`.
   Without it `screencapture` fails and the assistant tells you what to do: allow your terminal under System
   Settings, Privacy and Security, Screen Recording, then **quit and reopen that app** (the permission only applies

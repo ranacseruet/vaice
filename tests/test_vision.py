@@ -301,6 +301,8 @@ def test_the_skill_is_a_read_skill_with_one_required_question():
     assert skill.parameters["required"] == ["question"]
     assert skill.parameters["properties"]["question"]["type"] == "string"
     assert "screen" in skill.description and "Only when the user asks" in skill.description
+    # a live eval found the model answering "what do you see now?" from its earlier answer without this
+    assert "call it again for each such question" in skill.description
 
 
 def test_the_skill_captures_asks_and_answers_with_what_was_sent_where(monkeypatch):
