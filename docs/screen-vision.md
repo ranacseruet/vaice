@@ -33,6 +33,7 @@ model (a bigger local one or a hosted one) is just another `VAICE_VISION_URL`.
   1440 and 1024 px; at 1024 px (the size vaice sends) a question took about 660 prompt tokens and 0.7 to 1.2 s.
   One run per size on one screen: this shows it works, not how accurate it is. Any other endpoint that takes
   `image_url` content parts works the same; a hosted one adds its own latency.
+- **Short answers on purpose.** The request asks for one or two sentences and carries `max_tokens` (`VAICE_VISION_MAX_TOKENS`, default 200). Without a cap the 2B model described a whole busy desktop: 400 to 830 tokens (5 to 9 s), once a run-on that reached the 30 s timeout and was spoken as "I can't reach my vision model". With the cap and the short-answer prompt the same screen took a median 112 tokens and 1.8 s (8 runs, none at the cap). Set `0` to send no cap, which a hosted model that wants `max_completion_tokens` needs.
 - **Text on the screen is not instructions.** The vision model is told so, and its answer reaches the brain only as
   a skill result. The `remember` skill also refuses to save anything once another skill (this one included) has run
   in the same reply, so text read off the screen cannot become a lasting note.

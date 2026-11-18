@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **"I'm unable to see the screen right now" on a busy screen** (`look_at_screen`). The vision request had no length limit and the model described the whole screen: 400 to 830 tokens (5 to 9 s) on a real desktop, and once a 2600-token run-on that reached `VAICE_VISION_TIMEOUT` (30 s) and was spoken as "I can't reach my vision model". The request now carries `max_tokens` (new `VAICE_VISION_MAX_TOKENS`, default 200; `0` sends none) and the vision system prompt asks for one or two short sentences: median 112 tokens and 1.8 s on the same screen, none at the cap (8 runs; the old prompt reached the cap in 6 of 8, 2.7 s).
 - **"What do you see now?" answered from the earlier screen answer** instead of taking a new screenshot (assistant mode, `look_at_screen`). The model answered from the conversation history without calling the skill (replaying a real conversation: 0 of 5 looked again). The default assistant prompt now says the screen, battery, disk and other live facts change so the tool must be used again, and the skill's description says every call takes a new screenshot; the same replay then looks again 5 of 5. Eval cases can carry their own `history`, and three follow-up cases were added (plus two for the battery: `battery-again` still misses, 0/5).
 
 ### Changed

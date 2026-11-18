@@ -383,7 +383,8 @@ def test_a_bad_brain_timeout_is_a_clean_error(monkeypatch, value):
         importlib.reload(config)
 
 
-VISION_NAMES = ("VAICE_VISION_URL", "VAICE_VISION_MODEL", "VAICE_VISION_API_KEY", "VAICE_VISION_TIMEOUT")
+VISION_NAMES = ("VAICE_VISION_URL", "VAICE_VISION_MODEL", "VAICE_VISION_API_KEY", "VAICE_VISION_TIMEOUT",
+                "VAICE_VISION_MAX_TOKENS")
 
 
 def test_the_vision_skill_is_off_by_default(monkeypatch):
@@ -393,6 +394,7 @@ def test_the_vision_skill_is_off_by_default(monkeypatch):
         reloaded = importlib.reload(config)
         assert (reloaded.VISION_URL, reloaded.VISION_MODEL, reloaded.VISION_API_KEY) == ("", "", "")
         assert reloaded.VISION_TIMEOUT == 30.0
+        assert reloaded.VISION_MAX_TOKENS == 200
     finally:
         monkeypatch.undo()
         importlib.reload(config)
@@ -438,6 +440,28 @@ def test_a_bad_vision_url_names_the_variable_and_never_repeats_the_value(monkeyp
 def test_a_bad_brain_url_still_names_the_brain_key():
     with pytest.raises(ValueError, match="VAICE_BRAIN_API_KEY"):
         config.brain_base("https://user:pw@host/v1")
+
+
+def test_the_vision_token_cap_can_be_changed_or_switched_off(monkeypatch):
+    try:
+        for value, expected in (("120", 120), ("0", 0)):
+            monkeypatch.setenv("VAICE_VISION_MAX_TOKENS", value)
+            reloaded = importlib.reload(config)
+            assert expected == reloaded.VISION_MAX_TOKENS
+    finally:
+        monkeypatch.undo()
+        importlib.reload(config)
+
+
+@pytest.mark.parametrize("value", ["-1", "lots"])
+def test_a_bad_vision_token_cap_is_a_clean_error(monkeypatch, value):
+    monkeypatch.setenv("VAICE_VISION_MAX_TOKENS", value)
+    try:
+        with pytest.raises(SystemExit, match="VAICE_VISION_MAX_TOKENS must be"):
+            importlib.reload(config)
+    finally:
+        monkeypatch.undo()
+        importlib.reload(config)
 
 
 @pytest.mark.parametrize("value", ["0", "-5", "soon"])

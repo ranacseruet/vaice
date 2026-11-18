@@ -969,6 +969,7 @@ def test_a_vision_model_without_a_name_warns_but_the_app_starts(monkeypatch, tmp
 def test_the_vision_skill_is_built_over_the_configured_endpoint_with_the_key_and_the_timeout(monkeypatch):
     _vision(monkeypatch, "https://vision.example/v1")
     monkeypatch.setattr(app.config, "VISION_TIMEOUT", 12.5)
+    monkeypatch.setattr(app.config, "VISION_MAX_TOKENS", 150)
     sent = []
 
     def post(url, json=None, headers=None, timeout=None):
@@ -984,6 +985,7 @@ def test_the_vision_skill_is_built_over_the_configured_endpoint_with_the_key_and
 
     ((url, body, headers, timeout),) = sent
     assert (url, timeout, body["model"]) == ("https://vision.example/v1/chat/completions", 12.5, "LFM3-Omni-2B")
+    assert body["max_tokens"] == 150  # an unbounded answer ran into the timeout on a busy screen
     assert headers == {"Authorization": f"Bearer {VISION_KEY}"}
     assert VISION_KEY not in skill_result.speech and VISION_KEY not in skill_result.detail
 

@@ -317,7 +317,8 @@ def _vision_skill() -> Skill | None:
     """Assistant mode: `look_at_screen` over the configured vision endpoint (None when VAICE_VISION_URL is unset)."""
     if not config.VISION_URL:
         return None
-    brain = ChatBrain.helper(config.VISION_URL, config.VISION_TIMEOUT, config.VISION_MODEL, config.VISION_API_KEY)
+    brain = ChatBrain.helper(config.VISION_URL, config.VISION_TIMEOUT, config.VISION_MODEL, config.VISION_API_KEY,
+                             max_tokens=config.VISION_MAX_TOKENS or None)
     return vision_skill(brain, f"{urlsplit(config.VISION_URL).netloc}, model {config.VISION_MODEL or '(none set)'}")
 
 
