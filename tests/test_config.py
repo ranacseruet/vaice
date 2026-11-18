@@ -499,6 +499,37 @@ def test_a_bad_progress_setting_is_a_clean_error(monkeypatch, value):
         importlib.reload(config)
 
 
+def test_a_task_gets_ten_brain_calls_and_two_minutes_by_default_and_both_can_be_changed(monkeypatch):
+    monkeypatch.delenv("VAICE_ASSISTANT_MAX_STEPS", raising=False)
+    monkeypatch.delenv("VAICE_ASSISTANT_TASK_SECONDS", raising=False)
+    try:
+        reloaded = importlib.reload(config)
+        assert (reloaded.ASSISTANT_MAX_STEPS, reloaded.ASSISTANT_TASK_SECONDS) == (10, 120)
+        monkeypatch.setenv("VAICE_ASSISTANT_MAX_STEPS", "2")
+        monkeypatch.setenv("VAICE_ASSISTANT_TASK_SECONDS", "45.5")
+        reloaded = importlib.reload(config)
+        assert (reloaded.ASSISTANT_MAX_STEPS, reloaded.ASSISTANT_TASK_SECONDS) == (2, 45.5)
+    finally:
+        monkeypatch.undo()
+        importlib.reload(config)
+
+
+@pytest.mark.parametrize(("name", "value"), [
+    ("VAICE_ASSISTANT_MAX_STEPS", "1"), ("VAICE_ASSISTANT_MAX_STEPS", "0"), ("VAICE_ASSISTANT_MAX_STEPS", "abc"),
+    ("VAICE_ASSISTANT_MAX_STEPS", "2.5"),
+    ("VAICE_ASSISTANT_TASK_SECONDS", "0"), ("VAICE_ASSISTANT_TASK_SECONDS", "-5"),
+    ("VAICE_ASSISTANT_TASK_SECONDS", "soon"), ("VAICE_ASSISTANT_TASK_SECONDS", "nan"),
+])
+def test_a_bad_task_budget_is_a_clean_error(monkeypatch, name, value):
+    monkeypatch.setenv(name, value)
+    try:
+        with pytest.raises(SystemExit, match=f"{name} must be"):
+            importlib.reload(config)
+    finally:
+        monkeypatch.undo()
+        importlib.reload(config)
+
+
 def test_an_auto_tool_waits_five_seconds_by_default_and_the_wait_can_be_changed_or_turned_off(monkeypatch):
     monkeypatch.delenv("VAICE_ASSISTANT_AUTO_SECONDS", raising=False)
     try:

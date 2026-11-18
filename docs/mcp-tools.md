@@ -51,7 +51,8 @@ VAICE_MODE=assistant VAICE_MCP_CONFIG=~/.vaice/mcp.json .venv/bin/vaice
   settles it first wins and it runs at most once. With `VAICE_ASSISTANT_AUTO_SECONDS=0` an `auto` tool behaves
   exactly like `click`. Use it for calls you would not mind being made while you look away (opening a page), not
   for anything that writes, sends or spends.
-- **`auto` never follows another skill in the same reply.** If any other skill ran earlier in the reply, the
+- **`auto` never follows another skill in the same task.** If any other skill ran earlier in the task (the reply, and
+  what the brain does after a spoken yes), the
   assistant cannot know whether what it reported is trustworthy text (a page or a file can tell the model to call a
   tool), so that call is asked as a `click` one: no timer, only the **Run** button. Limit: content read in an
   **earlier turn** is not tracked, so a call the model makes in a later turn on the strength of it still counts as

@@ -148,6 +148,15 @@ if not ASSISTANT_PROGRESS_SECONDS >= 0:
 ASSISTANT_AUTO_SECONDS = _number("VAICE_ASSISTANT_AUTO_SECONDS", default="5", kind=float)
 if not ASSISTANT_AUTO_SECONDS >= 0:
     raise SystemExit("vaice: VAICE_ASSISTANT_AUTO_SECONDS must be >= 0 (0 = an `auto` tool waits for the Run button)")
+# Assistant mode only: the budget of one task (a question, and what follows a spoken yes). The brain is called at most
+# MAX_STEPS times, the last call without tools so it has to answer (2 is the least: 1 would never use a tool); no
+# new call starts with tools once TASK_SECONDS have passed since the task began (a call in flight is not cut off).
+ASSISTANT_MAX_STEPS = _number("VAICE_ASSISTANT_MAX_STEPS", default="10", kind=int)
+if not ASSISTANT_MAX_STEPS >= 2:
+    raise SystemExit("vaice: VAICE_ASSISTANT_MAX_STEPS must be >= 2 (the last call has no tools and must answer)")
+ASSISTANT_TASK_SECONDS = _number("VAICE_ASSISTANT_TASK_SECONDS", default="120", kind=float)
+if not ASSISTANT_TASK_SECONDS > 0:
+    raise SystemExit("vaice: VAICE_ASSISTANT_TASK_SECONDS must be > 0 (seconds)")
 # Assistant mode only: the assistant keeps short notes you ask it to remember ("remember that I park on level
 # three") in <VAICE_DATA_DIR>/memory.json, across conversations, and puts them into every prompt (so a remote
 # helper brain gets them too). Off: no memory skills and no notes in the prompt (an existing file is left alone).

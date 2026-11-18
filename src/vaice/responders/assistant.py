@@ -20,6 +20,7 @@ import threading
 import time
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
+from functools import partial
 
 import requests
 
@@ -37,7 +38,6 @@ from vaice.skills import Question, Skill, SkillResult, Skills, default_skills
 log = logging.getLogger(__name__)
 
 POLL_SECONDS = 0.25  # how often the generator checks whether the reply was abandoned or the app is stopping
-MAX_SKILL_ROUNDS = 3  # brain calls per reply; the last one is made without tools, so it must answer
 TTS_CHUNK_BYTES = 8192  # read size of the streamed /tts body (about 0.17 s of speech)
 NOT_HEARD = "Sorry, I didn't catch that."
 NO_ANSWER = "Sorry, I couldn't work that out."
@@ -76,6 +76,35 @@ def _spoken_text(text: str) -> str:
     if cleaned != text.strip():
         log.warning("assistant answer carried model markup, removed: %r", text[:200])
     return cleaned
+
+
+@dataclass
+class Task:
+    """The budget and the taint of one task: a question and, after a spoken yes, what follows it.
+
+    `max_steps` brain calls at most (`steps` made so far), the last one without tools so it must answer; a call is
+    also the last one once `clock()` has reached `deadline`. The deadline is only looked at between brain calls: one in
+    flight is not interrupted (the brain has its own timeout). `tainted`: a skill that is not `direct_only` has run in
+    this task, so what is in the chat may be untrusted text (a page, a file name). It belongs to the task, not to
+    one `decide()` call, so it survives the confirmation question and the continuation after a yes."""
+
+    max_steps: int
+    deadline: float
+    steps: int = 0
+    tainted: bool = False
+    clock: Callable[[], float] = field(default=time.monotonic, repr=False)
+
+    @classmethod
+    def start(cls, max_steps: int | None = None, seconds: float | None = None,
+              clock: Callable[[], float] = time.monotonic) -> "Task":
+        """A new task; the budget defaults to `VAICE_ASSISTANT_MAX_STEPS` / `VAICE_ASSISTANT_TASK_SECONDS`."""
+        steps = config.ASSISTANT_MAX_STEPS if max_steps is None else max_steps
+        limit = config.ASSISTANT_TASK_SECONDS if seconds is None else seconds
+        return cls(steps, clock() + limit, clock=clock)
+
+    def final(self) -> bool:
+        """Whether the next brain call must be the one without tools."""
+        return self.steps + 1 >= self.max_steps or self.clock() >= self.deadline
 
 
 @dataclass(frozen=True)
@@ -137,30 +166,34 @@ def build_messages(prompt: str, history: Sequence[Message], transcript: str, not
 
 
 def decide(brain: ChatBrain, skills: Skills, messages: list[dict], stop: Callable[[], bool],
-           on_call: Callable[[SkillCall], None] | None = None, *, turn: Turn) -> Decision:
+           on_call: Callable[[SkillCall], None] | None = None, *, turn: Turn, task: Task | None = None,
+           empty_answer: str = NO_ANSWER) -> Decision:
     """The brain/skills loop: ask the brain, run the skills it asks for, let it answer from their results.
 
-    Appends to `messages`. The last of the `MAX_SKILL_ROUNDS` brain calls is made without tools, so the
-    loop always ends with an answer. `on_call` is told of each skill as it has run. Raises `_Stopped` when
-    `stop()` turns true between steps; a brain failure propagates.
+    Appends to `messages`. `task` (default: a new one) is the budget: the brain is called until it answers without
+    asking for a skill, and the call that `task.final()` names (the step budget or the time is used up) is made
+    without tools, so the loop always ends with an answer; `empty_answer` is spoken when that answer is empty.
+    `on_call` is told of each skill as it has run. Raises `_Stopped` when `stop()` turns true between steps;
+    a brain failure propagates.
 
     A `confirm` skill does not run: the loop ends there with `Decision.pending` (asked by `turn`) and its
     question as the answer. Calls the brain made after it in the same message are dropped, so `messages`
     (kept in the `Pending`) is a valid chat that only needs the skill's result appended.
 
-    A `direct_only` skill (`remember`) is refused once another skill has run in this reply, in an earlier round or
-    earlier in the same one: what the user dictates never needs a tool first, so a call after one is acting on
-    what a tool reported. It runs nothing and its result says so.
+    A `direct_only` skill (`remember`) is refused once another skill has run in this task (`task.tainted`), in an
+    earlier round, before a confirmation question or earlier in the same round: what the user dictates never needs
+    a tool first, so a call after one is acting on what a tool reported. It runs nothing and its result says so.
 
     A result with an `answer` (a refused reminder) ends the loop with that sentence; calls after it are dropped.
     """
     decision = Decision("")
-    tool_ran = False  # a skill that is not `direct_only` has run in this reply
+    task = task or Task.start()
     tools = skills.definitions()
-    for round_ in range(1, MAX_SKILL_ROUNDS + 1):
+    while True:
         if stop():
             raise _Stopped
-        final = round_ == MAX_SKILL_ROUNDS
+        final = task.final()
+        task.steps += 1
         started = time.perf_counter()
         reply = brain.complete(messages, None if final else tools)
         decision.brain_seconds.append(time.perf_counter() - started)
@@ -177,8 +210,8 @@ def decide(brain: ChatBrain, skills: Skills, messages: list[dict], stop: Callabl
             log.info("assistant skill %s(%s)", call.name, call.arguments)
             prepared = skills.prepare(call.name, call.arguments)
             if isinstance(prepared, Question):
-                if prepared.auto_seconds > 0 and tool_ran and prepared.fallback is not None:
-                    log.warning("assistant will not run %s by itself: another skill had run in this reply", call.name)
+                if prepared.auto_seconds > 0 and task.tainted and prepared.fallback is not None:
+                    log.warning("assistant will not run %s by itself: another skill had run in this task", call.name)
                     prepared = prepared.fallback  # what that skill reported may be untrusted text
                 if index + 1 < len(reply.calls):
                     log.warning("assistant dropped %d skill call(s) requested after %s, which waits for confirmation",
@@ -186,17 +219,17 @@ def decide(brain: ChatBrain, skills: Skills, messages: list[dict], stop: Callabl
                     kept = messages[asking].get("tool_calls") or []
                     messages[asking] = {**messages[asking], "tool_calls": kept[: index + 1]}
                 decision.pending = Pending(call.name, call.arguments, prepared.text, call.id, messages, turn,
-                                           voice=prepared.voice, auto_seconds=prepared.auto_seconds)
+                                           voice=prepared.voice, auto_seconds=prepared.auto_seconds, task=task)
                 decision.answer = prepared.text
                 return decision
             if skills.direct_only(call.name):
-                if tool_ran:
-                    log.warning("assistant refused %s: another skill had run in this reply", call.name)
+                if task.tainted:
+                    log.warning("assistant refused %s: another skill had run in this task", call.name)
                     result = SkillResult(REFUSED_AFTER_TOOL)
                 else:
                     result = skills.run(call.name, call.arguments)
             else:
-                tool_ran = True
+                task.tainted = True
                 result = prepared if prepared is not None else skills.run(call.name, call.arguments)
             skill_call = SkillCall(call.name, call.arguments, result)
             decision.calls.append(skill_call)
@@ -209,7 +242,7 @@ def decide(brain: ChatBrain, skills: Skills, messages: list[dict], stop: Callabl
                                 len(reply.calls) - index - 1, call.name)
                 decision.answer = result.answer
                 return decision
-    decision.answer = decision.answer or NO_ANSWER
+    decision.answer = decision.answer or empty_answer
     return decision
 
 
@@ -326,9 +359,14 @@ def _still_playing(play_end: float, now: float) -> float:
     return max(0.0, play_end - now)
 
 
-def _approved(pending: Pending, skills: Skills, brain: ChatBrain, turn: Turn, stop: Callable[[], bool]) -> Decision:
+def _approved(pending: Pending, skills: Skills, brain: ChatBrain, turn: Turn, stop: Callable[[], bool],
+              new_task: Callable[[], Task] = Task.start) -> Decision:
     """The user said yes: run what was asked (the stored name and arguments, nothing the brain says now),
-    record it on `turn`, and let the brain say in one tool-less call how it went."""
+    record it on `turn`, and let the brain go on in the same task (`pending.task`, so the step budget keeps
+    counting): it says how it went, or calls more skills, or asks another question (`Decision.pending`).
+
+    The approved call's result is a tool result, so the task is tainted from here on. A brain failure after the call
+    ran is not reported as one: the call's own result is spoken, and the skills that ran since stay in `calls`."""
     if stop():
         raise _Stopped
     log.info("assistant skill %s(%s) approved by voice", pending.name, pending.arguments)
@@ -336,20 +374,27 @@ def _approved(pending: Pending, skills: Skills, brain: ChatBrain, turn: Turn, st
     turn.add_tool_event(pending.name, pending.arguments, result.detail or result.speech)
     if stop():
         raise _Stopped
+    ran = [SkillCall(pending.name, pending.arguments, result)]
+
+    def record(call: SkillCall) -> None:
+        ran.append(call)
+        turn.add_tool_event(call.name, call.arguments, call.result.detail or call.result.speech)
+
+    task = pending.task if isinstance(pending.task, Task) else new_task()
+    task.tainted = True
     messages = [*pending.messages, {"role": "tool", "tool_call_id": pending.call_id, "content": result.speech}]
-    started = time.perf_counter()
     try:
-        text = _spoken_text(brain.complete(messages, None).text)
+        decision = decide(brain, skills, messages, stop, record, turn=turn, task=task, empty_answer=result.speech)
     except BrainError as exc:  # the skill already ran: say what it did, not that the brain is away
         log.warning("assistant brain failed after %s ran: %s", pending.name, exc)
-        text = ""
-    return Decision(text or result.speech, [SkillCall(pending.name, pending.arguments, result)],
-                    [time.perf_counter() - started])
+        return Decision(result.speech, ran)
+    decision.calls = ran
+    return decision
 
 
 def _decision(prompt: str, history: Sequence[Message], transcript: str, skills: Skills, brain: ChatBrain,
               confirmations: Confirmations, turn: Turn, stop: Callable[[], bool],
-              notes: Sequence[str] = ()) -> Decision:
+              notes: Sequence[str] = (), new_task: Callable[[], Task] = Task.start) -> Decision:
     """What to say to `transcript`. A request waiting for confirmation is settled first, and only by the
     exact words of `spoken_answer`: yes runs it (that utterance is no question for the brain), no cancels
     it, anything else drops it and is an ordinary question. A request that is not `voice` (a shell command
@@ -362,7 +407,7 @@ def _decision(prompt: str, history: Sequence[Message], transcript: str, skills: 
     if pending is not None:
         answer = spoken_answer(transcript) if pending.armed_at is not None else None
         if answer == "yes":
-            return _approved(pending, skills, brain, turn, stop)
+            return _approved(pending, skills, brain, turn, stop, new_task)
         if answer == "no":
             turn.add_tool_event(pending.name, pending.arguments, "cancelled")
             return Decision(CANCELLED)
@@ -371,13 +416,13 @@ def _decision(prompt: str, history: Sequence[Message], transcript: str, skills: 
         pending.turn.add_tool_event(pending.name, pending.arguments, "not confirmed")
     return decide(brain, skills, build_messages(prompt, history, transcript, notes), stop,
                   lambda call: turn.add_tool_event(call.name, call.arguments, call.result.detail or call.result.speech),
-                  turn=turn)
+                  turn=turn, task=new_task())
 
 
 def _work(url: str, timeout: float, prompt: str, voice_name: str, skills: Skills, brain: ChatBrain,
           confirmations: Confirmations, audio: AudioFrame, history: Sequence[Message], turn: Turn,
           out: queue.Queue, cancelled: threading.Event, progress_seconds: float = 0.0,
-          notes: Sequence[str] = ()) -> None:
+          notes: Sequence[str] = (), new_task: Callable[[], Task] = Task.start) -> None:
     """Daemon thread: one reply. Puts `(rate, frame, text so far)` tuples, then an exception if the reply
     failed, and finally `_DONE` on `out`. The question's transcript is reported on `turn` exactly once,
     whatever happens. Takes only plain data and its helpers, never the responder.
@@ -403,7 +448,8 @@ def _work(url: str, timeout: float, prompt: str, voice_name: str, skills: Skills
         if transcript:
             progress.start()
             try:
-                decision = _decision(prompt, history, transcript, skills, brain, confirmations, turn, stop, notes)
+                decision = _decision(prompt, history, transcript, skills, brain, confirmations, turn, stop, notes,
+                                     new_task)
             except BrainError as exc:  # audible first: its sentence is spoken below, then the error is raised
                 log.warning("assistant brain failed: %s", exc)
                 decision, failure = Decision(exc.spoken), exc
@@ -477,6 +523,8 @@ class AssistantResponder:
         memory: Memory | None = None,
         vision: Skill | None = None,
         extra_skills: Sequence[Skill] = (),
+        max_steps: int = config.ASSISTANT_MAX_STEPS,
+        task_seconds: float = config.ASSISTANT_TASK_SECONDS,
     ):
         self._url = url
         self._timeout = timeout
@@ -488,6 +536,8 @@ class AssistantResponder:
         self._brain = brain or _default_brain(url, timeout)
         self._confirmations = Confirmations() if confirmations is None else confirmations
         self._progress_seconds = progress_seconds
+        self._max_steps = max_steps
+        self._task_seconds = task_seconds
         self._runs: set[threading.Event] = set()  # per click-approved run: set by `clear_pending` to stop it
         self._runs_lock = threading.Lock()
 
@@ -518,6 +568,8 @@ class AssistantResponder:
             with self._runs_lock:
                 self._runs.discard(cancel)
         pending.turn.add_tool_event(pending.name, pending.arguments, result.detail or result.speech)
+        # Nothing goes on from here: the brain continues the task only after a spoken yes (`_approved`). A click or an
+        # auto run happens outside any reply, so its follow-up needs proactive speech (see issue #110).
         return result.speech
 
     def cancel(self, pending_id: str) -> None:
@@ -559,7 +611,7 @@ class AssistantResponder:
             target=_work,
             args=(self._url, self._timeout, self._prompt, self._voice, self.skills, self._brain,
                   self._confirmations, audio, list(history), turn, chunks, cancelled, self._progress_seconds,
-                  notes),
+                  notes, partial(Task.start, self._max_steps, self._task_seconds)),
             name="vaice-assistant",
             daemon=True,
         ).start()

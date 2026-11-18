@@ -7,8 +7,9 @@ assistant can answer questions about your Mac from real data:
 2. a **brain** (`llama-server`'s `POST /v1/chat/completions`, temperature 0, unless you set a
    [helper model](helper-model.md)) reads the transcript, the earlier turns and the current date and time,
    and either answers or asks for a skill;
-3. **skills** run inside vaice and their result goes back to the brain, which then answers (at most
-   three rounds; the last one must answer);
+3. **skills** run inside vaice and their result goes back to the brain, which then answers or asks for
+   more (a task has a budget of `VAICE_ASSISTANT_MAX_STEPS` brain calls, 10, and
+   `VAICE_ASSISTANT_TASK_SECONDS` seconds, 120, checked between calls; the last call must answer);
 4. the answer is cleaned for speech (markdown, links, paths and units become words), split into
    sentences, and each sentence is spoken through llama-server's `POST /tts` (`pcm16`, streamed;
    `VAICE_VOICE=female|male`).
@@ -59,7 +60,10 @@ name that is not running is refused, nothing is asked), and the request waits in
 - **By voice:** say `yes`, `yes please`, `yeah`, `yep`, `go ahead`, `do it`, `please do`, `confirm` (a few
   more are listed in `src/vaice/confirm.py`). Only the whole utterance counts: "yes, and open Notes" is
   not an approval. `no`, `cancel`, `stop`, `never mind` and similar cancel it ("Okay, I won't."). Anything
-  else drops the request and is treated as a new question. The question contains none of the yes words
+  else drops the request and is treated as a new question. After a yes the call runs and the brain goes on
+  in the same task: it says how it went, may call more skills (the step budget keeps counting) or ask another
+  question. A click or an `auto` run only runs the call; the brain does not go on after them yet (#110).
+  The question contains none of the yes words
   and cannot be answered before all its audio has been handed out, so hearing itself through the
   speakers does not approve it (it can drop the request, though: use headphones, see #36).
 - **By click:** while a request waits, a panel above *Tool activity* shows the question, the skill and its
