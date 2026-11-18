@@ -73,8 +73,10 @@ audio ─▶ transcribe ─▶ decide(brain ⇄ skills) ─▶ speakable()+sente
 
 1. **Transcribe.** The realtime `transcription` session turns the audio into text (about 0.15 s).
 2. **Decide.** `brain.ChatBrain` makes a `/v1/chat/completions` call with the transcript, the history and the skills as
-   tools. If the brain asks for skills, vaice runs them and calls the brain again, at most `MAX_SKILL_ROUNDS` (3) times;
-   the last round has no tools, so it must answer. The brain is the local `llama-server` at temperature 0, or any
+   tools. If the brain asks for skills, vaice runs them and calls the brain again, within a task budget of
+   `VAICE_ASSISTANT_MAX_STEPS` brain calls (10) and `VAICE_ASSISTANT_TASK_SECONDS` seconds (120, checked between calls);
+   the last call has no tools, so it must answer. A spoken yes to a question continues the same task (the budget keeps
+   counting, and a skill having run taints it for the rest of the task). The brain is the local `llama-server` at temperature 0, or any
    OpenAI-compatible endpoint you configure ([helper model](helper-model.md)).
 3. **Speak.** The answer is cleaned for speech (`voice.speakable`: no markdown, no paths), split into sentences, and
    each sentence is streamed from `/tts`. Text is recorded sentence by sentence as its audio is queued, so a barge-in
@@ -109,7 +111,7 @@ An `auto`-policy MCP tool adds a timer: the announcement (`Question.auto_seconds
 daemon thread (`vaice-assistant-auto`) then runs the request `VAICE_ASSISTANT_AUTO_SECONDS` after the announcement's estimated end of playback (each frame handed out plays after what is queued, or at once when the queue had drained; fastrtc reports no playback position) through
 `AssistantResponder.approve`, the same atomic `take` a click uses, so a Stop click, a spoken stop or yes, "New
 conversation" or an expiry that comes first means it runs once or not at all. If another skill ran earlier in the
-same reply, `decide()` swaps the question for the tool's click-only `fallback` (that skill's output may be untrusted
+same task (a continuation after a spoken yes included), `decide()` swaps the question for the tool's click-only `fallback` (that skill's output may be untrusted
 text); content read in an earlier turn is not tracked.
 
 ### The skills and their extensions

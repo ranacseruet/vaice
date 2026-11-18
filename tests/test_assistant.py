@@ -149,9 +149,10 @@ def disk_skills(log=None):
     return Skills([Skill("disk_space", "Report free disk space.", {"type": "object", "properties": {}}, run)])
 
 
-def responder(*replies, skills=None, voice="female"):
+def responder(*replies, skills=None, voice="female", **options):
     brain = FakeBrain(*replies)
-    return AssistantResponder("http://server", 5.0, "Be brief.", voice, skills or disk_skills(), brain), brain
+    resp = AssistantResponder("http://server", 5.0, "Be brief.", voice, skills or disk_skills(), brain, **options)
+    return resp, brain
 
 
 def drive(resp, history=(), turn=None, audio=AUDIO):
@@ -246,7 +247,9 @@ def test_each_skill_is_reported_on_the_turn_with_its_detail(tts):
 
 
 def test_the_last_brain_call_is_made_without_tools_so_it_has_to_answer(tts):
-    resp, brain = responder(ask(("disk_space", "{}")), ask(("disk_space", "{}")), answer("About 160 gigabytes."))
+    # the last call is the one the step budget leaves (here 3), no longer a fixed third
+    resp, brain = responder(ask(("disk_space", "{}")), ask(("disk_space", "{}")), answer("About 160 gigabytes."),
+                            max_steps=3)
     turn = Turn()
 
     drive(resp, turn=turn)
@@ -257,7 +260,8 @@ def test_the_last_brain_call_is_made_without_tools_so_it_has_to_answer(tts):
 
 
 def test_a_skill_call_in_the_forced_round_is_ignored_and_the_reply_says_it_could_not_work_it_out(tts, caplog):
-    resp, _ = responder(ask(("disk_space", "{}")), ask(("disk_space", "{}")), ask(("disk_space", "{}")))
+    resp, _ = responder(ask(("disk_space", "{}")), ask(("disk_space", "{}")), ask(("disk_space", "{}")),
+                        max_steps=3)  # the budget, no longer a fixed three, makes the third call the forced one
     turn = Turn()
 
     with caplog.at_level(logging.WARNING, logger="vaice.responders.assistant"):
@@ -761,7 +765,8 @@ def test_an_answer_that_is_only_markup_becomes_the_no_answer_sentence(caplog):
 def test_the_forced_final_round_cannot_speak_its_tool_call_markup():
     brain = FakeBrain(ask(("disk_space", "{}")), ask(("disk_space", "{}")), answer(f"Checking. {TOOL_CALL_MARKUP}"))
 
-    decision = decide(brain, disk_skills(), [{"role": "user", "content": "x"}], lambda: False, turn=Turn())
+    decision = decide(brain, disk_skills(), [{"role": "user", "content": "x"}], lambda: False, turn=Turn(),
+                      task=assistant.Task.start(3, 120.0))  # the third call is the forced one
 
     assert decision.answer == "Checking."
 
@@ -1089,7 +1094,7 @@ def test_decide_stops_at_the_confirm_skill_with_its_question_as_the_answer():
     assert s.ran == []
 
 
-def test_yes_runs_the_stored_call_makes_one_tool_less_brain_call_and_is_not_a_question(tts, heard):
+def test_yes_runs_the_stored_call_then_the_brain_goes_on_and_it_is_not_a_question(tts, heard):
     s = asked(answer("Safari is closed now."))
     heard.text = "Yes, please!"
     second = CountingTurn()
@@ -1099,7 +1104,7 @@ def test_yes_runs_the_stored_call_makes_one_tool_less_brain_call_and_is_not_a_qu
     assert s.ran == [{"name": "Safari"}]  # the stored arguments
     assert len(s.brain.calls) == 2
     messages, tools = s.brain.calls[1]
-    assert tools is None  # the brain only has to say how it went
+    assert tools is not None  # the task goes on: the brain may call more skills after the approved one
     assert messages[-1] == {"role": "tool", "tool_call_id": "call_0", "content": "quit Safari"}
     assert messages[-2]["tool_calls"][0]["id"] == "call_0"
     assert not any(m.get("content") == "Yes, please!" for m in messages)  # "yes" never reaches the brain
@@ -1373,7 +1378,7 @@ def test_a_harmless_command_is_asked_by_voice_and_a_spoken_yes_runs_its_argv_wit
 
     assert popen_log == [["pwd"]]
     messages, tools = s.brain.calls[1]
-    assert tools is None
+    assert tools is not None  # the task goes on after a yes: more skills may be called
     assert messages[-1] == {"role": "tool", "tool_call_id": "call_0",
                             "content": f"the command finished. Output: {home.resolve()}"}
     assert turn.assistant_text == "You are in your home folder."
@@ -2162,7 +2167,8 @@ def test_an_ordinary_skill_failure_is_still_reported_by_the_model():
 
 def test_a_pseudo_call_in_the_forced_final_round_is_not_spoken_either():
     decision = decide(FakeBrain(*[ask(("disk_space", "{}"))] * 3, answer("[disk_space()]")), disk_skills(),
-                      [{"role": "user", "content": "x"}], lambda: False, turn=Turn())
+                      [{"role": "user", "content": "x"}], lambda: False, turn=Turn(),
+                      task=assistant.Task.start(4, 120.0))  # the fourth call is the forced one
 
     assert decision.answer == assistant.NO_ANSWER
 
@@ -2560,3 +2566,207 @@ def test_a_request_without_a_timer_is_armed_with_no_delay(tts, monkeypatch):
 
     pending = s.resp.pending()
     assert pending.armed_at == 100.0 and pending.auto_delay == 0.0 and pending.auto_seconds == 0
+
+
+# --- the task: a step budget instead of a fixed number of rounds, and taint that outlives one decide() call
+
+
+def test_a_reply_may_take_more_than_three_tool_rounds_before_it_answers(tts):
+    resp, brain = responder(*[ask(DISK)] * 5, answer("All five looks are done."))
+    turn = Turn()
+
+    drive(resp, turn=turn)
+
+    assert [tools is not None for _, tools in brain.calls] == [True] * 6  # the budget (10) is not reached
+    assert len(turn.tool_events) == 5
+    assert turn.assistant_text == "All five looks are done."
+
+
+def test_the_last_step_of_the_budget_is_made_without_tools_and_a_call_in_it_is_ignored(tts, caplog):
+    resp, brain = responder(*[ask(DISK)] * 4, max_steps=4)
+    turn = Turn()
+
+    with caplog.at_level(logging.WARNING, logger="vaice.responders.assistant"):
+        drive(resp, turn=turn)
+
+    assert [tools is not None for _, tools in brain.calls] == [True, True, True, False]  # exactly max_steps calls
+    assert len(turn.tool_events) == 3  # the 4th request was not run
+    assert turn.assistant_text == assistant.NO_ANSWER
+    assert "ignored a skill call in the final round" in caplog.text
+
+
+def test_decide_counts_the_steps_on_the_task_and_the_budget_ends_in_a_tool_less_answer():
+    task = assistant.Task.start(4, 120.0)
+    brain = FakeBrain(ask(DISK), ask(DISK), ask(DISK), answer("Three looks were enough."))
+
+    decision = decide(brain, disk_skills(), [{"role": "user", "content": "x"}], lambda: False, turn=Turn(), task=task)
+
+    assert decision.answer == "Three looks were enough."
+    assert task.steps == 4 and task.tainted
+    assert [tools is not None for _, tools in brain.calls] == [True, True, True, False]
+
+
+def test_a_task_past_its_deadline_makes_the_very_next_brain_call_the_final_one():
+    now = [0.0]
+
+    def slow(_args):
+        now[0] += 200  # the skill took longer than the whole task's time
+        return SkillResult("160 gigabytes free of 926 gigabytes")
+
+    skills = Skills([Skill("disk_space", "Report free disk space.", {"type": "object", "properties": {}}, slow)])
+    task = assistant.Task.start(10, 120.0, clock=lambda: now[0])
+    brain = FakeBrain(ask(DISK), answer("That took a while, but 160 gigabytes are free."))
+
+    decision = decide(brain, skills, [{"role": "user", "content": "x"}], lambda: False, turn=Turn(), task=task)
+
+    assert [tools is not None for _, tools in brain.calls] == [True, False]
+    assert decision.answer == "That took a while, but 160 gigabytes are free."
+
+
+def test_a_task_that_is_out_of_time_before_its_first_call_gets_one_tool_less_call():
+    now = [0.0]
+    task = assistant.Task.start(10, 120.0, clock=lambda: now[0])
+    now[0] = 500.0
+    brain = FakeBrain(ask(DISK))
+
+    decision = decide(brain, disk_skills(), [{"role": "user", "content": "x"}], lambda: False, turn=Turn(), task=task)
+
+    assert [tools is not None for _, tools in brain.calls] == [False]
+    assert decision.calls == [] and decision.answer == assistant.NO_ANSWER
+
+
+NEXT_PAGE = {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}
+
+
+def tasked(*replies, max_steps=None):
+    """quit_app (voice confirm), disk_space (read), an `auto` MCP-style skill and `remember`, with one responder."""
+    ran, disk_ran, auto_ran, brain = [], [], [], FakeBrain(*replies)
+    memory = Memory(None)
+    base = skills_with_quit(ran, disk_ran)
+    auto = Skill(AUTO[0], "Open a page.", NEXT_PAGE, lambda args: auto_ran.append(args) or SkillResult("opened"),
+                 kind="confirm", ask=lambda _args: mcp_skills.auto_question("chrome", "navigate_page", AUTO_SECONDS))
+    skills = Skills([*base.skills, auto, *memory_skills(memory)])
+    confirmations = Confirmations(Clock())
+    options = {} if max_steps is None else {"max_steps": max_steps}
+    resp = AssistantResponder("http://server", 5.0, "Be brief.", "female", skills, brain, confirmations,
+                              progress_seconds=0, **options)
+    return SimpleNamespace(resp=resp, brain=brain, confirmations=confirmations, ran=ran, disk_ran=disk_ran,
+                           auto_ran=auto_ran, memory=memory)
+
+
+def tasked_and_asked(*more, request=QUIT, max_steps=None, first=()):
+    """`tasked`, driven through a reply that ends in a question about `request` (after the `first` replies)."""
+    s = tasked(*first, ask(request), *more, max_steps=max_steps)
+    s.turn = Turn()
+    drive(s.resp, turn=s.turn)
+    return s
+
+
+def test_an_auto_call_after_a_read_in_an_earlier_step_of_the_task_is_asked_as_a_click(tts):
+    s = tasked(ask(DISK), ask(AUTO))
+
+    drive(s.resp)
+
+    pending = s.resp.pending()
+    assert pending.question == CLICK_ONLY and pending.voice is False and pending.auto_seconds == 0
+    assert pending.task.tainted and pending.task.steps == 2
+    assert s.auto_ran == []
+
+
+def test_the_pending_request_carries_the_task_that_asked_it(tts):
+    s = tasked(ask(DISK), ask(QUIT))
+
+    drive(s.resp)
+
+    task = s.resp.pending().task
+    assert isinstance(task, assistant.Task) and task.steps == 2 and task.max_steps == 10
+
+
+def test_after_a_yes_the_approved_call_runs_and_the_brain_goes_on_with_tools(tts, heard):
+    s = tasked_and_asked(ask(DISK), answer("Safari is closed and 160 gigabytes are free."))
+    heard.text = "Yes, please!"
+    second = CountingTurn()
+
+    drive(s.resp, turn=second)
+
+    assert s.ran == [{"name": "Safari"}] and s.disk_ran == [1]
+    assert len(s.brain.calls) == 3
+    first_continuation, tools = s.brain.calls[1]
+    assert tools is not None  # the brain may call more tools after an approval
+    assert first_continuation[-1] == {"role": "tool", "tool_call_id": "call_0", "content": "quit Safari"}
+    assert s.brain.calls[2][1] is not None
+    assert tool_events(second) == [("quit_app", "quit Safari"), ("disk_space", "160 gigabytes free of 926 gigabytes")]
+    assert second.assistant_text == "Safari is closed and 160 gigabytes are free."
+    assert [b["input"] for b in tts.bodies] == [QUESTION, "Safari is closed and 160 gigabytes are free."]
+    assert s.resp.pending() is None
+
+
+def test_a_continuation_may_end_in_another_question_which_is_spoken_and_waits(tts, heard):
+    mail = ("quit_app", '{"name": "Mail"}')
+    s = tasked_and_asked(ask(mail))
+    heard.text = "yes"
+    second = CountingTurn()
+
+    drive(s.resp, turn=second)
+
+    assert s.ran == [{"name": "Safari"}]  # Mail has not run
+    pending = s.resp.pending()
+    assert pending.name == "quit_app" and pending.arguments == mail[1] and pending.question == "Shall I quit Mail?"
+    assert pending.armed_at is not None and pending.turn is second
+    assert [b["input"] for b in tts.bodies] == [QUESTION, "Shall I quit Mail?"]
+    assert tool_events(second) == [("quit_app", "quit Safari"), ("quit_app", "waiting for confirmation")]
+
+
+def test_the_task_and_its_step_count_go_on_across_a_yes(tts, heard):
+    s = tasked_and_asked(ask(DISK), answer("Done."), first=[ask(DISK)], max_steps=4)
+    task = s.resp.pending().task
+    assert task.steps == 2 and task.max_steps == 4  # a read, then the question
+    heard.text = "yes"
+
+    drive(s.resp)
+
+    assert s.resp.pending() is None
+    assert [tools is not None for _, tools in s.brain.calls[2:]] == [True, False]  # two steps were left, the 2nd final
+    assert task.steps == 4
+
+
+def test_a_call_after_a_yes_is_tainted_so_an_auto_tool_is_asked_as_a_click(tts, heard):
+    s = tasked_and_asked(ask(AUTO))
+    heard.text = "yes"
+
+    drive(s.resp)
+
+    pending = s.resp.pending()
+    assert pending.question == CLICK_ONLY and pending.voice is False and pending.auto_seconds == 0
+    assert s.auto_ran == []
+
+
+def test_remember_after_a_yes_is_refused_because_the_approved_call_was_a_tool_result(tts, heard):
+    s = tasked_and_asked(ask(REMEMBER), answer("Okay."))
+    heard.text = "yes"
+
+    drive(s.resp)
+
+    assert s.memory.notes() == []
+    assert s.brain.calls[2][0][-1] == {"role": "tool", "tool_call_id": "call_0", "content": REFUSED}
+
+
+def test_a_brain_failure_in_the_continuation_still_reports_the_approved_call_and_what_ran_after_it(tts):
+    s = confirming(ask(DISK), RATE_LIMITED)
+    request = Pending("quit_app", QUIT[1], QUESTION, "call_0", [], Turn())
+    turn = Turn()
+
+    decision = assistant._approved(request, s.resp.skills, s.brain, turn, lambda: False)
+
+    assert decision.answer == "quit Safari"
+    assert [c.name for c in decision.calls] == ["quit_app", "disk_space"]
+    assert tool_events(turn) == [("quit_app", "quit Safari"), ("disk_space", "160 gigabytes free of 926 gigabytes")]
+
+
+def test_an_approval_with_no_task_on_the_request_starts_a_fresh_one():
+    s = confirming(answer("Safari is closed."))
+    request = Pending("quit_app", QUIT[1], QUESTION, "call_0", [], Turn())
+
+    decision = assistant._approved(request, s.resp.skills, s.brain, Turn(), lambda: False)
+
+    assert decision.answer == "Safari is closed." and s.brain.calls[0][1] is not None

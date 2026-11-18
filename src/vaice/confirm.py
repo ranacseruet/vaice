@@ -57,6 +57,7 @@ class Pending:
     voice: bool = True  # whether a spoken yes may approve it; False: only the UI's Run button
     auto_seconds: float = 0  # > 0: runs by itself this long after the question's audio has played, unless settled first
     auto_delay: float = 0  # set by `arm`: the estimated seconds of the question still to play when it was armed
+    task: object | None = None  # the asking reply's `assistant.Task` (step budget, taint), carried over a spoken yes
 
     def remaining(self, now: float) -> float | None:
         """Seconds left of an armed auto request at clock time `now` (never negative), else None: the time the

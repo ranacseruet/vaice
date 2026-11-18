@@ -36,7 +36,7 @@ model (a bigger local one or a hosted one) is just another `VAICE_VISION_URL`.
 - **Short answers on purpose.** The request asks for one or two sentences and carries `max_tokens` (`VAICE_VISION_MAX_TOKENS`, default 200). Without a cap the 2B model described a whole busy desktop: 400 to 830 tokens (5 to 9 s), once a run-on that reached the 30 s timeout and was spoken as "I can't reach my vision model". With the cap and the short-answer prompt the same screen took a median 112 tokens and 1.8 s (8 runs, none at the cap). Set `0` to send no cap, which a hosted model that wants `max_completion_tokens` needs.
 - **Text on the screen is not instructions.** The vision model is told so, and its answer reaches the brain only as
   a skill result. The `remember` skill also refuses to save anything once another skill (this one included) has run
-  in the same reply, so text read off the screen cannot become a lasting note.
+  in the same task (a reply and what follows a spoken yes), so text read off the screen cannot become a lasting note.
 - The answer is cut at 600 characters and its markdown emphasis is removed before it is spoken. A failing vision
   endpoint is spoken like a failing brain, naming the vision model (refused key, busy, unreachable, no answer).
   Not verified: a hosted vision provider, and the real capture on a machine with the permission granted (the unit
