@@ -1298,12 +1298,12 @@ def test_a_follow_up_after_a_click_sees_what_the_action_did(tts):
     history = conversation.history(before=conversation.start_turn(), tools=True)
 
     assert history == [("user", "How much disk space is free?"),
-                       ("tool", tool_entry("quit_app", '{"name":"Safari"}', "waiting for confirmation")),
                        ("tool", tool_entry("quit_app", '{"name":"Safari"}', "quit Safari")),
-                       ("assistant", QUESTION)]
+                       ("assistant", QUESTION)]  # one call: the wait is dropped once its result is known
     messages = assistant.build_messages("Be brief.", history, "Now start it again.")
-    assert [m["content"] for m in messages if m["role"] == "tool"] == ["waiting for confirmation", "quit Safari"]
-    assert [c["function"]["arguments"] for c in messages[2]["tool_calls"]] == ['{"name":"Safari"}'] * 2
+    assert [m["content"] for m in messages if m["role"] == "tool"] == ["quit Safari"]
+    assert [c["function"]["arguments"] for c in messages[2]["tool_calls"]] == ['{"name":"Safari"}']
+    assert [e["output"] for e in first.tool_events] == ["waiting for confirmation", "quit Safari"]  # stored as before
 
 
 def test_a_follow_up_after_a_spoken_yes_sees_the_result_on_the_yes_turn(tts, heard):

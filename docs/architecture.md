@@ -88,7 +88,7 @@ Details that matter:
 - **History carries tool results.** Each answered turn's skill results are replayed as a real tool exchange, so a
   follow-up ("and how much memory?") is answered from the result, not from the model's head. The call's own arguments
   are replayed too (compact JSON, at most 300 characters, else `{}`), so the model is not shown calls that succeeded
-  without a required argument and does not imitate them.
+  without a required argument and does not imitate them. A call that asked for confirmation is stored as two events (the wait, then its result); the replay leaves the wait out once a later event of the turn has the same name and arguments, so the model sees the call once (stored events and the *Tool activity* panel are unchanged).
 - **Spoken progress.** If the decision takes longer than 2.5 s, a second thread says "One moment." and then "Still
   working." through the same `/tts` path, never recording the filler in history.
 - **One worker thread per reply.** The generator that fastrtc drives only polls a queue; the slow work happens on a daemon
@@ -107,7 +107,7 @@ none of the words a user answers with, because speaker echo can reach the microp
 
 An `auto`-policy MCP tool adds a timer: the announcement (`Question.auto_seconds`) is armed like any question, and a
 daemon thread (`vaice-assistant-auto`) then runs the request `VAICE_ASSISTANT_AUTO_SECONDS` after the announcement's estimated end of playback (each frame handed out plays after what is queued, or at once when the queue had drained; fastrtc reports no playback position) through
-`AssistantResponder.approve`, the same atomic `take` a click uses, so a Cancel click, a spoken stop or yes, "New
+`AssistantResponder.approve`, the same atomic `take` a click uses, so a Stop click, a spoken stop or yes, "New
 conversation" or an expiry that comes first means it runs once or not at all. If another skill ran earlier in the
 same reply, `decide()` swaps the question for the tool's click-only `fallback` (that skill's output may be untrusted
 text); content read in an earlier turn is not tracked.

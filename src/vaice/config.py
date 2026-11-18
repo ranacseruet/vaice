@@ -144,7 +144,7 @@ ASSISTANT_PROGRESS_SECONDS = _number("VAICE_ASSISTANT_PROGRESS_SECONDS", default
 if not ASSISTANT_PROGRESS_SECONDS >= 0:
     raise SystemExit("vaice: VAICE_ASSISTANT_PROGRESS_SECONDS must be >= 0 (0 = no spoken progress)")
 # Assistant mode only: an MCP tool with the policy `auto` (VAICE_MCP_CONFIG) runs by itself this many seconds after
-# its announcement was spoken, unless you press Cancel or say stop. 0 turns it off: `auto` then works like `click`.
+# its announcement was spoken, unless you press Stop or say stop. 0 turns it off: `auto` then works like `click`.
 ASSISTANT_AUTO_SECONDS = _number("VAICE_ASSISTANT_AUTO_SECONDS", default="5", kind=float)
 if not ASSISTANT_AUTO_SECONDS >= 0:
     raise SystemExit("vaice: VAICE_ASSISTANT_AUTO_SECONDS must be >= 0 (0 = an `auto` tool waits for the Run button)")

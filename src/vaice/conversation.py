@@ -29,6 +29,8 @@ TOOL_HISTORY_OUTPUT_CHARS = 300  # a past tool result in a prompt: enough to ans
 # A past call's arguments in a prompt, as compact JSON: replayed whole or not at all (a cut-off JSON string is
 # invalid and hosted endpoints reject it), so a longer object is replayed as `{}`
 TOOL_HISTORY_ARGUMENT_CHARS = 300
+# The output recorded for a call that asked the user first; its result is recorded as a second event
+WAITING_FOR_CONFIRMATION = "waiting for confirmation"
 
 
 def _cap(text: str, limit: int) -> str:
@@ -270,7 +272,9 @@ def to_messages(turns: list[Turn], tools: bool = False) -> list[Message]:
     With `tools`, each answered turn's tool events come between its two messages as
     `("tool", "<name>: <output>")` (output capped), so a follow-up can use an earlier result; a call that
     had arguments is `("tool", tool_entry(...))` instead, so a replay can repeat them (see `replay_arguments`).
-    A turn with no assistant message carries none: there is no answer for them to explain.
+    A turn with no assistant message carries none: there is no answer for them to explain. A call that waited
+    for confirmation is stored as two events (the wait, then its result); the wait is left out once a later event
+    of the turn has the same name and arguments, so the model sees the call once. Nothing stored changes.
 
     A turn whose transcript is still pending is dropped whole: the question has not been
     transcribed yet, so the answer to it would be a dangling reply, and `(inaudible)` would
@@ -285,7 +289,12 @@ def to_messages(turns: list[Turn], tools: bool = False) -> list[Message]:
         messages.append(("user", turn.user_text or INAUDIBLE))
         if turn.assistant_text:
             if tools:
-                for event in turn.tool_events:
+                events = turn.tool_events
+                for i, event in enumerate(events):
+                    if event["output"] == WAITING_FOR_CONFIRMATION and any(
+                            later["name"] == event["name"] and later["arguments"] == event["arguments"]
+                            for later in events[i + 1:]):
+                        continue
                     output = _cap(event["output"], TOOL_HISTORY_OUTPUT_CHARS)
                     arguments = replay_arguments(event["arguments"])
                     messages.append(("tool", f"{event['name']}: {output}" if arguments == "{}"

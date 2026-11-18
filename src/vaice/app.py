@@ -37,7 +37,7 @@ ERROR_TEXT_LIMIT = 200  # characters of a failure shown in the UI; the traceback
 CHATBOT_HEIGHT = 500  # pixels; the default (400) leaves the transcript cramped next to the mic
 UI_TITLE = "vaice"  # the heading above the mic
 BUTTON_ONLY = "Only the Run button can approve this one; saying yes will not."
-AUTO_COUNTDOWN = "Runs by itself in {seconds} s; press Cancel to stop it."  # on screen only, not spoken
+AUTO_COUNTDOWN = "Runs by itself in {seconds} s; press Stop to cancel it."  # on screen only, not spoken
 NOTHING_REMEMBERED = "Nothing remembered."
 _MARKDOWN_PUNCTUATION = re.compile(r"([!-/:-@\[-`{-~])")  # every ASCII punctuation character
 
@@ -76,21 +76,24 @@ def _shell_command(view: dict) -> str | None:
 
 
 def confirmation_panel(view: dict | None) -> tuple:
-    """The confirmation panel's components for `pending_view`: its visibility, its text, the request's id.
+    """The confirmation panel's components for `pending_view`: its visibility, its text, the request's id, and
+    the visibility of its two button rows (the countdown's *Stop* / *Run now*, the ordinary *Run* / *Cancel*).
 
     The text holds the question and, in a code block, the skill and its arguments exactly as they will run
     (for a shell command the command line itself). A request a spoken yes cannot approve says so; an `auto` request
-    that is counting down says how long is left."""
+    that is counting down says how long is left and puts *Stop* first, since it will run by itself."""
     if view is None:
-        return gr.update(visible=False), "", ""
+        return gr.update(visible=False), "", "", gr.update(visible=False), gr.update(visible=False)
     command = _shell_command(view) if view["name"] == RUN_SHELL else None
     if command is None:
         command = f"{view['name']} {view['arguments']}".rstrip()
     fence = _fence(command)
     notice = "" if view.get("voice", True) else f"{BUTTON_ONLY}\n\n"
-    if view.get("remaining") is not None:  # an armed `auto` request: the countdown the announcement spoke of
+    counting = view.get("remaining") is not None  # an armed `auto` request: the countdown the announcement spoke of
+    if counting:
         notice += f"{AUTO_COUNTDOWN.format(seconds=view['remaining'])}\n\n"
-    return gr.update(visible=True), f"{view['question']}\n\n{notice}{fence}\n{command}\n{fence}", view["id"]
+    return (gr.update(visible=True), f"{view['question']}\n\n{notice}{fence}\n{command}\n{fence}", view["id"],
+            gr.update(visible=counting), gr.update(visible=not counting))
 
 
 def memory_markdown(notes: list[str]) -> str:
@@ -110,7 +113,8 @@ def refresh_view(conversation: Conversation, known: str, pending: Callable[[], P
     are compared as JSON so an unchanged transcript is never re-rendered.
 
     With `pending` (a responder that asks for confirmation) the confirmation panel is part of the view:
-    its visibility, text and the request's id (which the buttons pass back) come after the two views.
+    its visibility, text, the request's id (which the buttons pass back) and its two button rows' visibility
+    come after the two views.
     With `memory` (the notes, in assistant mode with memory on) the Memory panel's text comes after those.
     """
     view = (conversation.messages_for_ui(), conversation.tool_activity_for_ui())
@@ -205,11 +209,16 @@ def build_stream(responder: Responder, conversation: Conversation) -> Stream:
         if pending is not None:
             with gr.Column(visible=False) as confirm_panel:
                 confirm_text = gr.Markdown()
-                with gr.Row():
+                # Gradio cannot reorder components, so the two layouts are two rows shown one at a time: a request
+                # that runs by itself after a countdown leads with Stop, every other one with Run
+                with gr.Row(visible=False) as stop_row:
+                    stop_button = gr.Button("Stop", variant="stop")
+                    run_now_button = gr.Button("Run now", variant="secondary")
+                with gr.Row(visible=False) as run_row:
                     run_button = gr.Button("Run", variant="primary")
                     cancel_button = gr.Button("Cancel")
             pending_id = gr.State("")  # the request the panel shows: a click can only settle that one
-            confirm_outputs = [confirm_panel, confirm_text, pending_id]
+            confirm_outputs = [confirm_panel, confirm_text, pending_id, stop_row, run_row]
         # Tool calls and their results, kept out of the conversation: collapsed by default, and the
         # 1 s timer (below) fills it when a tool round lands
         with gr.Accordion("Tool activity", open=False):
@@ -240,10 +249,12 @@ def build_stream(responder: Responder, conversation: Conversation) -> Stream:
                 # hide at once; the blank `seen` makes the next tick draw whatever is pending now
                 return gr.update(visible=False), "", ""
 
-            run_button.click(partial(settle, responder.approve), inputs=[pending_id],
-                             outputs=[confirm_panel, pending_id, seen])
-            cancel_button.click(partial(settle, responder.cancel), inputs=[pending_id],
-                                outputs=[confirm_panel, pending_id, seen])
+            for approve_button in (run_button, run_now_button):
+                approve_button.click(partial(settle, responder.approve), inputs=[pending_id],
+                                     outputs=[confirm_panel, pending_id, seen])
+            for cancel_or_stop in (cancel_button, stop_button):
+                cancel_or_stop.click(partial(settle, responder.cancel), inputs=[pending_id],
+                                     outputs=[confirm_panel, pending_id, seen])
 
         gr.Timer(VIEW_REFRESH_SECONDS).tick(
             partial(refresh_view, conversation, pending=pending, memory=None if memory is None else memory.notes),
