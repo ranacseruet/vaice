@@ -2,6 +2,7 @@
 import argparse
 import json
 import logging
+import math
 import re
 import time
 from collections.abc import Callable
@@ -36,6 +37,7 @@ ERROR_TEXT_LIMIT = 200  # characters of a failure shown in the UI; the traceback
 CHATBOT_HEIGHT = 500  # pixels; the default (400) leaves the transcript cramped next to the mic
 UI_TITLE = "vaice"  # the heading above the mic
 BUTTON_ONLY = "Only the Run button can approve this one; saying yes will not."
+AUTO_COUNTDOWN = "Runs by itself in {seconds} s; press Cancel to stop it."  # on screen only, not spoken
 NOTHING_REMEMBERED = "Nothing remembered."
 _MARKDOWN_PUNCTUATION = re.compile(r"([!-/:-@\[-`{-~])")  # every ASCII punctuation character
 
@@ -53,8 +55,10 @@ def pending_view(pending: Pending | None) -> dict | None:
     """What the confirmation panel shows of a waiting request (None: nothing waits)."""
     if pending is None:
         return None
+    left = pending.remaining(time.monotonic())  # the responder's `Confirmations` runs on the same clock
     return {"id": pending.id, "question": pending.question, "name": pending.name, "arguments": pending.arguments,
-            "voice": pending.voice}
+            "voice": pending.voice, "auto_seconds": pending.auto_seconds,
+            "remaining": None if left is None else math.ceil(left)}  # whole seconds: one redraw a second at most
 
 
 def _fence(text: str) -> str:
@@ -75,15 +79,18 @@ def confirmation_panel(view: dict | None) -> tuple:
     """The confirmation panel's components for `pending_view`: its visibility, its text, the request's id.
 
     The text holds the question and, in a code block, the skill and its arguments exactly as they will run
-    (for a shell command the command line itself). A request a spoken yes cannot approve says so."""
+    (for a shell command the command line itself). A request a spoken yes cannot approve says so; an `auto` request
+    that is counting down says how long is left."""
     if view is None:
         return gr.update(visible=False), "", ""
     command = _shell_command(view) if view["name"] == RUN_SHELL else None
     if command is None:
         command = f"{view['name']} {view['arguments']}".rstrip()
     fence = _fence(command)
-    only_button = "" if view.get("voice", True) else f"{BUTTON_ONLY}\n\n"
-    return gr.update(visible=True), f"{view['question']}\n\n{only_button}{fence}\n{command}\n{fence}", view["id"]
+    notice = "" if view.get("voice", True) else f"{BUTTON_ONLY}\n\n"
+    if view.get("remaining") is not None:  # an armed `auto` request: the countdown the announcement spoke of
+        notice += f"{AUTO_COUNTDOWN.format(seconds=view['remaining'])}\n\n"
+    return gr.update(visible=True), f"{view['question']}\n\n{notice}{fence}\n{command}\n{fence}", view["id"]
 
 
 def memory_markdown(notes: list[str]) -> str:
@@ -341,7 +348,7 @@ def _open_mcp() -> mcp_skills.McpTools | None:
     tool names only, never the file's `env` values."""
     if config.MCP_CONFIG is None:
         return None
-    tools = mcp_skills.start(config.MCP_CONFIG, config.MCP_TIMEOUT)
+    tools = mcp_skills.start(config.MCP_CONFIG, config.MCP_TIMEOUT, config.ASSISTANT_AUTO_SECONDS)
     for name, offered in tools.summaries:
         log.info("mcp server %s: %d tools offered (%s)", name, len(offered), ", ".join(offered) or "none")
     return tools

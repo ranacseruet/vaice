@@ -1026,7 +1026,9 @@ def _mcp(monkeypatch, tmp_path, mode="assistant", fake=None):
     started = []
     monkeypatch.setattr(app.config, "MCP_CONFIG", tmp_path / "mcp.json")
     monkeypatch.setattr(app.config, "MCP_TIMEOUT", 12.5)
-    monkeypatch.setattr(app.mcp_skills, "start", lambda path, timeout: started.append((path, timeout)) or fake)
+    monkeypatch.setattr(app.config, "ASSISTANT_AUTO_SECONDS", 7.0)
+    monkeypatch.setattr(app.mcp_skills, "start",
+                        lambda path, timeout, auto: started.append((path, timeout, auto)) or fake)
     monkeypatch.setattr(app.config, "MODE", mode)
     return fake, started
 
@@ -1052,7 +1054,7 @@ def test_assistant_mode_starts_the_mcp_servers_gives_their_skills_to_the_respond
     with caplog.at_level(logging.INFO, logger="vaice.app"):
         assert _main_with(monkeypatch, tmp_path, tools=None)
 
-    assert started == [(tmp_path / "mcp.json", 12.5)]
+    assert started == [(tmp_path / "mcp.json", 12.5, 7.0)]
     assert built[0]["extra_skills"] == ["a skill"]
     assert "mcp server notes: 2 tools offered (search_notes, add_note)" in caplog.text
     assert "mcp server idle: 0 tools offered (none)" in caplog.text
@@ -1285,6 +1287,61 @@ def test_the_panel_shows_a_view_without_the_voice_key_as_voice_approvable():
     view = {"id": "x", "question": "Shall I quit Safari?", "name": "quit_app", "arguments": "{}"}
 
     assert "Only the Run button" not in app.confirmation_panel(view)[1]
+
+
+def auto_request(seconds=5.0, armed_at=None):
+    return Pending("chrome__navigate_page", '{"url": "x"}', "Using navigate page from chrome in 5 seconds.", "call_0",
+                   [], conv.Turn(), auto_seconds=seconds, armed_at=armed_at)
+
+
+def test_an_armed_auto_request_shows_the_whole_seconds_left_rounded_up_and_how_to_stop_it(monkeypatch):
+    request = auto_request(armed_at=100.0)
+    monkeypatch.setattr(app.time, "monotonic", lambda: 100.0)
+    assert app.pending_view(request)["remaining"] == 5
+    monkeypatch.setattr(app.time, "monotonic", lambda: 102.2)
+    view = app.pending_view(request)
+    assert view["remaining"] == 3 and view["auto_seconds"] == 5.0  # 2.8 s left, shown as 3
+
+    _, text, _ = app.confirmation_panel(view)
+
+    assert text == ("Using navigate page from chrome in 5 seconds.\n\n"
+                    "Runs by itself in 3 s; press Cancel to stop it.\n\n"
+                    '```\nchrome__navigate_page {"url": "x"}\n```')
+    monkeypatch.setattr(app.time, "monotonic", lambda: 200.0)
+    assert app.pending_view(request)["remaining"] == 0
+
+
+def test_the_countdown_starts_above_the_wait_by_the_audio_that_was_still_to_play(monkeypatch):
+    request = auto_request(armed_at=100.0)
+    request.auto_delay = 3.0
+    monkeypatch.setattr(app.time, "monotonic", lambda: 100.0)
+    assert app.pending_view(request)["remaining"] == 8
+    monkeypatch.setattr(app.time, "monotonic", lambda: 105.5)
+    assert app.pending_view(request)["remaining"] == 3
+
+
+def test_an_auto_request_that_is_not_armed_yet_and_an_ordinary_one_show_no_countdown():
+    for request in (auto_request(armed_at=None), waiting_request()):
+        view = app.pending_view(request)
+
+        assert view["remaining"] is None
+        assert "Runs by itself" not in app.confirmation_panel(view)[1]
+
+
+def test_the_countdown_redraws_the_panel_once_a_second_and_not_in_between(monkeypatch):
+    responder = ConfirmingResponder()
+    page = confirm_page(responder)
+    responder.waiting = auto_request(armed_at=100.0)
+    now = [100.0]
+    monkeypatch.setattr(app.time, "monotonic", lambda: now[0])
+    *_, text, _, seen = page.tick("")
+    assert "Runs by itself in 5 s" in text
+
+    now[0] = 100.4  # still 4.6 s: rounds up to 5, the same view
+    assert all(item == {"__type__": "update"} for item in page.tick(seen)[:5])
+    now[0] = 101.2  # 3.8 s: now 4
+    *_, text, _, seen = page.tick(seen)
+    assert "Runs by itself in 4 s" in text
 
 
 def test_arguments_with_backticks_cannot_close_the_code_block():

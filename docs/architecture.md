@@ -103,6 +103,13 @@ request is taken atomically, so a click and a spoken yes cannot both run it. A r
 commands outside a tiny allowlist, `click`-policy MCP tools) never accepts a spoken yes at all. Question texts contain
 none of the words a user answers with, because speaker echo can reach the microphone.
 
+An `auto`-policy MCP tool adds a timer: the announcement (`Question.auto_seconds`) is armed like any question, and a
+daemon thread (`vaice-assistant-auto`) then runs the request `VAICE_ASSISTANT_AUTO_SECONDS` after the announcement's estimated end of playback (each frame handed out plays after what is queued, or at once when the queue had drained; fastrtc reports no playback position) through
+`AssistantResponder.approve`, the same atomic `take` a click uses, so a Cancel click, a spoken stop or yes, "New
+conversation" or an expiry that comes first means it runs once or not at all. If another skill ran earlier in the
+same reply, `decide()` swaps the question for the tool's click-only `fallback` (that skill's output may be untrusted
+text); content read in an earlier turn is not tracked.
+
 ### The skills and their extensions
 
 | Skill group | Module | Notes |
@@ -112,7 +119,7 @@ none of the words a user answers with, because speaker echo can reach the microp
 | `run_shell` (opt-in) | `shell.py` | A small allowlist of harmless commands may be approved by voice or click; everything else is click-only, through `zsh -c`, with a 30 s timeout, an output cap and a process group that barge-in kills |
 | `remember`, `forget`, `forget_everything` (opt-in) | `memory.py` | Explicit notes only, saved to `memory.json` and appended to the system prompt. A note is text that outlives its conversation, so it is cleaned, capped, and refused if a tool ran earlier in the same reply |
 | `look_at_screen` (opt-in) | `vision.py` | One `screencapture` + `sips` shrink, asked of a vision model, never kept or logged. See [Screen vision](screen-vision.md) |
-| MCP tools (opt-in) | `mcp_skills.py` | Each listed tool of each stdio server becomes `<server>__<tool>` with a `run`, `voice` or `click` policy. See [MCP tools](mcp-tools.md) |
+| MCP tools (opt-in) | `mcp_skills.py` | Each listed tool of each stdio server becomes `<server>__<tool>` with a `run`, `voice`, `auto` or `click` policy. See [MCP tools](mcp-tools.md) |
 
 ## Safety model
 

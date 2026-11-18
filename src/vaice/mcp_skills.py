@@ -4,13 +4,17 @@ A JSON file in Claude Desktop's `mcpServers` shape names stdio servers for vaice
 tools to offer and how each is approved:
 
     {"mcpServers": {"notes": {"command": "uvx", "args": ["some-notes-mcp"], "env": {"NOTES_DIR": "~/Notes"},
-                              "tools": {"search_notes": "run", "add_note": "voice", "delete_note": "click"}}}}
+                              "tools": {"search_notes": "run", "add_note": "auto", "delete_note": "click"}}}}
 
 Each listed tool becomes a skill called `<server>__<tool>`. Only listed tools are offered: a server can offer
 anything, and vaice cannot tell what a tool does (a server's own annotations such as `readOnlyHint` are claims, not
 facts, and change nothing). The policy is the user's: `run` (a `read` skill: runs at once), `voice` (a `confirm`
-skill a spoken yes or the Run button approves), `click` (a `confirm` skill only the Run button approves, the
-default). The confirmation question names the tool and the server, never the arguments, which come from the model.
+skill a spoken yes or the Run button approves), `auto` (a `confirm` skill that runs by itself
+`VAICE_ASSISTANT_AUTO_SECONDS` after its announcement was spoken, unless the user presses Cancel or says no; a spoken
+yes or the Run button runs it at once), `click` (a `confirm` skill only the Run button approves, the default). The
+confirmation question names the tool and the server, never the arguments, which come from the model. An `auto` call
+is asked as a `click` one when another skill ran earlier in the same reply (its output may be untrusted text), and
+with the setting at 0 an `auto` tool is a `click` tool. What an earlier turn's tool said is not tracked.
 
 What a server sends is untrusted, like any tool output: a tool's description (which the brain reads) is cleaned and
 capped, and a result reaches the brain only as a `tool` message. `remember` refuses once such a skill has run in the
@@ -44,7 +48,8 @@ from vaice.skills import Question, Skill, SkillError, SkillResult
 
 log = logging.getLogger(__name__)
 
-POLICIES = {"run": "read", "voice": "confirm", "click": "confirm"}  # the config's word -> the skill's kind
+# the config's word -> the skill's kind
+POLICIES = {"run": "read", "voice": "confirm", "auto": "confirm", "click": "confirm"}
 DEFAULT_POLICY = "click"  # a tool can do anything: the user opts into anything looser, tool by tool
 MAX_NAME = 64  # a skill name is an OpenAI function name: [A-Za-z0-9_-], at most 64
 MAX_SERVER_NAME = 32  # leaves room for the tool in `<server>__<tool>`
@@ -64,6 +69,11 @@ INSTALL_HINT = ("vaice: VAICE_MCP_CONFIG is set, but the MCP package (mcp 2.3 or
 
 ASK_VOICE = "Shall I use {tool} from {server}? The details are on the screen."
 ASK_CLICK = "I would use {tool} from {server}. The details are on the screen; click Run to allow the call."
+# Spoken when an `auto` call is announced: no word the user answers with, since speaker echo could say yes (or stop)
+# to it. The countdown is the announcement itself, kept short because its playback time is added to the wait (a first
+# live run, with a longer sentence, waited 12 s); the details and the Cancel button are on the screen
+ASK_AUTO = "Using {tool} from {server} in {seconds}."
+ASK_AUTO_GENERIC = "Using one of the connected tools in {seconds}."
 # For a name that holds a word the user answers with ("stop_timer"): speaker echo could say yes to it
 ASK_VOICE_GENERIC = "Shall I use one of the connected tools? The details are on the screen."
 ASK_CLICK_GENERIC = ("I would use one of the connected tools. The details are on the screen; "
@@ -89,7 +99,7 @@ class ServerConfig:
     args: tuple[str, ...] = ()
     env: dict[str, str] = field(default_factory=dict, repr=False)  # may hold tokens: in no repr, log or error
     cwd: str | None = None
-    tools: dict[str, str] = field(default_factory=dict)  # tool name -> "run" | "voice" | "click", file order
+    tools: dict[str, str] = field(default_factory=dict)  # tool name -> its policy, file order
 
 
 def _expand(value: str) -> str:
@@ -234,6 +244,17 @@ def question(server: str, tool: str, *, voice: bool) -> Question:
     return Question(ASK_VOICE_GENERIC if voice else ASK_CLICK_GENERIC, voice=voice)
 
 
+def auto_question(server: str, tool: str, seconds: float) -> Question:
+    """What is announced before an `auto` tool runs by itself in `seconds`: a fixed sentence like `question`'s (names
+    only, no answer words), with the click-only question as the `fallback` for a reply where something ran before it."""
+    tool_words, server_words = _speakable(tool), _speakable(server)
+    named = tool_words and server_words and not _ANSWER_WORDS & set(f"{tool_words} {server_words}".casefold().split())
+    wait = f"{seconds:g} second" + ("" if seconds == 1 else "s")
+    text = (ASK_AUTO.format(tool=tool_words, server=server_words, seconds=wait) if named
+            else ASK_AUTO_GENERIC.format(seconds=wait))
+    return Question(text, auto_seconds=seconds, fallback=question(server, tool, voice=False))
+
+
 def _result_text(content: list) -> str:
     """The text of a result's content blocks, one per line; what is not text is named (`[image]`)."""
     from mcp import types
@@ -309,8 +330,9 @@ class McpTools:
     """The MCP servers vaice started and the skills they offer (`skills`, in config order). `close()` ends the
     servers; it can be called any number of times."""
 
-    def __init__(self, timeout: float):
+    def __init__(self, timeout: float, auto_seconds: float = 0.0):
         self.timeout = timeout
+        self.auto_seconds = auto_seconds  # what an `auto` tool waits before it runs; 0: it is a `click` tool
         self.skills: list[Skill] = []
         self.summaries: list[tuple[str, list[str]]] = []  # per server that started: its name, the tools offered
         self._servers: list[_Server] = []
@@ -406,7 +428,10 @@ class McpTools:
     def _skill(self, server: _Server, tool: Any, policy: str) -> Skill:
         cfg = server.config
         kind = POLICIES[policy]
-        asked = question(cfg.name, tool.name, voice=policy == "voice")
+        if policy == "auto" and self.auto_seconds > 0:
+            asked = auto_question(cfg.name, tool.name, self.auto_seconds)
+        else:
+            asked = question(cfg.name, tool.name, voice=policy == "voice")
 
         def run(args: dict, stop: Callable[[], bool]) -> SkillResult:
             return self._call(server, tool.name, args, stop)
@@ -491,15 +516,16 @@ class McpTools:
             loop.close()
 
 
-def start(path: Path, timeout: float) -> McpTools:
+def start(path: Path, timeout: float, auto_seconds: float = 0.0) -> McpTools:
     """Start the servers in the config file at `path` (a server that fails to start is a warning and is skipped) and
-    return them with their skills. Exits when the `mcp` package is missing or the file is unusable."""
+    return them with their skills (`auto_seconds`: see `McpTools`). Exits when the `mcp` package is missing or the
+    file is unusable."""
     try:
         from mcp import Client, MCPError, StdioServerParameters, stdio_client  # noqa: F401 - checks the v2 SDK is there
     except ImportError:
         raise SystemExit(INSTALL_HINT) from None
     configs = load_config(path)
-    tools = McpTools(timeout)
+    tools = McpTools(timeout, auto_seconds)
     try:
         tools._start(configs)
     except BaseException:  # a clash, Ctrl+C: the servers started so far must not outlive vaice
