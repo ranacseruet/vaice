@@ -86,7 +86,9 @@ Details that matter:
   with a timeout and no shell, validates its arguments, and never raises; a failure becomes a spoken sentence. Results
   that must not be paraphrased (a refusal, a missing permission) carry a fixed `answer` that ends the reply.
 - **History carries tool results.** Each answered turn's skill results are replayed as a real tool exchange, so a
-  follow-up ("and how much memory?") is answered from the result, not from the model's head.
+  follow-up ("and how much memory?") is answered from the result, not from the model's head. The call's own arguments
+  are replayed too (compact JSON, at most 300 characters, else `{}`), so the model is not shown calls that succeeded
+  without a required argument and does not imitate them.
 - **Spoken progress.** If the decision takes longer than 2.5 s, a second thread says "One moment." and then "Still
   working." through the same `/tts` path, never recording the filler in history.
 - **One worker thread per reply.** The generator that fastrtc drives only polls a queue; the slow work happens on a daemon
@@ -115,7 +117,7 @@ text); content read in an earlier turn is not tracked.
 | Skill group | Module | Notes |
 |---|---|---|
 | Read-only checks (disk, battery, system, processes, find files) | `skills.py` | Run at once; output spoken as clean names |
-| Actions (open app, volume, mute) and `quit_app` (confirm) | `skills.py` | Results name their object, because history replays calls without their arguments |
+| Actions (open app, volume, mute) and `quit_app` (confirm) | `skills.py` | Results name their object, because arguments over the cap (or stored before they were replayed) replay as `{}` and the spoken result is what a follow-up reads |
 | `run_shell` (opt-in) | `shell.py` | A small allowlist of harmless commands may be approved by voice or click; everything else is click-only, through `zsh -c`, with a 30 s timeout, an output cap and a process group that barge-in kills |
 | `remember`, `forget`, `forget_everything` (opt-in) | `memory.py` | Explicit notes only, saved to `memory.json` and appended to the system prompt. A note is text that outlives its conversation, so it is cleaned, capped, and refused if a tool ran earlier in the same reply |
 | `look_at_screen` (opt-in) | `vision.py` | One `screencapture` + `sips` shrink, asked of a vision model, never kept or logged. See [Screen vision](screen-vision.md) |

@@ -26,6 +26,9 @@ _VERSION = 1
 TOOL_EVENT_OUTPUT_CHARS = 800
 _TRUNCATED = "... (truncated)"
 TOOL_HISTORY_OUTPUT_CHARS = 300  # a past tool result in a prompt: enough to answer a follow-up, not to bloat it
+# A past call's arguments in a prompt, as compact JSON: replayed whole or not at all (a cut-off JSON string is
+# invalid and hosted endpoints reject it), so a longer object is replayed as `{}`
+TOOL_HISTORY_ARGUMENT_CHARS = 300
 
 
 def _cap(text: str, limit: int) -> str:
@@ -221,11 +224,52 @@ def tool_activity_for_ui(turns: list[Turn], events: int = 10) -> str:
     return "\n\n".join(shown[-events:])
 
 
+def replay_arguments(raw: object) -> str:
+    """The arguments to replay for a past call: the stored JSON object as compact JSON, else `{}`.
+
+    A string that is not valid JSON, is not an object (list, string, number, null) or is empty, and an object
+    whose compact form is over `TOOL_HISTORY_ARGUMENT_CHARS`, give `{}`: never a cut-off or malformed value.
+    """
+    try:
+        value = json.loads(raw)  # type: ignore[arg-type]  # a non-str (a hand-edited file) raises TypeError
+    except (TypeError, ValueError, RecursionError):
+        return "{}"
+    if not isinstance(value, dict):
+        return "{}"
+    compact = json.dumps(value, separators=(",", ":"), ensure_ascii=False)
+    return compact if len(compact) <= TOOL_HISTORY_ARGUMENT_CHARS else "{}"
+
+
+def tool_entry(name: str, arguments: str, output: str) -> str:
+    """The text of a `("tool", text)` history entry that carries the call's arguments.
+
+    A JSON object `{"name", "arguments", "output"}` (`arguments` is itself a JSON string). An entry without
+    arguments is the plain `"<name>: <output>"`; the two cannot be confused, because a tool name never starts
+    with `{`. `parse_tool_entry` reads either.
+    """
+    return json.dumps({"name": name, "arguments": arguments, "output": output}, ensure_ascii=False)
+
+
+def parse_tool_entry(text: str) -> tuple[str, str, str]:
+    """(name, arguments, output) of a tool history entry, either form; `arguments` is `replay_arguments`' result."""
+    if text.startswith("{"):
+        try:
+            entry = json.loads(text)
+        except ValueError:
+            entry = None
+        if (isinstance(entry, dict) and isinstance(entry.get("name"), str) and isinstance(entry.get("output"), str)
+                and isinstance(entry.get("arguments", ""), str)):
+            return entry["name"], replay_arguments(entry.get("arguments", "")), entry["output"]
+    name, _, output = text.partition(": ")
+    return name, "{}", output
+
+
 def to_messages(turns: list[Turn], tools: bool = False) -> list[Message]:
     """The prompt messages for `turns`: what the user said and what was answered.
 
     With `tools`, each answered turn's tool events come between its two messages as
-    `("tool", "<name>: <output>")` (output capped), so a follow-up can use an earlier result.
+    `("tool", "<name>: <output>")` (output capped), so a follow-up can use an earlier result; a call that
+    had arguments is `("tool", tool_entry(...))` instead, so a replay can repeat them (see `replay_arguments`).
     A turn with no assistant message carries none: there is no answer for them to explain.
 
     A turn whose transcript is still pending is dropped whole: the question has not been
@@ -241,8 +285,11 @@ def to_messages(turns: list[Turn], tools: bool = False) -> list[Message]:
         messages.append(("user", turn.user_text or INAUDIBLE))
         if turn.assistant_text:
             if tools:
-                messages.extend(("tool", f"{event['name']}: {_cap(event['output'], TOOL_HISTORY_OUTPUT_CHARS)}")
-                                for event in turn.tool_events)
+                for event in turn.tool_events:
+                    output = _cap(event["output"], TOOL_HISTORY_OUTPUT_CHARS)
+                    arguments = replay_arguments(event["arguments"])
+                    messages.append(("tool", f"{event['name']}: {output}" if arguments == "{}"
+                                     else tool_entry(event["name"], arguments, output)))
             messages.append(("assistant", _spoken(turn)))
     return messages
 

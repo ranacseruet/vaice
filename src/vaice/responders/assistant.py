@@ -27,7 +27,7 @@ from vaice import config, lifecycle, voice
 from vaice.audio import from_pcm16
 from vaice.brain import BrainError, ChatBrain
 from vaice.confirm import Confirmations, Pending, spoken_answer
-from vaice.conversation import Message, Turn
+from vaice.conversation import Message, Turn, parse_tool_entry
 from vaice.memory import REFUSED_AFTER_TOOL, Memory
 from vaice.responders.base import AudioFrame
 from vaice.responders.llamacpp import ABANDONED, _clock_line, _MarkupStripper, _Stopped, _transcribe
@@ -103,9 +103,11 @@ def build_messages(prompt: str, history: Sequence[Message], transcript: str, not
     `notes` (see `memory.py`) come last in the system prompt as a list, behind a header that calls them facts;
     with none the system prompt is exactly the prompt and the clock.
 
-    A `("tool", "<name>: <output>")` history entry (earlier skill results, see `tool_history`) becomes a
-    real tool exchange, so the brain can answer a follow-up from it: one assistant message holding the
-    turn's consecutive calls, then a tool message per call. Their ids (`h0`, `h1`, ...) are unique.
+    A `("tool", ...)` history entry (earlier skill results, see `tool_history`) becomes a real tool exchange,
+    so the brain can answer a follow-up from it: one assistant message holding the turn's consecutive calls,
+    then a tool message per call. Their ids (`h0`, `h1`, ...) are unique. The entry is `"<name>: <output>"`
+    (replayed with `{}` arguments) or `conversation.tool_entry(...)`, which carries the call's arguments:
+    replayed with `{}`, the brain copies the empty call and leaves required arguments out.
     """
     system = f"{prompt}\n{_clock_line()}"
     if notes:
@@ -124,8 +126,8 @@ def build_messages(prompt: str, history: Sequence[Message], transcript: str, not
             end += 1
         calls, results = [], []
         for n, (_, entry) in enumerate(entries[index:end], start=index):
-            name, _, output = entry.partition(": ")
-            calls.append({"id": f"h{n}", "type": "function", "function": {"name": name, "arguments": "{}"}})
+            name, arguments, output = parse_tool_entry(entry)
+            calls.append({"id": f"h{n}", "type": "function", "function": {"name": name, "arguments": arguments}})
             results.append({"role": "tool", "tool_call_id": f"h{n}", "content": output})
         messages.append({"role": "assistant", "content": "", "tool_calls": calls})
         messages += results
@@ -460,7 +462,7 @@ class AssistantResponder:
     """
 
     name = "assistant"
-    tool_history = True  # earlier skill results come in `history` as ("tool", "<name>: <output>"); see Responder
+    tool_history = True  # earlier skill results come in `history` as ("tool", ...); see Responder
 
     def __init__(
         self,

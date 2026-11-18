@@ -593,3 +593,98 @@ def test_tool_results_survive_a_reload_from_disk(tmp_path):
 
     assert loaded.history(before=loaded.start_turn(), tools=True)[:3] == [
         ("user", "q"), ("tool", "battery_status: 80 percent"), ("assistant", "a")]
+
+
+# --- a replayed call carries its real arguments (carrier: a JSON object `{"name", "arguments", "output"}`)
+
+
+def history_of(*events):
+    """The tool entries `Conversation.history(tools=True)` gives for one answered turn with these events."""
+    c = Conversation()
+    turn = c.start_turn()
+    turn.set_user_text("q")
+    for name, arguments, output in events:
+        turn.add_tool_event(name, arguments, output)
+    turn.set_assistant_text("a")
+    turn.finish()
+    return [text for role, text in c.history(before=c.start_turn(), tools=True) if role == "tool"]
+
+
+def replayed(*events):
+    """(name, arguments, content) of every call `build_messages` makes from these stored events."""
+    from vaice.responders.assistant import build_messages
+
+    c = Conversation()
+    turn = c.start_turn()
+    turn.set_user_text("q")
+    for name, arguments, output in events:
+        turn.add_tool_event(name, arguments, output)
+    turn.set_assistant_text("a")
+    turn.finish()
+    messages = build_messages("p", c.history(before=c.start_turn(), tools=True), "next")
+    calls = [call for m in messages for call in m.get("tool_calls", [])]
+    contents = [m["content"] for m in messages if m["role"] == "tool"]
+    return [(call["function"]["name"], call["function"]["arguments"], content)
+            for call, content in zip(calls, contents, strict=True)]
+
+
+def test_a_replayed_call_carries_the_arguments_it_was_made_with():
+    snapshot = ("chrome__take_snapshot", '{"pageId": 1, "verbose": true}', "uid=1_0 RootWebArea")
+
+    assert replayed(snapshot) == [("chrome__take_snapshot", '{"pageId":1,"verbose":true}', "uid=1_0 RootWebArea")]
+
+
+def test_arguments_with_spaces_after_colons_and_an_output_holding_colons_still_split_correctly():
+    out = replayed(("notes__add", '{"title": "a: b", "text": "x"}', 'said: "hello": world'))
+
+    assert out == [("notes__add", '{"title":"a: b","text":"x"}', 'said: "hello": world')]
+
+
+def test_arguments_that_are_not_a_json_object_replay_as_an_empty_object():
+    for bad in ('{"pageId": 1', "[1, 2]", '"text"', "null", "42", ""):
+        assert replayed(("chrome__take_snapshot", bad, "ok")) == [("chrome__take_snapshot", "{}", "ok")], bad
+
+
+def test_arguments_longer_than_the_cap_replay_as_an_empty_object_and_are_never_truncated():
+    from vaice.conversation import TOOL_HISTORY_ARGUMENT_CHARS
+
+    assert TOOL_HISTORY_ARGUMENT_CHARS == 300
+    at_cap = json.dumps({"q": "x" * (TOOL_HISTORY_ARGUMENT_CHARS - len('{"q":""}'))}, separators=(",", ":"))
+    assert len(at_cap) == TOOL_HISTORY_ARGUMENT_CHARS
+
+    assert replayed(("look_at_screen", at_cap, "r")) == [("look_at_screen", at_cap, "r")]
+    assert replayed(("look_at_screen", json.dumps({"q": "x" * 400}), "r")) == [("look_at_screen", "{}", "r")]
+
+
+def test_the_cap_counts_the_compact_form_not_the_stored_spacing():
+    spaced = '{ "q" :  "' + "x" * 290 + '"   }'  # over 300 as stored, 298 compact
+    assert len(spaced) > 300
+
+    assert replayed(("look_at_screen", spaced, "r"))[0][1] == json.dumps({"q": "x" * 290}, separators=(",", ":"))
+
+
+def test_unicode_argument_values_survive_unescaped():
+    assert replayed(("notes__add", '{"text": "caf\\u00e9 \\u65e5\\u672c"}', "ok"))[0][1] == '{"text":"café 日本"}'
+
+
+def test_an_event_without_arguments_or_with_empty_ones_stays_a_plain_entry():
+    assert history_of(("battery_status", "{}", "80 percent"), ("disk_space", "", "160 free")) == [
+        "battery_status: 80 percent", "disk_space: 160 free"]
+    assert replayed(("disk_space", "", "160 free")) == [("disk_space", "{}", "160 free")]
+
+
+def test_a_legacy_entry_replays_as_an_empty_object():
+    from vaice.responders.assistant import build_messages
+
+    messages = build_messages("p", [("user", "q"), ("tool", "disk_space: a: b"), ("assistant", "a")], "next")
+
+    call = messages[2]["tool_calls"][0]["function"]
+    assert call == {"name": "disk_space", "arguments": "{}"}
+    assert messages[3]["content"] == "a: b"
+
+
+def test_a_brace_entry_that_is_not_a_valid_carrier_is_read_as_a_plain_entry():
+    from vaice.conversation import parse_tool_entry
+
+    assert parse_tool_entry('{not json: out') == ("{not json", "{}", "out")
+    assert parse_tool_entry('{"name": "x"}') == ('{"name"', "{}", '"x"}')  # no output key: not a carrier

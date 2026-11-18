@@ -32,7 +32,7 @@ import scoring
 
 from vaice import config
 from vaice.brain import ChatBrain
-from vaice.conversation import Turn
+from vaice.conversation import Turn, tool_entry
 from vaice.memory import Memory
 from vaice.responders.assistant import NOT_HEARD, build_messages, decide
 from vaice.responders.llamacpp import LlamaCppResponder, _transcribe
@@ -378,6 +378,21 @@ def brain_line(used: dict) -> str:
     return "the local llama-server" if used["host"] is None else f"{used['host']}, model {used['model'] or '(none)'}"
 
 
+def case_history(entries: list) -> list[tuple[str, str]]:
+    """A case's own `"history"` as the (role, text) turns the responders take.
+
+    A `"tool"` entry's text is the plain `"<name>: <output>"` (replayed with `{}` arguments), a carrier string
+    from `conversation.tool_entry`, or an object `{"name", "arguments": {...}, "output"}` that carries the
+    call's arguments as JSON, which is turned into the carrier here.
+    """
+    turns = []
+    for role, text in entries:
+        if isinstance(text, dict):
+            text = tool_entry(text["name"], json.dumps(text.get("arguments", {})), text["output"])
+        turns.append((role, text))
+    return turns
+
+
 def select_cases(cases: list[dict], wanted: str | None) -> list[dict]:
     if not wanted:
         return cases
@@ -466,7 +481,7 @@ def main(argv: list[str] | None = None) -> None:
             for repeat in range(1, args.repeats + 1):
                 for case in cases:
                     # a case may carry its own earlier turns (even with --no-history: that is what it tests)
-                    turns = [tuple(entry) for entry in case["history"]] if "history" in case else history
+                    turns = case_history(case["history"]) if "history" in case else history
                     for path in args.paths:
                         if path == "interleaved":
                             record = run_interleaved(url, prompts[path], tools, results, audio[case["id"]], turns)

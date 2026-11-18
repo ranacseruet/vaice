@@ -135,12 +135,14 @@
    "expect": {"tools": []}},
   {"id": "battery-again", "say": "How is the battery now?",
    "history": [["user", "How much battery is left?"],
-               ["tool", "battery_status: battery at 78 percent, running on battery power, about 4 hours and 12 minutes left"],
+               ["tool", {"name": "battery_status", "arguments": {},
+                "output": "battery at 78 percent, running on battery power, about 4 hours and 12 minutes left"}],
                ["assistant", "The battery is at 78 percent, about four hours left."]],
    "expect": {"tools": ["battery_status"]}},
   {"id": "battery-recall", "say": "What did you just say about the battery?",
    "history": [["user", "How much battery is left?"],
-               ["tool", "battery_status: battery at 78 percent, running on battery power, about 4 hours and 12 minutes left"],
+               ["tool", {"name": "battery_status", "arguments": {},
+                "output": "battery at 78 percent, running on battery power, about 4 hours and 12 minutes left"}],
                ["assistant", "The battery is at 78 percent, about four hours left."]],
    "expect": {"tools": []}}
 ]
