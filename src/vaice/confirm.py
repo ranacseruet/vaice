@@ -5,6 +5,11 @@ user approves by saying one of `YES` as the whole utterance, or by clicking *Run
 not `voice`, such as a shell command, only by the click); anything else drops it. The model never sees or
 interprets the answer. A request with `auto_seconds` also runs by itself that long after its question was fully
 spoken, unless one of those settles it first (the timer lives in `responders/assistant.py`).
+
+A request with a `waiter` is a different kind: a question of a task that is already running (a step of the browser
+agent), not a skill call to run. Its answer goes to the waiter, which the task blocks on. Whoever settles the request
+settles the waiter in the same step, under the lock: `answer` is yes or no, and every other way out (`take`, `clear`,
+a newer request, expiry) is a no, so the task can never see a request that is gone but not answered.
 """
 import re
 import threading
@@ -42,6 +47,25 @@ def spoken_answer(transcript: str) -> str | None:
     return None
 
 
+class Waiter:
+    """Where the answer to a question of a running task goes. Set once; the first answer wins."""
+
+    def __init__(self) -> None:
+        self._set = threading.Event()
+        self._lock = threading.Lock()
+        self._approved = False
+
+    def resolve(self, approved: bool) -> None:
+        with self._lock:
+            if not self._set.is_set():
+                self._approved = approved
+                self._set.set()
+
+    def wait(self, timeout: float) -> bool | None:
+        """The answer once there is one (within `timeout` seconds), else None."""
+        return self._approved if self._set.wait(timeout) else None
+
+
 @dataclass
 class Pending:
     """A skill call waiting for the user: `arguments` is the model's raw JSON, exactly what will run."""
@@ -58,6 +82,7 @@ class Pending:
     auto_seconds: float = 0  # > 0: runs by itself this long after the question's audio has played, unless settled first
     auto_delay: float = 0  # set by `arm`: the estimated seconds of the question still to play when it was armed
     task: object | None = None  # the asking reply's `assistant.Task` (step budget, taint), carried over a spoken yes
+    waiter: Waiter | None = None  # a question of a running task: the answer goes here, nothing is run (see above)
 
     def remaining(self, now: float) -> float | None:
         """Seconds left of an armed auto request at clock time `now` (never negative), else None: the time the
@@ -82,9 +107,10 @@ class Confirmations:
         self._pending: Pending | None = None
 
     def ask(self, pending: Pending) -> None:
-        """Hold `pending`, replacing any earlier request."""
+        """Hold `pending`, replacing any earlier request (a replaced waiter is answered no)."""
         with self._lock:
-            self._pending = pending
+            replaced, self._pending = self._pending, pending
+            _refuse(replaced)
 
     def arm(self, pending_id: str, playing: float = 0.0) -> None:
         """Start the clock, if `pending_id` is still the current request. `playing`: the seconds of the question's
@@ -117,11 +143,25 @@ class Confirmations:
             if pending is None or (pending_id is not None and pending.id != pending_id):
                 return None
             self._pending = None
+            _refuse(pending)  # whoever takes a waiter's request and does not `answer` it, said no
+            return pending
+
+    def answer(self, pending_id: str, approved: bool) -> Pending | None:
+        """`take` for a request with a waiter, answering it in the same step: the request, once it was the current one
+        (None: it was not, or somebody else settled it first)."""
+        with self._lock:
+            pending = self._live()
+            if pending is None or pending.id != pending_id:
+                return None
+            self._pending = None
+            if pending.waiter is not None:
+                pending.waiter.resolve(approved)
             return pending
 
     def clear(self) -> None:
         with self._lock:
-            self._pending = None
+            replaced, self._pending = self._pending, None
+            _refuse(replaced)
 
     def _live(self) -> Pending | None:
         """`_pending`, or None after dropping it when expired. Call with the lock held."""
@@ -130,5 +170,13 @@ class Confirmations:
                 and self._clock() - pending.armed_at >= CONFIRM_SECONDS:
             # said in the Tool activity panel too, where the request would otherwise wait for ever
             pending.turn.add_tool_event(pending.name, pending.arguments, "expired")
-            self._pending = pending = None
+            self._pending = None
+            _refuse(pending)
+            pending = None
         return pending
+
+
+def _refuse(pending: Pending | None) -> None:
+    """A request that leaves without an answer is a no to its waiter, if it has one."""
+    if pending is not None and pending.waiter is not None:
+        pending.waiter.resolve(False)

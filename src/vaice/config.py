@@ -239,6 +239,17 @@ MCP_TIMEOUT = _number("VAICE_MCP_TIMEOUT", default="30", kind=float)
 if not MCP_TIMEOUT > 0:
     raise SystemExit("vaice: VAICE_MCP_TIMEOUT must be > 0")
 
+# Assistant mode only: the `browse` skill (browse.py, browse_task.py), a task in a browser run by the Pi coding agent
+# in the background. `off` (default) or `pi` (needs the `pi` command on PATH, version 1.5.2 or newer, and
+# VAICE_BRAIN_URL: Pi uses the same OpenAI-compatible endpoint and key as the helper brain). The browser is Chrome
+# with a profile of its own under VAICE_DATA_DIR, in a visible window unless VAICE_BROWSE_HEADLESS is on. A task is
+# stopped after VAICE_BROWSE_SECONDS.
+BROWSE = _choice("VAICE_BROWSE", default="off", choices=("off", "pi"))
+BROWSE_SECONDS = _number("VAICE_BROWSE_SECONDS", default="180", kind=float)
+if not BROWSE_SECONDS > 0:
+    raise SystemExit("vaice: VAICE_BROWSE_SECONDS must be > 0 (seconds)")
+BROWSE_HEADLESS = _flag("VAICE_BROWSE_HEADLESS", default=False)
+
 PORT = _number("VAICE_PORT", default="7860", kind=int)
 
 # The conversation is kept here between runs; the last HISTORY_TURNS exchanges go into each prompt.

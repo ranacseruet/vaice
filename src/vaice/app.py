@@ -4,9 +4,12 @@ import json
 import logging
 import math
 import re
+import shutil
+import tempfile
 import time
 from collections.abc import Callable
 from functools import partial
+from pathlib import Path
 from urllib.parse import urlsplit
 
 import gradio as gr
@@ -16,7 +19,8 @@ from fastrtc import AdditionalOutputs, Stream
 
 from vaice import config, mcp_skills
 from vaice.brain import ChatBrain
-from vaice.confirm import Pending
+from vaice.browse import API_KEY_ENV, MIN_PI_VERSION, PiAgent, default_browser_args, pi_version, write_pi_home
+from vaice.confirm import CONFIRM_SECONDS, Pending
 from vaice.conversation import Conversation, Turn
 from vaice.interruptible import InterruptSafeReplyOnPause, stop_playing_reply
 from vaice.lifecycle import install_stop_handler, request_stop
@@ -40,6 +44,7 @@ UI_TITLE = "vaice"  # the heading above the mic
 BUTTON_ONLY = "Only the Run button can approve this one; saying yes will not."
 AUTO_COUNTDOWN = "Runs by itself in {seconds} s; press Stop to cancel it."  # on screen only, not spoken
 NOTHING_REMEMBERED = "Nothing remembered."
+BROWSE_ASK_EXTRA_SECONDS = 30.0  # a browser question waits this much longer than the confirmation's own expiry
 _MARKDOWN_PUNCTUATION = re.compile(r"([!-/:-@\[-`{-~])")  # every ASCII punctuation character
 
 
@@ -106,7 +111,8 @@ def memory_markdown(notes: list[str]) -> str:
 
 
 def refresh_view(conversation: Conversation, known: str, pending: Callable[[], Pending | None] | None = None,
-                 memory: Callable[[], list[str]] | None = None) -> tuple:
+                 memory: Callable[[], list[str]] | None = None,
+                 browsing: Callable[[], bool] | None = None) -> tuple:
     """The timer's tick: the chatbot's and tool panel's new views when the conversation changed.
 
     The reply can finish before its parallel transcription session reports the transcript, so
@@ -116,6 +122,8 @@ def refresh_view(conversation: Conversation, known: str, pending: Callable[[], P
     With `pending` (a responder that asks for confirmation) the confirmation panel is part of the view:
     its visibility, text, the request's id (which the buttons pass back) and its two button rows' visibility
     come after the two views.
+    With `browsing` (assistant mode with a browser: whether a browser task runs) the visibility of the task's *Stop*
+    row comes after those.
     With `memory` (the notes, in assistant mode with memory on) the Memory panel's text comes after those.
     """
     view = (conversation.messages_for_ui(), conversation.tool_activity_for_ui())
@@ -124,6 +132,10 @@ def refresh_view(conversation: Conversation, known: str, pending: Callable[[], P
         asked = pending_view(pending())
         view += (asked,)
         components += confirmation_panel(asked)
+    if browsing is not None:
+        running = browsing()
+        view += (running,)
+        components += (gr.update(visible=running),)
     if memory is not None:
         notes = memory()
         view += (notes,)
@@ -227,6 +239,13 @@ def build_stream(responder: Responder, conversation: Conversation) -> Stream:
                     cancel_button = gr.Button("Cancel")
             pending_id = gr.State("")  # the request the panel shows: a click can only settle that one
             confirm_outputs = [confirm_panel, confirm_text, pending_id, stop_row, run_row]
+        # Assistant mode with a browser: a Stop button while a browser task runs (the 1 s timer shows and hides it)
+        browsing = getattr(responder, "browsing", None) if hasattr(responder, "stop_task") else None
+        browse_outputs: list = []
+        if browsing is not None:
+            with gr.Row(visible=False) as browse_row:
+                browse_stop_button = gr.Button("Stop the browser task", variant="stop")
+            browse_outputs = [browse_row]
         # Tool calls and their results, kept out of the conversation: collapsed by default, and the
         # 1 s timer (below) fills it when a tool round lands
         with gr.Accordion("Tool activity", open=False):
@@ -264,9 +283,17 @@ def build_stream(responder: Responder, conversation: Conversation) -> Stream:
                 cancel_or_stop.click(partial(settle, responder.cancel), inputs=[pending_id],
                                      outputs=[confirm_panel, pending_id, seen])
 
+        if browsing is not None:
+            def stop_browsing() -> tuple:
+                responder.stop_task()
+                return gr.update(visible=False), ""  # hide at once; the blank `seen` redraws on the next tick
+
+            browse_stop_button.click(stop_browsing, outputs=[browse_row, seen])
+
         gr.Timer(VIEW_REFRESH_SECONDS).tick(
-            partial(refresh_view, conversation, pending=pending, memory=None if memory is None else memory.notes),
-            inputs=[seen], outputs=[chatbot, tool_panel, *confirm_outputs, *memory_outputs, seen])
+            partial(refresh_view, conversation, pending=pending, memory=None if memory is None else memory.notes,
+                    browsing=browsing),
+            inputs=[seen], outputs=[chatbot, tool_panel, *confirm_outputs, *browse_outputs, *memory_outputs, seen])
     return stream
 
 
@@ -362,6 +389,52 @@ def _open_memory() -> Memory | None:
     return memory
 
 
+def _open_browse() -> PiAgent | None:
+    """Assistant mode: the browser agent for the `browse` skill (None when VAICE_BROWSE is off, or when it cannot be
+    used: the reason is a warning, and the skill is then not offered). Needs the helper brain's endpoint (Pi uses it,
+    with its key, which goes to the child's environment only and is never logged) and the `pi` command, which the
+    user installs: its presence and version are checked, nothing is installed."""
+    if config.BROWSE == "off":
+        return None
+    if not config.BRAIN_URL:
+        log.warning("VAICE_BROWSE needs VAICE_BRAIN_URL (the browser agent uses that endpoint): browse is not offered")
+        return None
+    if shutil.which("pi") is None:
+        log.warning("VAICE_BROWSE=pi, but the `pi` command is not on PATH (install the Pi coding agent, "
+                    "https://pi.dev): browse is not offered")
+        return None
+    wanted = ".".join(map(str, MIN_PI_VERSION))
+    version = pi_version()
+    if version is None:
+        log.warning("could not read the version of `pi --version`; browse needs %s or newer and goes on", wanted)
+    elif version < MIN_PI_VERSION:
+        log.warning("`pi` is version %s, browse needs %s or newer: browse is not offered",
+                    ".".join(map(str, version)), wanted)
+        return None
+    base = (config.DATA_DIR if config.DATA_DIR is not None else Path(tempfile.mkdtemp(prefix="vaice-"))) / "browse"
+    profile = base / "chrome-profile"  # the browser's own profile: logins persist here, nothing of the user's
+    args = default_browser_args(profile)
+    if config.BROWSE_HEADLESS:
+        args.append("--headless")
+    try:
+        write_pi_home(base / "pi", base_url=config.BRAIN_URL, model=config.BRAIN_MODEL,
+                      api_key_env=API_KEY_ENV if config.BRAIN_API_KEY else None, browser_args=args)
+    except OSError as exc:
+        log.warning("could not write the browser agent's configuration under %s (%s): browse is not offered", base,
+                    type(exc).__name__)
+        return None
+    if not config.BRAIN_MODEL:
+        log.warning("VAICE_BRAIN_MODEL is empty: the browser agent needs a model name")
+    log.info("browse: Pi in %s, browser profile %s, %s window, up to %g s a task", base / "pi", profile,
+             "no" if config.BROWSE_HEADLESS else "a visible", config.BROWSE_SECONDS)
+    log.warning("browse: pages' text and what the browser agent does go to the brain at %s; a step that changes a "
+                "page needs a spoken yes or the Run button, but navigation and reading do not",
+                urlsplit(config.BRAIN_URL).netloc)
+    env = {API_KEY_ENV: config.BRAIN_API_KEY} if config.BRAIN_API_KEY else None
+    return PiAgent(base / "pi", log_path=base / "pi.log", env=env,
+                   ask_timeout_s=CONFIRM_SECONDS + BROWSE_ASK_EXTRA_SECONDS, chrome_profile=profile)
+
+
 def _open_mcp() -> mcp_skills.McpTools | None:
     """Assistant mode: start the MCP servers in VAICE_MCP_CONFIG (None when it is unset) and say what each offers:
     tool names only, never the file's `env` values."""
@@ -380,6 +453,7 @@ def main() -> None:
     install_stop_handler()  # Ctrl+C: the responders give up, gradio closes the server
     managed = None  # the llama-server `vaice up` started, if any
     mcp_tools = None  # the MCP servers started for assistant mode, if any
+    browse_agent = None  # the browser agent for assistant mode's `browse` skill, if any
     try:
         if up:
             managed = ensure_server()
@@ -389,8 +463,9 @@ def main() -> None:
                 log.warning("VAICE_LLAMACPP_TOOLS is ignored in assistant mode: the skills run in vaice, "
                             "not on llama-server")
             mcp_tools = _open_mcp()
+            browse_agent = _open_browse()
             responder = AssistantResponder(memory=_open_memory(), vision=_vision_skill(),
-                                           extra_skills=mcp_tools.skills if mcp_tools else ())
+                                           extra_skills=mcp_tools.skills if mcp_tools else (), browse=browse_agent)
             _announce_brain()
             _announce_vision()
             if config.ASSISTANT_SHELL:
@@ -405,6 +480,8 @@ def main() -> None:
                 log.warning("VAICE_VISION_URL is ignored in chat mode: the screen skill is for assistant mode only")
             if config.MCP_CONFIG is not None:
                 log.warning("VAICE_MCP_CONFIG is ignored in chat mode: MCP tools are for assistant mode only")
+            if config.BROWSE != "off":
+                log.warning("VAICE_BROWSE is ignored in chat mode: the browser skill is for assistant mode only")
             responder = _chat_responder()
         log.info("using llama-server at %s", config.LLAMACPP_URL)
 
@@ -425,6 +502,8 @@ def main() -> None:
         log.info("stopped")
     finally:
         request_stop()  # the app is over: don't wait for a model call that may never return
+        if browse_agent is not None:
+            browse_agent.close()  # ends the browser agent and the browser it started
         if mcp_tools is not None:
             mcp_tools.close()  # ends the servers' processes
         if managed is not None:

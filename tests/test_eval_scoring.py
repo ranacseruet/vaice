@@ -484,6 +484,31 @@ def test_the_vision_cases_are_consistent_with_the_skills_when_look_at_screen_is_
     assert "look_at_screen" not in default_skills().names
 
 
+def test_the_browse_cases_are_consistent_with_the_skills_when_browse_is_on():
+    from vaice.skills import default_skills
+
+    cases = load("assistant_browse_cases.json")
+    skills = default_skills(browse=True)
+    ids = [c["id"] for c in cases]
+    assert len(ids) == len(set(ids))
+    assert len(cases) >= 10
+    for c in cases:
+        assert c["say"].strip()
+        expected = c["expect"]["tools"]
+        assert isinstance(expected, list), c["id"]
+        assert set(expected) <= set(skills.names), c["id"]
+        assert set(c["expect"].get("args", {})) <= set(expected), c["id"]
+        scoring.score(c["expect"], [])  # the expectation is well formed
+        if "browse" in expected:  # the goal is the model's words: only a mention of the site is required
+            assert set(c["expect"]["args"]["browse"]) == {"goal"}, c["id"]
+            assert "contains" in json.dumps(c["expect"]["args"]["browse"]["goal"]), c["id"]
+
+    assert sum(1 for c in cases if c["expect"]["tools"] == ["browse"]) >= 5
+    assert sum(1 for c in cases if "browse" not in c["expect"]["tools"]) >= 5  # tempting ones, no browser
+    # without --browse the skill does not exist: this file is only for runs that pass it
+    assert "browse" not in default_skills().names
+
+
 # --- {"contains": ...}: free text such as a note the model words itself ---
 
 REMEMBER_SISTER = {"tools": ["remember"], "args": {"remember": {"note": {"contains": "nadia"}}}}

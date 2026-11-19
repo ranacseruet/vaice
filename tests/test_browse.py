@@ -389,11 +389,12 @@ def test_the_deadline_aborts_with_a_spoken_sentence(harness):
 @pytest.mark.parametrize("ignore_term", ["0", "1"])
 def test_an_abort_that_never_settles_ends_the_process_and_the_next_task_restarts(harness, ignore_term):
     h = harness(FAKE_PI_SCENARIO="abort_ignored", FAKE_PI_IGNORE_TERM=ignore_term)
-    stopper = threading.Timer(0.3, h.stop_flag.set)
-    stopper.start()
+
+    def stop_at_first_tool(name, args):  # not a timer: a slow runner may still be in new_session, which is no abort
+        h.stop_flag.set()
+
     with pytest.raises(BrowseStopped):
-        h.run()
-    stopper.join()
+        h.run(on_progress=stop_at_first_tool)
     first = h.pids()[0]
     assert wait_dead(first)  # SIGTERM, or SIGKILL when the child ignores it
     h.stop_flag.clear()
@@ -648,3 +649,141 @@ def test_the_gate_extension_is_shipped_and_names_the_command_the_agent_checks():
     source = browse.GATE_FILE.read_text()
     assert f'registerCommand("{browse.GATE_COMMAND}"' in source
     assert "VAICE_GATE_POLICY" in source and "VAICE_GATE_TIMEOUT_MS" in source
+
+
+# --- what a killed Pi leaves behind: the browser and its MCP server are in no group of Pi's
+
+PROFILE_FLAGS = ("--user-data-dir", "--userDataDir")
+
+
+def holder(flag: str, path: Path) -> subprocess.Popen:
+    """A process whose command line holds `flag=path` (python ignores what follows `-c`'s script), in a group of
+    its own like Chrome and chrome-devtools-mcp are."""
+    return subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", f"{flag}={path}"],
+                            start_new_session=True)
+
+
+def reaped(proc: subprocess.Popen, seconds: float = 5.0) -> bool:
+    try:
+        proc.wait(seconds)
+    except subprocess.TimeoutExpired:
+        return False
+    return True
+
+
+def test_profile_holders_are_matched_on_the_exact_path_with_either_flag_and_never_this_process(tmp_path):
+    profile = tmp_path / "chrome-profile"
+    listing = "\n".join([
+        f"101 /Applications/Chrome --user-data-dir={profile} --remote-debugging-pipe",
+        f"102 node chrome-devtools-mcp --no-usage-statistics --userDataDir={profile}",
+        f"103 node chrome-devtools-mcp --userDataDir={profile}-2",  # a sibling profile: not ours
+        f"104 /Applications/Chrome --user-data-dir={profile}/Default",  # a directory inside it: not the profile
+        f"105 /Applications/Chrome --user-data-dir={tmp_path / 'other'}",
+        f"106 vim {profile}",  # mentions the path without the flag
+        f"{os.getpid()} python --user-data-dir={profile}",  # this very process
+        f"107 /Applications/Chrome --user-data-dir={profile}",
+        "garbage"])
+
+    assert browse._profile_pids(profile, listing) == [101, 102, 107]
+
+
+@pytest.mark.parametrize("flag", PROFILE_FLAGS)
+def test_what_still_holds_the_profile_is_ended_and_a_sibling_profile_and_a_bystander_are_not(tmp_path, flag):
+    profile = tmp_path / "chrome-profile"
+    ours, sibling = holder(flag, profile), holder(flag, tmp_path / "chrome-profile-2")
+    bystander = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
+    try:
+        time.sleep(0.3)  # let them exec, so `ps` shows their arguments
+
+        found = browse.end_profile_processes(profile)
+
+        assert found == [ours.pid] and reaped(ours)
+        assert sibling.poll() is None and bystander.poll() is None
+    finally:
+        for proc in (ours, sibling, bystander):
+            proc.kill()
+            proc.wait()
+
+
+def test_a_holder_that_ignores_sigterm_is_killed(tmp_path):
+    profile = tmp_path / "chrome-profile"
+    script = "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)"
+    stubborn = subprocess.Popen([sys.executable, "-c", script, f"--user-data-dir={profile}"], start_new_session=True)
+    try:
+        time.sleep(0.3)
+        started = time.monotonic()
+
+        browse.end_profile_processes(profile)
+
+        assert reaped(stubborn) and time.monotonic() - started < browse.TERM_WAIT + 2
+    finally:
+        stubborn.kill()
+        stubborn.wait()
+
+
+def test_a_failing_ps_is_a_warning_and_signals_nothing(tmp_path, monkeypatch, caplog):
+    def broken(*args, **kwargs):
+        raise OSError("no ps")
+
+    monkeypatch.setattr(browse.subprocess, "run", broken)
+    monkeypatch.setattr(browse.os, "kill", lambda *a: pytest.fail("signalled something"))
+    with caplog.at_level(logging.WARNING, logger="vaice.browse"):
+        assert browse.end_profile_processes(tmp_path / "chrome-profile") == []
+
+    assert "could not look for processes" in caplog.text
+
+
+def test_the_agent_sweeps_the_profile_before_every_new_child_and_after_close(tmp_path, monkeypatch):
+    swept = []
+    monkeypatch.setattr(browse, "end_profile_processes", lambda profile: swept.append(profile) or [])
+    profile = tmp_path / "chrome-profile"
+    agent = PiAgent(tmp_path / "pi", log_path=tmp_path / "pi.log", command=[sys.executable, str(FAKE)],
+                    env={"FAKE_PI_LOG": str(tmp_path / "fake.log")}, chrome_profile=profile)
+    try:
+        agent.run("one", stop=lambda: False, on_progress=lambda *a: None, on_ask=lambda *a: True, deadline_s=20)
+        assert swept == [profile]  # before the first child
+        agent._child.end()  # the child died: the next task starts a new one
+        agent._child.dead = True
+        agent.run("two", stop=lambda: False, on_progress=lambda *a: None, on_ask=lambda *a: True, deadline_s=20)
+        assert swept == [profile, profile]
+    finally:
+        agent.close()
+    assert swept == [profile, profile, profile]  # and once more after close()
+
+
+def test_without_a_profile_nothing_is_swept(tmp_path, monkeypatch):
+    monkeypatch.setattr(browse, "end_profile_processes", lambda profile: pytest.fail("swept"))
+    agent = PiAgent(tmp_path / "pi", log_path=tmp_path / "pi.log", command=[sys.executable, str(FAKE)],
+                    env={"FAKE_PI_LOG": str(tmp_path / "fake.log")})
+    try:
+        agent.run("one", stop=lambda: False, on_progress=lambda *a: None, on_ask=lambda *a: True, deadline_s=20)
+    finally:
+        agent.close()
+
+
+# --- the version check
+
+def script_printing(tmp_path, text, code=0):
+    path = tmp_path / "pi"
+    path.write_text(f"#!/bin/sh\necho '{text}'\nexit {code}\n")
+    path.chmod(0o755)
+    return str(path)
+
+
+@pytest.mark.parametrize(("printed", "version"), [("1.5.2", (1, 5, 2)), ("pi v1.10.0 (abc)", (1, 10, 0)),
+                                                  ("0.9.1-beta", (0, 9, 1)), ("garbage", None), ("1.5", None)])
+def test_the_version_is_read_from_pi_dash_dash_version(tmp_path, printed, version):
+    assert browse.pi_version(script_printing(tmp_path, printed)) == version
+
+
+def test_an_unrunnable_pi_has_no_version(tmp_path):
+    assert browse.pi_version(str(tmp_path / "missing")) is None
+
+
+def test_versions_compare_as_tuples():
+    assert (1, 10, 0) > browse.MIN_PI_VERSION > (1, 5, 1)
+
+
+def test_pi_agent_is_a_browse_agent():
+    agent: browse.BrowseAgent = PiAgent(Path("/nonexistent"), log_path=Path("/nonexistent/log"))
+    assert callable(agent.run) and callable(agent.close)
