@@ -478,13 +478,14 @@ class PiAgent:
     def _ui_request(self, child: _Child, event: dict, budget: _Budget,
                     on_ask: Callable[[str, str, Callable[[], bool]], bool]) -> bool:
         """Answer one dialog. Returns True when it was a question answered no (the caller aborts the task). A stop
-        or the task's deadline that ends the question is not a no: the loop raises what ended it."""
+        or the task's deadline that ends the question is not a no: the loop raises what ended it (after `close()`,
+        answering the dead child raises the `BrowseError`)."""
         method, rid = event.get("method"), event.get("id")
         if method == "confirm":
             asked_at = time.monotonic()
 
-            def ended() -> bool:
-                return budget.stop() or time.monotonic() >= budget.deadline
+            def ended() -> bool:  # also when close() ended the agent meanwhile: nobody is left to ask for
+                return budget.stop() or time.monotonic() >= budget.deadline or child.dead or self._closed
 
             def ask_stop() -> bool:
                 return ended() or time.monotonic() - asked_at >= self._ask_timeout

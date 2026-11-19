@@ -286,6 +286,34 @@ def test_a_yes_after_the_question_timed_out_approves_nothing(tmp_path):
         h.agent.close()
 
 
+def test_close_during_an_open_question_fails_the_task_at_once(harness):
+    h = harness(FAKE_PI_SCENARIO="confirm")
+    asked = threading.Event()
+
+    def wait_for_stop(title, message, stop):
+        asked.set()
+        while not stop():
+            time.sleep(0.02)
+        return True
+
+    result = {}
+
+    def task():
+        try:
+            h.run(on_ask=wait_for_stop)
+        except BaseException as exc:
+            result["error"] = exc
+
+    thread = threading.Thread(target=task, daemon=True)
+    thread.start()
+    assert asked.wait(5)
+    started = time.monotonic()
+    h.agent.close()
+    thread.join(5)
+    assert not thread.is_alive() and time.monotonic() - started < 3  # not the 60 s question timeout
+    assert isinstance(result["error"], BrowseError) and not isinstance(result["error"], BrowseDeclined)
+
+
 def test_a_stop_during_a_question_is_a_stop_not_a_refusal(harness):
     h = harness(FAKE_PI_SCENARIO="confirm")
 
