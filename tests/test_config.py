@@ -628,11 +628,12 @@ def test_a_bad_mcp_timeout_is_a_clean_error(monkeypatch, value):
 
 
 def test_browse_is_off_by_default(monkeypatch):
-    for name in ("VAICE_BROWSE", "VAICE_BROWSE_SECONDS", "VAICE_BROWSE_HEADLESS"):
+    for name in ("VAICE_BROWSE", "VAICE_BROWSE_SECONDS", "VAICE_BROWSE_HEADLESS", "VAICE_BROWSE_CONFIRM"):
         monkeypatch.delenv(name, raising=False)
     try:
         reloaded = importlib.reload(config)
         assert reloaded.BROWSE == "off" and reloaded.BROWSE_SECONDS == 180.0 and reloaded.BROWSE_HEADLESS is False
+        assert reloaded.BROWSE_CONFIRM == "ask"
     finally:
         monkeypatch.undo()
         importlib.reload(config)
@@ -642,12 +643,24 @@ def test_the_browse_settings_are_read_from_the_environment(monkeypatch):
     monkeypatch.setenv("VAICE_BROWSE", "pi")
     monkeypatch.setenv("VAICE_BROWSE_SECONDS", "90")
     monkeypatch.setenv("VAICE_BROWSE_HEADLESS", "1")
+    monkeypatch.setenv("VAICE_BROWSE_CONFIRM", "off")
     try:
         reloaded = importlib.reload(config)
         assert reloaded.BROWSE == "pi" and reloaded.BROWSE_SECONDS == 90.0 and reloaded.BROWSE_HEADLESS is True
+        assert reloaded.BROWSE_CONFIRM == "off"
     finally:
         monkeypatch.undo()
         importlib.reload(config)
+
+
+@pytest.mark.parametrize("value", ["no", "false", ""])
+def test_an_unknown_browse_confirm_value_is_a_clean_startup_error(monkeypatch, value):
+    monkeypatch.setenv("VAICE_BROWSE_CONFIRM", value)
+    try:
+        with pytest.raises(SystemExit, match="VAICE_BROWSE_CONFIRM must be ask or off"):
+            importlib.reload(config)
+    finally:
+        monkeypatch.undo()
 
 
 @pytest.mark.parametrize("value", ["opencode", "on", "PI", ""])

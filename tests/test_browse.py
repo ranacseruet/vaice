@@ -587,6 +587,24 @@ def test_close_during_a_task_fails_that_task(harness):
 # --- the child's environment
 
 
+def test_the_ungated_policy_runs_every_browser_tool_and_still_asks_about_anything_else():
+    policy = browse.UNGATED_POLICY
+    assert policy == {"mcp__chrome__*": "run", "default": "ask"}
+    assert not any(key.startswith("mcp__chrome__") and value != "run" for key, value in policy.items())
+
+
+def test_the_child_gets_the_gate_policy_it_was_given(tmp_path):
+    h = Harness(tmp_path)
+    h.agent = PiAgent(h.home, log_path=h.stderr_log, command=[sys.executable, str(FAKE)],
+                      env={"FAKE_PI_LOG": str(h.record)}, gate_policy=browse.UNGATED_POLICY)
+    try:
+        h.run()
+        start = next(f["start"] for f in h.facts() if "start" in f)
+        assert json.loads(start["env"]["VAICE_GATE_POLICY"]) == browse.UNGATED_POLICY
+    finally:
+        h.agent.close()
+
+
 def test_the_child_runs_isolated_and_logs_to_a_private_file(harness, monkeypatch):
     monkeypatch.setenv("VAICE_BRAIN_API_KEY", "another-secret")
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "aws-secret")

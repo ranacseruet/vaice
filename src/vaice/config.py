@@ -249,6 +249,8 @@ BROWSE_SECONDS = _number("VAICE_BROWSE_SECONDS", default="180", kind=float)
 if not BROWSE_SECONDS > 0:
     raise SystemExit("vaice: VAICE_BROWSE_SECONDS must be > 0 (seconds)")
 BROWSE_HEADLESS = _flag("VAICE_BROWSE_HEADLESS", default=False)
+# `ask` (default): a step that changes a page (click, type, fill, run a script) needs a yes first; `off`: none does.
+BROWSE_CONFIRM = _choice("VAICE_BROWSE_CONFIRM", default="ask", choices=("ask", "off"))
 
 PORT = _number("VAICE_PORT", default="7860", kind=int)
 
