@@ -19,7 +19,16 @@ from fastrtc import AdditionalOutputs, Stream
 
 from vaice import config, mcp_skills
 from vaice.brain import ChatBrain
-from vaice.browse import API_KEY_ENV, MIN_PI_VERSION, PiAgent, default_browser_args, pi_version, write_pi_home
+from vaice.browse import (
+    API_KEY_ENV,
+    GATE_POLICY,
+    MIN_PI_VERSION,
+    UNGATED_POLICY,
+    PiAgent,
+    default_browser_args,
+    pi_version,
+    write_pi_home,
+)
 from vaice.confirm import CONFIRM_SECONDS, Pending
 from vaice.conversation import Conversation, Turn
 from vaice.interruptible import InterruptSafeReplyOnPause, stop_playing_reply
@@ -427,12 +436,15 @@ def _open_browse() -> PiAgent | None:
         log.warning("VAICE_BRAIN_MODEL is empty: the browser agent needs a model name")
     log.info("browse: Pi in %s, browser profile %s, %s window, up to %g s a task", base / "pi", profile,
              "no" if config.BROWSE_HEADLESS else "a visible", config.BROWSE_SECONDS)
-    log.warning("browse: pages' text and what the browser agent does go to the brain at %s; a step that changes a "
-                "page needs a spoken yes or the Run button, but navigation and reading do not",
-                urlsplit(config.BRAIN_URL).netloc)
+    ungated = config.BROWSE_CONFIRM == "off"
+    log.warning("browse: pages' text and what the browser agent does go to the brain at %s; %s",
+                urlsplit(config.BRAIN_URL).netloc,
+                "VAICE_BROWSE_CONFIRM=off: the agent clicks, types and submits forms without asking" if ungated else
+                "a step that changes a page needs a spoken yes or the Run button, but navigation and reading do not")
     env = {API_KEY_ENV: config.BRAIN_API_KEY} if config.BRAIN_API_KEY else None
     return PiAgent(base / "pi", log_path=base / "pi.log", env=env,
-                   ask_timeout_s=CONFIRM_SECONDS + BROWSE_ASK_EXTRA_SECONDS, chrome_profile=profile)
+                   ask_timeout_s=CONFIRM_SECONDS + BROWSE_ASK_EXTRA_SECONDS, chrome_profile=profile,
+                   gate_policy=UNGATED_POLICY if ungated else GATE_POLICY)
 
 
 def _open_mcp(browse: bool = False) -> mcp_skills.McpTools | None:

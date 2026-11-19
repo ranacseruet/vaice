@@ -1708,6 +1708,7 @@ def browse_on(monkeypatch, tmp_path):
     monkeypatch.setattr(app.config, "BRAIN_MODEL", "some-model")
     monkeypatch.setattr(app.config, "BRAIN_API_KEY", BRAIN_KEY)
     monkeypatch.setattr(app.config, "BROWSE_HEADLESS", False)
+    monkeypatch.setattr(app.config, "BROWSE_CONFIRM", "ask")
     monkeypatch.setattr(app.shutil, "which", lambda name: "/usr/bin/pi")
     monkeypatch.setattr(app, "pi_version", lambda: (1, 5, 2))
     monkeypatch.setattr(app, "PiAgent", FakePiAgent)
@@ -1761,6 +1762,17 @@ def test_browse_writes_pi_home_under_the_data_dir_and_gives_the_key_to_the_child
     for path in (base / "pi").rglob("*"):  # the key is in no file and no log line
         assert not path.is_file() or BRAIN_KEY not in path.read_text()
     assert BRAIN_KEY not in caplog.text and "llm.example.com" in caplog.text
+
+
+def test_browse_asks_for_page_changing_steps_unless_the_user_turned_that_off(browse_on, monkeypatch, caplog):
+    assert app._open_browse().kwargs["gate_policy"] == app.GATE_POLICY
+
+    monkeypatch.setattr(app.config, "BROWSE_CONFIRM", "off")
+    with caplog.at_level(logging.WARNING, logger="vaice.app"):
+        agent = app._open_browse()
+
+    assert agent.kwargs["gate_policy"] == app.UNGATED_POLICY
+    assert "without asking" in caplog.text
 
 
 def test_headless_adds_the_flag_and_no_key_means_no_environment(browse_on, monkeypatch, tmp_path):

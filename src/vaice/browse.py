@@ -84,6 +84,8 @@ GATE_POLICY = {
     **{f"mcp__chrome__{name}": "ask" for name in _MUTATING_TOOLS},
     "default": "ask",
 }  # tools Pi knows by exact name win over the `*` pattern; anything not named asks
+# VAICE_BROWSE_CONFIRM=off: every browser tool runs unasked (clicks, typing, forms); anything else still asks
+UNGATED_POLICY = {"mcp__chrome__*": "run", "default": "ask"}
 
 # what the child may inherit: enough to find node and reach the network, nothing else (not vaice's other keys)
 _INHERITED_ENV = ("PATH", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "USER", "LOGNAME", "SHELL", "SSL_CERT_FILE",
@@ -370,18 +372,20 @@ class PiAgent:
 
     def __init__(self, pi_home: Path, *, log_path: Path, command: str | Sequence[str] = "pi",
                  ask_timeout_s: float = 60.0, env: Mapping[str, str] | None = None,
-                 chrome_profile: Path | None = None):
+                 chrome_profile: Path | None = None, gate_policy: Mapping[str, str] = GATE_POLICY):
         """`pi_home` is a directory `write_pi_home` filled. `log_path` receives the child's stderr (0600).
         `command` is the pi executable (or a whole argv prefix). `ask_timeout_s` is how long a question gets before
         it counts as a no. `env` is added to the child's environment: the model's API key goes here.
         `chrome_profile` is the browser profile `write_pi_home` was given (`--userDataDir`): what still holds it is
-        ended before a new child starts and after `close()` (see the module docstring)."""
+        ended before a new child starts and after `close()` (see the module docstring). `gate_policy` is what the gate
+        asks about (`GATE_POLICY`, or `UNGATED_POLICY` when the user turned the questions off)."""
         self._home = pi_home
         self._log_path = log_path
         self._argv = [command] if isinstance(command, str) else list(command)
         self._ask_timeout = ask_timeout_s
         self._extra_env = dict(env or {})
         self._chrome_profile = chrome_profile
+        self._gate_policy = dict(gate_policy)
         self._child: _Child | None = None
         self._closed = False
         self._registered = False
@@ -394,7 +398,7 @@ class PiAgent:
         env = {name: os.environ[name] for name in _INHERITED_ENV if name in os.environ}
         env.setdefault("npm_config_cache", str(Path.home() / ".npm"))  # HOME moves, the package cache must not
         env.update(PI_CODING_AGENT_DIR=str(self._home), HOME=str(home_dir(self._home)), PI_OFFLINE="1",
-                   PI_SKIP_VERSION_CHECK="1", PI_TELEMETRY="0", VAICE_GATE_POLICY=json.dumps(GATE_POLICY),
+                   PI_SKIP_VERSION_CHECK="1", PI_TELEMETRY="0", VAICE_GATE_POLICY=json.dumps(self._gate_policy),
                    VAICE_GATE_TIMEOUT_MS=str(int((self._ask_timeout + ASK_GRACE) * 1000)))
         env.update(self._extra_env)
         return env
