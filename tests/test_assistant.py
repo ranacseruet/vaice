@@ -3447,6 +3447,26 @@ def test_a_gated_step_is_asked_by_a_fixed_sentence_on_the_screen_and_armed_only_
     armed_question(s)
 
 
+class CutOffResponse(FakeResponse):
+    """A /tts stream that sends one chunk and then fails."""
+
+    def iter_content(self, chunk_size):
+        yield self._chunks[0]
+        raise assistant.requests.ConnectionError("the tts stream broke")
+
+
+def test_a_gated_step_whose_question_speech_failed_partway_is_dropped_and_is_a_no(tts):
+    make = tts._make
+    first = "Shall I click something on python.org?"  # /tts is called per sentence: its first one breaks off
+    tts._make = lambda text: CutOffResponse([pcm_bytes(2400)]) if text == first else make(text)
+    s = browsing(asks_then_answers, answer("never asked"))
+
+    wait_until(browse_over)
+
+    assert s.agent.approved is False  # a question cut off was never heard: nobody may say yes to it
+    assert s.resp.pending() is None
+
+
 def test_a_spoken_yes_lets_the_task_go_on_and_does_not_cancel_it(tts, heard):
     """The required cancel-ordering test: `respond()` cancels the running task at the start of a new utterance, which
     is before the transcript exists, so the yes that approves a step must not end the task it approves."""

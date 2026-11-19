@@ -553,10 +553,10 @@ class _BrowseHooks:
         self._lock = threading.Lock()
         self._host: str | None = None  # the page most recently opened: a question names it
 
-    def say(self, text: str, record: bool = False) -> _OutboxSink | None:
+    def say(self, text: str, record: bool = False, strict: bool = False) -> _OutboxSink | None:
         """Speak `text` through the outbox; the sink that carries it (`frames`, `generation`), None without an outbox.
         Raises `_Stopped` when the task was stopped or the outbox cleared meanwhile; a failing /tts is a warning (what
-        was queued still counts)."""
+        was queued still counts), unless `strict` (a question: one cut off is not heard), which re-raises it."""
         if self._outbox is None:
             return None
         sink = _OutboxSink(self._outbox, self._turn, self._stop, record)
@@ -564,8 +564,11 @@ class _BrowseHooks:
             _speak(self._url, self._timeout, self._voice, text, sink, self._stop, time.perf_counter())
         except _Stopped:
             raise
-        except Exception as exc:  # noqa: BLE001 - speaking is best effort: the task goes on
+        except Exception as exc:  # speaking is best effort: the task goes on
             log.warning("browse could not speak: %s: %s", type(exc).__name__, exc)
+            if strict:
+                sink.finish()
+                raise
         sink.finish()
         return sink
 
@@ -595,8 +598,12 @@ class _BrowseHooks:
         with self._lock:
             self._confirmations.ask(pending)  # on the screen at once
             try:
-                sink = self.say(pending.question)
+                sink = self.say(pending.question, strict=True)
             except _Stopped:
+                self._confirmations.take(pending.id)
+                return False
+            except Exception:  # noqa: BLE001 - its /tts failed partway: a question cut off was never heard, so a no
+                log.warning("browse dropped a question: its speech failed")
                 self._confirmations.take(pending.id)
                 return False
             if self._outbox is None:  # nothing can be spoken: answerable from the screen only

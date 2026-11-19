@@ -389,11 +389,12 @@ def test_the_deadline_aborts_with_a_spoken_sentence(harness):
 @pytest.mark.parametrize("ignore_term", ["0", "1"])
 def test_an_abort_that_never_settles_ends_the_process_and_the_next_task_restarts(harness, ignore_term):
     h = harness(FAKE_PI_SCENARIO="abort_ignored", FAKE_PI_IGNORE_TERM=ignore_term)
-    stopper = threading.Timer(0.3, h.stop_flag.set)
-    stopper.start()
+
+    def stop_at_first_tool(name, args):  # not a timer: a slow runner may still be in new_session, which is no abort
+        h.stop_flag.set()
+
     with pytest.raises(BrowseStopped):
-        h.run()
-    stopper.join()
+        h.run(on_progress=stop_at_first_tool)
     first = h.pids()[0]
     assert wait_dead(first)  # SIGTERM, or SIGKILL when the child ignores it
     h.stop_flag.clear()
