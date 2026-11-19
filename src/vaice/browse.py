@@ -173,12 +173,13 @@ class _Child:
     def _read(self) -> None:
         assert self.proc.stdout is not None
         # a binary pipe: readline() splits on LF only (U+2028 is valid inside a JSON string)
-        for line in iter(self.proc.stdout.readline, b""):
-            try:
-                record = json.loads(line.rstrip(b"\r\n"))
-            except ValueError:
-                record = None
-            self.events.put(record if isinstance(record, dict) else {"type": "_unparsed", "size": len(line)})
+        with self.proc.stdout:
+            for line in iter(self.proc.stdout.readline, b""):
+                try:
+                    record = json.loads(line.rstrip(b"\r\n"))
+                except ValueError:
+                    record = None
+                self.events.put(record if isinstance(record, dict) else {"type": "_unparsed", "size": len(line)})
         self.events.put(_EOF)
 
     def next_id(self) -> str:
@@ -201,33 +202,35 @@ class _Child:
         return rid
 
     def end(self) -> None:
-        """Mark it unusable and end it: SIGTERM to its process group (Pi then stops its MCP servers), SIGKILL after
-        `TERM_WAIT`, reap it, close the pipes. Whatever it left running in the group ends with it, as in
-        `shell.run`. Once only (a reaped pid's group must not be signalled again)."""
+        """Mark it unusable and end it: SIGTERM to its process group (Pi then stops its MCP servers), then, after
+        Pi exits or `TERM_WAIT` passes, SIGKILL to the group anyway (a member that ignores SIGTERM must not outlive
+        Pi), reap it, close stdin. Whatever it left running in the group ends with it, as in `shell.run`. Bounded:
+        stdout is closed by the reader at EOF, never here, because a process outside the group (one that called
+        setsid) may still hold the pipe, and closing a buffered pipe the reader is blocked on would wait for it.
+        Once only."""
         with self._end_lock:
             self.dead = True
             if self._ended:
                 return
             self._ended = True
         proc = self.proc
-        for sig, wait in ((signal.SIGTERM, TERM_WAIT), (signal.SIGKILL, KILL_WAIT)):
-            with contextlib.suppress(ProcessLookupError, PermissionError):
-                os.killpg(proc.pid, sig)
-            try:
-                proc.wait(timeout=wait)
-                break
-            except subprocess.TimeoutExpired:
-                continue
-        else:
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(proc.pid, signal.SIGTERM)
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            proc.wait(timeout=TERM_WAIT)
+        with contextlib.suppress(ProcessLookupError, PermissionError):  # the rest of the group, Pi exited or not
+            os.killpg(proc.pid, signal.SIGKILL)
+        try:
+            proc.wait(timeout=KILL_WAIT)
+        except subprocess.TimeoutExpired:
             log.warning("browse: the browser agent (pid %d) did not exit after SIGKILL", proc.pid)
         self.release()
 
     def release(self) -> None:
-        """Close the parent's ends of the pipes."""
-        for pipe in (self.proc.stdin, self.proc.stdout):
-            if pipe is not None:
-                with contextlib.suppress(OSError, ValueError):
-                    pipe.close()
+        """Close the parent's end of stdin (stdout belongs to the reader thread, which closes it at EOF)."""
+        if self.proc.stdin is not None:
+            with contextlib.suppress(OSError, ValueError):
+                self.proc.stdin.close()
 
 
 @dataclass(frozen=True)
@@ -443,7 +446,7 @@ class PiAgent:
                 log.info("browse: tool %s (%.1fs in)", name, time.monotonic() - started)
                 self._progress(on_progress, name, event.get("args"))
             elif kind == "extension_ui_request":
-                if self._ui_request(child, event, budget.stop, on_ask):
+                if self._ui_request(child, event, budget, on_ask):
                     self._abort(child)
                     raise BrowseDeclined
             elif kind == "extension_error":  # the gate throwing blocks the call, but anything else is not safe to trust
@@ -472,24 +475,30 @@ class PiAgent:
         except Exception:  # a callback must not kill the task
             log.warning("browse: the progress callback failed for %s", name, exc_info=True)
 
-    def _ui_request(self, child: _Child, event: dict, stop: Callable[[], bool],
+    def _ui_request(self, child: _Child, event: dict, budget: _Budget,
                     on_ask: Callable[[str, str, Callable[[], bool]], bool]) -> bool:
-        """Answer one dialog. Returns True when it was a question answered no (the caller aborts the task)."""
+        """Answer one dialog. Returns True when it was a question answered no (the caller aborts the task). A stop
+        or the task's deadline that ends the question is not a no: the loop raises what ended it."""
         method, rid = event.get("method"), event.get("id")
         if method == "confirm":
             asked_at = time.monotonic()
 
+            def ended() -> bool:
+                return budget.stop() or time.monotonic() >= budget.deadline
+
             def ask_stop() -> bool:
-                return stop() or time.monotonic() - asked_at >= self._ask_timeout
+                return ended() or time.monotonic() - asked_at >= self._ask_timeout
 
             try:
                 approved = bool(on_ask(str(event.get("title") or ""), str(event.get("message") or ""), ask_stop))
             except Exception:  # a failed question is a no
                 log.warning("browse: the question callback failed", exc_info=True)
                 approved = False
+            if ended():  # a task out of time (or stopped) must not authorize another browser action
+                approved = False
             child.write({"type": "extension_ui_response", "id": rid, "confirmed": approved})
-            # a stop that cut the question short is handled by the loop (BrowseStopped), not as a refusal
-            return not approved and not stop()
+            # a stop or deadline that cut the question short is handled by the loop, not as a refusal
+            return not approved and not ended()
         if method in _DIALOGS:  # nothing in vaice answers these: cancelled
             child.write({"type": "extension_ui_response", "id": rid, "cancelled": True})
         return False  # notify, setStatus, setWidget, setTitle, set_editor_text: nothing to answer

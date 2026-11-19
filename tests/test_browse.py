@@ -242,6 +242,28 @@ def test_a_question_nobody_answers_is_a_no_after_ask_timeout(tmp_path):
         h.agent.close()
 
 
+def test_the_deadline_ends_an_open_question_and_approves_nothing(harness):
+    h = harness(FAKE_PI_SCENARIO="confirm")
+    approve_late = []
+
+    def wait_then_approve(title, message, stop):
+        while not stop():  # honors stop, then says yes: too late, the task is out of time
+            time.sleep(0.02)
+        approve_late.append(True)
+        return True
+
+    started = time.monotonic()
+    with pytest.raises(BrowseError) as caught:
+        h.run(on_ask=wait_then_approve, deadline_s=0.4)
+    assert not isinstance(caught.value, BrowseDeclined)
+    assert caught.value.spoken == "I stopped the browser task after 0.4 seconds."
+    assert time.monotonic() - started < 2  # not the 60 s question timeout
+    assert approve_late
+    answers = [f for f in h.facts() if f.get("cmd") == "extension_ui_response"]
+    assert answers and answers[0]["confirmed"] is False
+    assert "abort" in h.commands()
+
+
 def test_a_stop_during_a_question_is_a_stop_not_a_refusal(harness):
     h = harness(FAKE_PI_SCENARIO="confirm")
 
@@ -305,6 +327,32 @@ def test_an_abort_that_never_settles_ends_the_process_and_the_next_task_restarts
     h.stop_flag.clear()
     assert h.run("scenario=normal") == "The title is Python."
     assert len(h.pids()) == 2 and alive(h.pids()[1])
+
+
+def test_end_kills_a_group_member_that_ignores_sigterm_after_pi_exits(tmp_path):
+    """Pi exits on SIGTERM, a descendant in its group ignores it and keeps stdout open: end() must still SIGKILL
+    the group and return without waiting on the pipe."""
+    pid_file = tmp_path / "descendant.pid"
+    script = (
+        "import os, signal, subprocess, sys, time\n"
+        # the descendant writes its pid only once it ignores SIGTERM, so end() cannot race its setup
+        "kid = subprocess.Popen([sys.executable, '-c', 'import os, signal, sys, time; "
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN); open(sys.argv[1], \"w\").write(str(os.getpid())); "
+        f"time.sleep(60)', {str(pid_file)!r}])\n"
+        "print('{}', flush=True)\n"
+        "time.sleep(60)\n")
+    proc = subprocess.Popen([sys.executable, "-c", script], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                            start_new_session=True)
+    child = browse._Child(proc)
+    deadline = time.monotonic() + 5
+    while not (pid_file.exists() and pid_file.read_text()) and time.monotonic() < deadline:
+        time.sleep(0.02)
+    descendant = int(pid_file.read_text())
+    started = time.monotonic()
+    child.end()
+    assert time.monotonic() - started < browse.TERM_WAIT + browse.KILL_WAIT + 1
+    assert wait_dead(descendant)
+    assert proc.returncode is not None
 
 
 def test_a_child_that_exits_mid_task_is_an_error_and_the_next_task_restarts(harness):
