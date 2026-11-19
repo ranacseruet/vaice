@@ -114,7 +114,7 @@ def test_a_long_answer_is_cut_for_the_brain_but_not_in_the_detail():
 
 
 def test_the_fixed_sentences_hold_no_answer_word():
-    for text in (browse_task.WORKING, browse_task.FAILED):
+    for text in (browse_task.WORKING, browse_task.FAILED, browse_task.LIMIT):
         assert not set(re.findall(r"[a-z0-9]+", text.casefold())) & browse_task._ANSWER_WORDS, text
 
 

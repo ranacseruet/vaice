@@ -3668,3 +3668,165 @@ def test_the_responder_offers_browse_only_with_an_agent(tts):
     assert "browse" not in AssistantResponder("http://server", 5.0, "p", "female", brain=FakeBrain()).skills.names
     with_agent = AssistantResponder("http://server", 5.0, "p", "female", brain=FakeBrain(), browse=FakeAgent(None))
     assert "browse" in with_agent.skills.names
+
+
+# --- a question settled while the next utterance is transcribed, and a brain that calls browse inside a continuation
+
+
+def hold_after_approval(agent, goal, stop, on_progress, on_ask, deadline_s):
+    agent.approved = on_ask(CLICK_STEP[0], CLICK_STEP[1], stop)
+    if not agent.approved:
+        raise BrowseDeclined
+    agent.wait_for_stop(stop)
+
+
+def test_a_click_on_run_while_the_yes_is_transcribed_leaves_the_task_alone_and_the_yes_silent(tts, monkeypatch):
+    s = browsing(asks_then_answers, answer("never asked"))
+    pending = armed_question(s)
+
+    def transcribe(url, timeout, audio):  # the user clicks Run while their own "yes" is being transcribed
+        assert s.resp.approve(pending.id) == "go ahead"
+        return "Yes, please!"
+
+    monkeypatch.setattr(assistant, "_transcribe", transcribe)
+    second = Turn()
+
+    frames = drive(s.resp, turn=second)
+
+    assert frames == [] and second.assistant_text == ""
+    wait_until(browse_over)
+    assert s.agent.approved is True and not s.agent.stops[0]()  # the click's task was never cancelled
+    wait_for_continuation()
+    # the brain was asked about the browser's answer, never about the yes
+    assert all({"role": "user", "content": "Yes, please!"} not in messages for messages, _ in s.brain.calls)
+
+
+def test_the_expiry_of_the_question_while_the_yes_is_transcribed_is_silent_and_the_task_keeps_its_no(tts, monkeypatch):
+    s = browsing(asks_then_answers, answer("never asked"))
+    armed_question(s)
+
+    def transcribe(url, timeout, audio):  # a minute passes while the user's "yes" is being transcribed
+        s.confirmations._clock = lambda: time.monotonic() + 1000
+        assert s.confirmations.current() is None
+        return "Yes."
+
+    monkeypatch.setattr(assistant, "_transcribe", transcribe)
+    second = Turn()
+
+    frames = drive(s.resp, turn=second)
+
+    assert frames == [] and second.assistant_text == ""
+    wait_until(browse_over)
+    assert s.agent.approved is False and not s.agent.stops[0]()  # the task got its no; nothing cancelled it
+    assert len(s.brain.calls) == 1  # only the first reply's call: none for the yes, none after the refusal
+    assert tool_events(s.turn) == [("browse", "declined")]
+    assert served_text(tts).count(browse_task_declined()) == 1
+
+
+def browse_task_declined():
+    from vaice.browse import DECLINED
+
+    return DECLINED
+
+
+def test_anything_but_a_yes_or_no_after_the_question_was_settled_still_ends_the_task_and_is_a_new_question(
+        tts, monkeypatch):
+    s = browsing(hold_after_approval, answer("It is noon."))
+    pending = armed_question(s)
+
+    def transcribe(url, timeout, audio):
+        assert s.resp.approve(pending.id) == "go ahead"
+        return "What time is it?"
+
+    monkeypatch.setattr(assistant, "_transcribe", transcribe)
+
+    drive(s.resp, turn=Turn())
+
+    wait_until(browse_over)
+    assert s.agent.approved is True and s.agent.stops[0]()  # a new question ends the task the click approved
+    assert s.brain.calls[-1][0][-1] == {"role": "user", "content": "What time is it?"}
+
+
+def quit_then(*replies, script=navigate_then_answer, outbox=True):
+    """A responder with `quit_app` (confirm) and `browse`: the brain asks to quit Safari, then plays `replies`."""
+    agent = FakeAgent(script)
+    brain = FakeBrain(ask(QUIT), *replies)
+    ran = []
+    skills = Skills([*skills_with_quit(ran, []).skills, browse_task.browse_skill()])
+    resp = AssistantResponder("http://server", 5.0, "Be brief.", "female", skills, brain, Confirmations(),
+                              progress_seconds=0, browse=agent)
+    s = SimpleNamespace(resp=resp, brain=brain, agent=agent, turn=Turn(), outbox=None)
+    BROWSERS.append(resp)
+    if outbox:
+        with_outbox(s)
+    drive(resp, turn=s.turn)
+    return s
+
+
+def test_a_click_approved_continuation_whose_brain_calls_browse_starts_the_task_and_speaks_its_outcome(tts):
+    s = quit_then(ask(("browse", GOAL)), answer("The title is Welcome to Python."))
+
+    assert s.resp.approve(s.resp.pending().id) == "quit Safari"
+    wait_until(lambda: s.agent.finished.is_set())
+    wait_for_continuation()
+    wait_until(browse_over)
+
+    assert s.agent.goals == ["open python.org and tell me the page title"]
+    assert browse_task.WORKING in served_text(tts) and "The title is Welcome to Python." in served_text(tts)
+    serve(s.outbox)
+    assert s.turn.assistant_text == f"{QUESTION} {browse_task.WORKING} The title is Welcome to Python."
+    assert ("browse", BROWSE_ANSWER) in tool_events(s.turn)
+    messages, _ = s.brain.calls[2]  # the answer went back to the brain as the call's result, tainted and fresh
+    assert messages[-1]["content"] == f"the browser task finished: {BROWSE_ANSWER}"
+
+
+def test_a_continuation_that_starts_a_browser_task_without_an_outbox_still_runs_it(tts):
+    s = quit_then(ask(("browse", GOAL)), answer("Done."), outbox=False)
+
+    s.resp.approve(s.resp.pending().id)
+    wait_until(lambda: s.agent.finished.is_set())
+    wait_for_continuation()
+    wait_until(browse_over)
+
+    assert s.agent.goals == ["open python.org and tell me the page title"]
+    assert tool_events(s.turn)[-1] == ("browse", BROWSE_ANSWER)
+
+
+def test_a_browser_task_whose_answer_makes_the_brain_browse_again_starts_a_second_task(tts):
+    s = browsing(navigate_then_answer, ask(("browse", '{"goal": "now open example.com"}')), answer("Both done."))
+
+    wait_until(lambda: len(s.agent.goals) == 2 and s.agent.finished.is_set())
+    wait_until(browse_over)
+
+    assert s.agent.goals == ["open python.org and tell me the page title", "now open example.com"]
+    serve(s.outbox)
+    assert s.turn.assistant_text.endswith("Both done.")
+    assert [e for e in tool_events(s.turn) if e[0] == "browse"] == [("browse", BROWSE_ANSWER)] * 2
+
+
+def test_the_chain_of_browser_tasks_one_utterance_starts_is_cut_with_a_spoken_sentence(tts):
+    again = ask(("browse", GOAL))
+    s = browsing(navigate_then_answer, again, again, again)
+
+    wait_until(lambda: len(s.brain.calls) == 4)
+    wait_until(browse_over)
+
+    assert len(s.agent.goals) == browse_task.MAX_TASKS == 3  # no fourth task
+    assert served_text(tts)[-1] == browse_task.LIMIT
+    serve(s.outbox)
+    assert s.turn.assistant_text.endswith(browse_task.LIMIT)
+
+
+def test_a_chained_task_is_not_started_after_a_new_utterance_ended_the_chain(tts):
+    def hold_second(agent, goal, stop, on_progress, on_ask, deadline_s):
+        if len(agent.goals) == 1:
+            return BROWSE_ANSWER
+        return agent.wait_for_stop(stop)
+
+    s = browsing(hold_second, ask(("browse", GOAL)))
+    wait_until(lambda: len(s.agent.goals) == 2)
+
+    s.resp.stop_task()  # the Stop button ends the second task of the chain
+
+    wait_until(browse_over)
+    assert len(s.agent.goals) == 2 and not s.resp.browsing()

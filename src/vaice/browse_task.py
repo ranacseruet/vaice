@@ -16,6 +16,8 @@ from vaice.skills import Skill, SkillError, SkillResult
 
 WORKING = "Working in the browser."  # said when the task starts: no answer words (speaker echo, see confirm.py)
 FAILED = "Sorry, the browser task failed."  # for an error nothing else explained
+LIMIT = "The browser has been used enough times for this request."  # a chain of tasks that never ends is refused
+MAX_TASKS = 3  # browser tasks one utterance may lead to (the first, and what the brain starts after each answer)
 GOAL_MAX_CHARS = 500
 PROGRESS_LINE_SECONDS = 8.0  # at most one spoken progress line in this time
 RESULT_CHARS = 2000  # characters of the browser agent's answer the brain gets

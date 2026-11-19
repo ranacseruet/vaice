@@ -139,7 +139,7 @@ continuation, narration, a whole-task Stop) is not built: the question a continu
 | `run_shell` (opt-in) | `shell.py` | A small allowlist of harmless commands may be approved by voice or click; everything else is click-only, through `zsh -c`, with a 30 s timeout, an output cap and a process group that barge-in kills |
 | `remember`, `forget`, `forget_everything` (opt-in) | `memory.py` | Explicit notes only, saved to `memory.json` and appended to the system prompt. A note is text that outlives its conversation, so it is cleaned, capped, and refused if a tool ran earlier in the same reply |
 | `look_at_screen` (opt-in) | `vision.py` | One `screencapture` + `sips` shrink, asked of a vision model, never kept or logged. See [Screen vision](screen-vision.md) |
-| `browse` (opt-in) | `browse_task.py`, `browse.py` | A `background` skill: the reply says one fixed line and ends, then a task thread runs the Pi agent and speaks through the outbox; a step that changes a page asks, answered by a spoken yes or a click. See [Browser tasks](browser-tasks.md) |
+| `browse` (opt-in) | `browse_task.py`, `browse.py` | A `background` skill: the reply says one fixed line and ends, then a task thread runs the Pi agent and speaks through the outbox; a step that changes a page asks, answered by a spoken yes or a click; the task's answer (or a click-approved skill's outcome) may make the brain start another browser task, up to 3 per request. See [Browser tasks](browser-tasks.md) |
 | MCP tools (opt-in) | `mcp_skills.py` | Each listed tool of each stdio server becomes `<server>__<tool>` with a `run`, `voice`, `auto` or `click` policy. See [MCP tools](mcp-tools.md) |
 
 ## Safety model

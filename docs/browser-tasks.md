@@ -29,6 +29,9 @@ VAICE_MODE=assistant VAICE_BRAIN_URL=http://localhost:1234/v1 VAICE_BRAIN_MODEL=
   Silence expires after 60 s as a no. A yes is acknowledged silently, so the speaker cannot echo into the
   microphone. Anything else you say while a step waits cancels the task and is handled as a new question. Pi's
   own words are never spoken: only fixed sentences and the final answer.
+- **Follow-up tasks.** After a task's answer the brain may start another ("now open the second one"), up to three
+  browser tasks for one request; a fourth is refused with a spoken sentence. A skill you approve with a button (for
+  example quitting an app) may likewise lead to a browser task.
 - **Stop.** A **Stop the browser task** button shows while a task runs. *New conversation*, a new `browse` request and
   closing vaice stop it too (and so does `VAICE_BROWSE_SECONDS`, default 180). Only one task runs at a time.
 - **Progress.** "Opening <host>." is spoken as a page opens, at most once every 8 seconds, never between a question
