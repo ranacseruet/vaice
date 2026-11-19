@@ -3,7 +3,7 @@ import threading
 
 import pytest
 
-from vaice.confirm import CONFIRM_SECONDS, NO, YES, Confirmations, Pending, spoken_answer
+from vaice.confirm import CONFIRM_SECONDS, NO, YES, Confirmations, Pending, Waiter, spoken_answer
 from vaice.conversation import Turn
 
 
@@ -250,3 +250,91 @@ def test_audio_still_playing_is_never_negative_and_defaults_to_none():
     assert negative.auto_delay == 0.0 and plain.auto_delay == 0.0
     assert ordinary.armed_at == 1000.0 and ordinary.auto_seconds == 0  # a request without a timer: as before
     assert ordinary.remaining(1000.0) is None
+
+
+# --- a question of a running task: the answer goes to a waiter, nothing is run
+
+
+def asking():
+    waiter = Waiter()
+    return Pending("mcp__chrome__click", '{"uid": "1"}', "Shall I click something?", "", [], Turn(), waiter=waiter)
+
+
+def test_a_waiter_keeps_the_first_answer_and_reports_none_until_then():
+    waiter = Waiter()
+    assert waiter.wait(0) is None
+
+    waiter.resolve(True)
+    waiter.resolve(False)
+
+    assert waiter.wait(0) is True
+
+
+def test_answering_settles_the_waiter_and_the_request_in_one_step():
+    confirmations = Confirmations(Clock())
+    request = asking()
+    confirmations.ask(request)
+
+    assert confirmations.answer(request.id, True) is request
+
+    assert request.waiter.wait(0) is True and confirmations.current() is None
+    assert confirmations.answer(request.id, False) is None  # settled once; a later answer changes nothing
+    assert request.waiter.wait(0) is True
+
+
+def test_answering_a_stale_id_settles_nothing():
+    confirmations = Confirmations(Clock())
+    request = asking()
+    confirmations.ask(request)
+
+    assert confirmations.answer("not-the-id", True) is None
+
+    assert confirmations.current() is request and request.waiter.wait(0) is None
+
+
+@pytest.mark.parametrize("how", ["take", "clear", "replaced", "expired"])
+def test_every_other_way_a_request_leaves_is_a_no_to_its_waiter(how):
+    clock = Clock()
+    confirmations = Confirmations(clock)
+    request = asking()
+    confirmations.ask(request)
+    confirmations.arm(request.id)
+
+    if how == "take":
+        confirmations.take(request.id)
+    elif how == "clear":
+        confirmations.clear()
+    elif how == "replaced":
+        confirmations.ask(pending())
+    else:
+        clock.now += CONFIRM_SECONDS + 1
+        assert confirmations.current() is None
+
+    assert request.waiter.wait(0) is False
+
+
+def test_a_yes_and_a_click_cancel_race_gives_the_waiter_exactly_the_winners_answer():
+    for _ in range(200):
+        confirmations = Confirmations()
+        request = asking()
+        confirmations.ask(request)
+        start = threading.Barrier(2)
+        won = []
+
+        def yes(start=start, confirmations=confirmations, request=request, won=won):
+            start.wait()
+            if confirmations.answer(request.id, True) is not None:
+                won.append(True)
+
+        def cancel(start=start, confirmations=confirmations, request=request, won=won):
+            start.wait()
+            if confirmations.take(request.id) is not None:
+                won.append(False)
+
+        threads = [threading.Thread(target=yes), threading.Thread(target=cancel)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        assert len(won) == 1 and request.waiter.wait(0) is won[0]

@@ -6,6 +6,7 @@ import logging
 import signal
 import sys
 from types import SimpleNamespace
+from typing import ClassVar
 
 import numpy as np
 import pytest
@@ -779,10 +780,11 @@ class FakeAssistant:
     name = "assistant"
     skills = SimpleNamespace(names=("disk_space", "battery_status"))  # the attribute main() reads
 
-    def __init__(self, memory=None, vision=None, extra_skills=()):
+    def __init__(self, memory=None, vision=None, extra_skills=(), browse=None):
         self.memory = memory
         self.vision = vision  # the look_at_screen skill main() built, if any
         self.extra_skills = extra_skills  # the MCP skills main() started, if any
+        self.browse = browse  # the browser agent main() opened, if any
 
 
 def _assistant_main(monkeypatch, tmp_path, tools=None):
@@ -1570,7 +1572,7 @@ def _memory_main(monkeypatch, tmp_path, notes=None, memory_file="default", on=Tr
     given = []
 
     class Responder(FakeAssistant):
-        def __init__(self, memory=None, vision=None, extra_skills=()):
+        def __init__(self, memory=None, vision=None, extra_skills=(), browse=None):
             super().__init__(memory, vision)
             given.append(memory)
 
@@ -1672,3 +1674,192 @@ def test_a_responder_without_attach_outbox_gets_a_stream_without_one():
     stream = build_stream(FakeResponder(), Conversation())
 
     assert stream.event_handler.outbox is None
+
+
+# -- the browse skill (VAICE_BROWSE)
+
+BRAIN_KEY = "sk-fake-brain-key-123"
+
+
+class FakePiAgent:
+    closed = 0
+    made: ClassVar[list] = []
+
+    def __init__(self, pi_home, **kwargs):
+        self.pi_home, self.kwargs = pi_home, kwargs
+        type(self).made.append(self)
+
+    def close(self):
+        type(self).closed += 1
+
+
+@pytest.fixture
+def browse_on(monkeypatch, tmp_path):
+    """VAICE_BROWSE=pi with a brain, a `pi` that is found and prints 1.5.2, and PiAgent faked."""
+    FakePiAgent.made, FakePiAgent.closed = [], 0
+    monkeypatch.setattr(app.config, "BROWSE", "pi")
+    monkeypatch.setattr(app.config, "BRAIN_URL", "https://llm.example.com/v1")
+    monkeypatch.setattr(app.config, "BRAIN_MODEL", "some-model")
+    monkeypatch.setattr(app.config, "BRAIN_API_KEY", BRAIN_KEY)
+    monkeypatch.setattr(app.config, "BROWSE_HEADLESS", False)
+    monkeypatch.setattr(app.shutil, "which", lambda name: "/usr/bin/pi")
+    monkeypatch.setattr(app, "pi_version", lambda: (1, 5, 2))
+    monkeypatch.setattr(app, "PiAgent", FakePiAgent)
+    monkeypatch.setattr(app.config, "DATA_DIR", tmp_path / "data")
+
+
+def test_browse_is_off_by_default_and_builds_nothing(monkeypatch):
+    monkeypatch.setattr(app.config, "BROWSE", "off")
+    monkeypatch.setattr(app.shutil, "which", lambda name: pytest.fail("looked for pi"))
+
+    assert app._open_browse() is None
+
+
+@pytest.mark.parametrize(("setting", "value", "warning"), [
+    (app.config, ("BRAIN_URL", ""), "needs VAICE_BRAIN_URL"),
+    (app.shutil, ("which", lambda name: None), "not on PATH"),
+    (app, ("pi_version", lambda: (1, 5, 1)), "is version 1.5.1, browse needs 1.5.2")])
+def test_browse_needs_the_brain_the_pi_command_and_a_recent_enough_version(browse_on, monkeypatch, caplog, setting,
+                                                                         value, warning):
+    monkeypatch.setattr(setting, *value)
+
+    with caplog.at_level(logging.WARNING, logger="vaice.app"):
+        assert app._open_browse() is None
+
+    assert warning in caplog.text and "browse is not offered" in caplog.text
+    assert FakePiAgent.made == []
+
+
+def test_an_unreadable_version_warns_and_goes_on(browse_on, monkeypatch, caplog):
+    monkeypatch.setattr(app, "pi_version", lambda: None)
+
+    with caplog.at_level(logging.WARNING, logger="vaice.app"):
+        agent = app._open_browse()
+
+    assert isinstance(agent, FakePiAgent) and "could not read the version" in caplog.text
+
+
+def test_browse_writes_pi_home_under_the_data_dir_and_gives_the_key_to_the_child_only(browse_on, tmp_path, caplog):
+    with caplog.at_level(logging.INFO, logger="vaice.app"):
+        agent = app._open_browse()
+
+    base = tmp_path / "data" / "browse"
+    assert agent.pi_home == base / "pi" and agent.kwargs["log_path"] == base / "pi.log"
+    assert agent.kwargs["env"] == {"VAICE_PI_API_KEY": BRAIN_KEY}  # the child's environment, nowhere else
+    assert agent.kwargs["chrome_profile"] == base / "chrome-profile"
+    assert agent.kwargs["ask_timeout_s"] == app.CONFIRM_SECONDS + app.BROWSE_ASK_EXTRA_SECONDS
+    mcp = json.loads((base / "pi" / "mcp.json").read_text())["mcpServers"]["chrome"]["args"]
+    assert f"--userDataDir={base / 'chrome-profile'}" in mcp and "--headless" not in mcp
+    models = json.loads((base / "pi" / "models.json").read_text())["providers"]["vaice"]
+    assert models["baseUrl"] == "https://llm.example.com/v1" and models["apiKey"] == "$VAICE_PI_API_KEY"
+    for path in (base / "pi").rglob("*"):  # the key is in no file and no log line
+        assert not path.is_file() or BRAIN_KEY not in path.read_text()
+    assert BRAIN_KEY not in caplog.text and "llm.example.com" in caplog.text
+
+
+def test_headless_adds_the_flag_and_no_key_means_no_environment(browse_on, monkeypatch, tmp_path):
+    monkeypatch.setattr(app.config, "BROWSE_HEADLESS", True)
+    monkeypatch.setattr(app.config, "BRAIN_API_KEY", "")
+
+    agent = app._open_browse()
+
+    assert agent.kwargs["env"] is None
+    mcp = json.loads((tmp_path / "data" / "browse" / "pi" / "mcp.json").read_text())["mcpServers"]["chrome"]["args"]
+    assert "--headless" in mcp
+
+
+def test_without_a_data_dir_the_browser_files_go_to_a_temp_dir(browse_on, monkeypatch, tmp_path):
+    monkeypatch.setattr(app.config, "DATA_DIR", None)
+    monkeypatch.setattr(app.tempfile, "mkdtemp", lambda prefix: str(tmp_path / "temp"))
+
+    agent = app._open_browse()
+
+    assert agent.pi_home == tmp_path / "temp" / "browse" / "pi" and agent.pi_home.is_dir()
+
+
+def test_a_failed_write_of_the_pi_config_is_a_warning_and_browse_is_not_offered(browse_on, monkeypatch, caplog):
+    def refuse(*args, **kwargs):
+        raise OSError("read-only")
+
+    monkeypatch.setattr(app, "write_pi_home", refuse)
+    with caplog.at_level(logging.WARNING, logger="vaice.app"):
+        assert app._open_browse() is None
+
+    assert "could not write the browser agent's configuration" in caplog.text
+
+
+def test_assistant_main_hands_the_agent_to_the_responder_and_closes_it_at_the_end(browse_on, monkeypatch, tmp_path):
+    seen = []
+    original = FakeAssistant.__init__
+
+    def init(self, *args, **kwargs):
+        original(self, *args, **kwargs)
+        seen.append(self.browse)
+
+    monkeypatch.setattr(FakeAssistant, "__init__", init)
+
+    assert _assistant_main(monkeypatch, tmp_path)
+
+    assert seen == [FakePiAgent.made[0]] and FakePiAgent.closed == 1
+
+
+def test_the_agent_is_closed_even_when_startup_fails_after_it(browse_on, monkeypatch, tmp_path):
+    monkeypatch.setattr(FakeAssistant, "__init__", lambda self, **kwargs: (_ for _ in ()).throw(RuntimeError("boom")))
+
+    with pytest.raises(RuntimeError, match="boom"):
+        _assistant_main(monkeypatch, tmp_path)
+
+    assert FakePiAgent.closed == 1
+
+
+def test_chat_mode_ignores_the_browse_setting_with_one_warning(monkeypatch, tmp_path, caplog):
+    monkeypatch.setattr(app.config, "BROWSE", "pi")
+    monkeypatch.setattr(app, "_open_browse", lambda: pytest.fail("opened a browser agent in chat mode"))
+
+    with caplog.at_level(logging.WARNING, logger="vaice.app"):
+        _main_with(monkeypatch, tmp_path)
+
+    assert caplog.text.count("VAICE_BROWSE is ignored in chat mode") == 1
+
+
+def test_the_stop_row_follows_whether_a_browser_task_runs():
+    conversation = Conversation(None, window=10)
+
+    off = app.refresh_view(conversation, "", browsing=lambda: False)
+    on = app.refresh_view(conversation, "", browsing=lambda: True)
+
+    assert off[2]["visible"] is False and on[2]["visible"] is True  # after the chatbot and the tool panel
+    assert off[-1] != on[-1]  # the view is part of the dedup key: a change is redrawn
+    assert app.refresh_view(conversation, on[-1], browsing=lambda: True)[2] == app.gr.skip()
+
+
+class BrowsingResponder(ConfirmingResponder):
+    """A responder with a browser task (the Stop button's two methods), as AssistantResponder has."""
+
+    def __init__(self):
+        super().__init__()
+        self.running, self.stopped = False, 0
+
+    def browsing(self):
+        return self.running
+
+    def stop_task(self):
+        self.stopped += 1
+        self.running = False
+
+
+def test_a_browser_task_shows_a_stop_button_that_ends_it_and_hides_at_once():
+    responder = BrowsingResponder()
+    page = confirm_page(responder)
+    components = {c["id"]: c for c in page.config["components"]}
+    stop_fn, stop_click = page.clicks["Stop the browser task"]
+
+    assert components[stop_click["targets"][0][0]]["props"]["variant"] == "stop"
+    first = page.tick("")
+    assert first[-2] == HIDDEN  # [..., confirm rows, browse row, seen]: nothing runs yet
+
+    responder.running = True
+    shown = page.tick(first[-1])
+    assert shown[-2] == SHOWN
+
+    assert stop_fn() == (HIDDEN, "") and responder.stopped == 1  # hidden at once, the blank `seen` redraws

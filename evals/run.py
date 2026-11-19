@@ -226,12 +226,15 @@ def run_text(url: str, prompt: str, tools: list[dict], audio, history) -> dict:
     return record
 
 
-def stub_skills(shell: bool = False, memory: Memory | None = None, vision: bool = False) -> Skills:
+def stub_skills(shell: bool = False, memory: Memory | None = None, vision: bool = False,
+                browse: bool = False) -> Skills:
     """The real skills' definitions with canned results: the model sees what the app offers, and nothing
     runs on this machine (the stubs replace each skill's `run`, and `run_stoppable` is dropped so the real
     command runner cannot be reached; Skills.run still checks the arguments). A `confirm` skill's `ask` is
     stubbed to always ask, so no check of the machine (is the app running?) is made. `shell` adds `run_shell`,
-    `vision` adds `look_at_screen` (its stub answers from `VISION_STUBS`: no screenshot is taken, nothing is sent).
+    `vision` adds `look_at_screen` (its stub answers from `VISION_STUBS`: no screenshot is taken, nothing is sent),
+    `browse` adds `browse` (the real definition: it is a background skill that only validates its goal here, so no
+    browser task is started and nothing is run).
 
     `memory` adds the memory skills, which stay real: they only touch that store, which must be in memory only
     (no path), so an eval can never read or write the app's own `memory.json`."""
@@ -247,7 +250,7 @@ def stub_skills(shell: bool = False, memory: Memory | None = None, vision: bool 
                 if skill.name in answers else (lambda _args, text=SKILL_STUBS[skill.name]: SkillResult(text)),
                 **({"ask": lambda _args, name=skill.name: f"Shall I run {name.replace('_', ' ')}?"}
                    if skill.kind == "confirm" else {}))
-        for skill in default_skills(shell=shell, memory=memory, vision=screen).skills])
+        for skill in default_skills(shell=shell, memory=memory, vision=screen, browse=browse).skills])
 
 
 def case_memory(case: dict) -> Memory:
@@ -279,6 +282,9 @@ def run_assistant(url: str, prompt: str, skills: Skills, audio, history, brain: 
             if decision.pending is not None:  # asked for a confirm skill: that is the call (it never runs here)
                 record["calls"].append([decision.pending.name, decision.pending.arguments])
                 record["pending"] = True  # its answer is a question, which the answer checks do not apply to
+            if decision.background is not None:  # the `browse` skill: its call, and its answer is the fixed line
+                record["calls"].append([decision.background.name, decision.background.arguments])
+                record["pending"] = True  # the line is not an answer to the question either
             record["answer"] = decision.answer
         else:  # as in the app: nothing is asked of the brain
             record["answer"] = NOT_HEARD
@@ -327,6 +333,9 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--vision", action="store_true",
                         help="assistant path: also offer the look_at_screen skill (stubbed: a fixed fake screen, "
                              "nothing is captured or sent)")
+    parser.add_argument("--browse", action="store_true",
+                        help="assistant path: also offer the browse skill (a background skill: its call is "
+                             "scored, no browser task is started)")
     parser.add_argument("--no-memory", action="store_true",
                         help="assistant path: leave out the memory skills and the case notes (default: on, as in the "
                              "app); the store is always in memory, never the app's memory.json")
@@ -487,7 +496,8 @@ def main(argv: list[str] | None = None) -> None:
                             record = run_interleaved(url, prompts[path], tools, results, audio[case["id"]], turns)
                         elif path == "assistant":
                             memory = None if args.no_memory else case_memory(case)  # fresh for every run
-                            skills = stub_skills(shell=args.shell, memory=memory, vision=args.vision)
+                            skills = stub_skills(shell=args.shell, memory=memory, vision=args.vision,
+                                                 browse=args.browse)
                             record = run_assistant(url, prompts[path], skills, audio[case["id"]], turns, brain,
                                                    notes=[] if memory is None else memory.notes())
                         else:
@@ -507,7 +517,8 @@ def main(argv: list[str] | None = None) -> None:
     summary = print_summary(runs, args.paths, [c["id"] for c in cases], brain_used)
 
     config_used = {"paths": args.paths, "cases_file": args.cases_file, "repeats": args.repeats,
-                   "shell": args.shell, "vision": args.vision, "memory": not args.no_memory, "history": history,
+                   "shell": args.shell, "vision": args.vision, "browse": args.browse, "memory": not args.no_memory,
+                   "history": history,
                    "prompts": prompts, "cases": [c["id"] for c in cases], "platform": platform.platform()}
     if brain_used is not None:
         config_used["brain"] = brain_used  # the host and the model only: never the key, never the URL's path

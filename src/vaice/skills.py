@@ -67,15 +67,26 @@ class Question:
 
 
 @dataclass(frozen=True)
+class Started:
+    """What `Skills.prepare` returns for a `background` skill: the sentence the reply speaks now. The skill's work
+    (a browser task) goes on after the reply, outside `Skills.run`; see `responders/assistant.py`."""
+
+    text: str
+
+
+@dataclass(frozen=True)
 class Skill:
     name: str
     description: str  # one sentence: when to use it
     parameters: dict  # JSON schema of the arguments
     run: Callable[[dict], SkillResult]
-    kind: str = "read"  # "read" | "action" (runs at once, easy to undo) | "confirm" (asks first)
+    # "read" | "action" (runs at once, easy to undo) | "confirm" (asks first) | "background" (the reply says a fixed
+    # line and ends; the work goes on after it and its result comes back to the brain later, see `Started`)
+    kind: str = "read"
     # confirm only: validates the arguments and returns the question to speak, or raises SkillError. The
     # question must not hold a word the user answers with (see confirm.py): the speakers' echo can reach the mic.
-    # A `str` is a question a spoken yes may approve; a `Question` says so itself.
+    # A `str` is a question a spoken yes may approve; a `Question` says so itself. background: validates the arguments
+    # and returns the sentence to say now (a `str`), or raises SkillError.
     ask: Callable[[dict], str | Question] | None = None
     # A skill that can be stopped (barge-in, the app ending) takes the reply's `stop` callable: `Skills.run` calls
     # this in place of `run` when it has one. `run` stays the fallback that cannot be stopped.
@@ -135,12 +146,13 @@ class Skills:
                 return SkillResult(f"{label} failed: the argument {key} is missing")
         return skill, args, label
 
-    def prepare(self, name: str, arguments: str) -> Question | SkillResult | None:
+    def prepare(self, name: str, arguments: str) -> Question | Started | SkillResult | None:
         """The checks that come before a `confirm` skill runs: the `Question` to ask the user, or the
-        `SkillResult` that says why it cannot be done. None for any other skill (and an unknown one): `run`
-        it, which reports its failures the same way. Never raises."""
+        `SkillResult` that says why it cannot be done; for a `background` skill the `Started` sentence to say now.
+        None for any other skill (and an unknown one): `run` it, which reports its failures the same way. Never
+        raises."""
         skill = self._by_name.get(name)
-        if skill is None or skill.kind != "confirm":
+        if skill is None or skill.kind not in ("confirm", "background"):
             return None
         resolved = self._resolve(name, arguments)
         if isinstance(resolved, SkillResult):
@@ -150,6 +162,8 @@ class Skills:
             if skill.ask is None:
                 raise SkillError("it has no question to ask")
             asked = skill.ask(args)
+            if skill.kind == "background":
+                return Started(str(asked))
             return asked if isinstance(asked, Question) else Question(asked)
         except SkillError as exc:
             log.warning("skill %s cannot be asked about: %s", name, exc)
@@ -519,10 +533,11 @@ def _mute_sound(args: dict) -> SkillResult:
 
 
 def default_skills(shell: bool = False, memory: "Memory | None" = None, vision: Skill | None = None,
-                   extra: Sequence[Skill] = ()) -> Skills:
+                   extra: Sequence[Skill] = (), browse: bool = False) -> Skills:
     """The skills the assistant path offers: five read-only checks, then the actions, with `shell`
     (`VAICE_ASSISTANT_SHELL`) `run_shell`, which asks first, with a `memory` (`VAICE_ASSISTANT_MEMORY`) the
-    skills that keep and forget notes (see `memory.py`), with a `vision` skill (`VAICE_VISION_URL`, built by
+    skills that keep and forget notes (see `memory.py`), with `browse` (`VAICE_BROWSE`) the background `browse` skill
+    (see `browse_task.py`), with a `vision` skill (`VAICE_VISION_URL`, built by
     `vision.vision_skill`) `look_at_screen`, which comes right after the read-only checks, and with `extra` (the MCP
     tools, `VAICE_MCP_CONFIG`, see `mcp_skills.py`) last. An MCP name always holds `__` and no built-in does, so
     the two cannot collide."""
@@ -582,4 +597,8 @@ def default_skills(shell: bool = False, memory: "Memory | None" = None, vision: 
         from vaice.memory import memory_skills  # memory imports this module: not at the top
 
         skills += memory_skills(memory)
+    if browse:
+        from vaice.browse_task import browse_skill  # it imports this module: not at the top
+
+        skills.append(browse_skill())
     return Skills([*skills, *extra])

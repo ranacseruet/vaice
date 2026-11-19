@@ -593,3 +593,34 @@ def test_the_shipped_cases_replay_realistic_arguments():
     assert len(replayed) == 5
     assert {v[0]: v[1] for k, v in replayed.items() if k.startswith("battery")} == {"battery_status": {}}
     assert all(isinstance(v[1].get("question"), str) for k, v in replayed.items() if k.startswith("vision"))
+
+
+def test_the_browse_skill_is_offered_only_with_the_flag_and_nothing_is_started(monkeypatch):
+    from vaice.skills import Started
+
+    assert eval_run.stub_skills(browse=False).definitions() == default_skills().definitions()
+    skills = eval_run.stub_skills(browse=True)
+    assert "browse" in skills.names
+    assert isinstance(skills.prepare("browse", '{"goal": "open python.org"}'), Started)  # validated, nothing run
+
+
+def test_the_browse_flag_is_off_by_default():
+    assert eval_run.parse_args(["--paths", "assistant"]).browse is False
+    assert eval_run.parse_args(["--paths", "assistant", "--browse"]).browse is True
+
+
+def test_a_background_call_is_scored_as_the_call_and_its_line_is_not_checked_as_an_answer(monkeypatch):
+    from vaice import browse_task
+    from vaice.brain import BrainReply, ToolCall
+
+    class Brain:
+        def complete(self, messages, tools):
+            call = ToolCall("c0", "browse", '{"goal": "open python.org"}')
+            return BrainReply("", [call], {"role": "assistant", "content": "", "tool_calls": [
+                {"id": "c0", "type": "function", "function": {"name": "browse", "arguments": call.arguments}}]})
+
+    monkeypatch.setattr(eval_run, "_transcribe", lambda url, timeout, audio: "open python.org")
+    record = eval_run.run_assistant("http://x", "prompt", eval_run.stub_skills(browse=True), object(), [], Brain())
+
+    assert record["calls"] == [["browse", '{"goal": "open python.org"}']] and record["pending"] is True
+    assert record["answer"] == browse_task.WORKING and record["error"] is None

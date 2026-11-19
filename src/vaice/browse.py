@@ -28,10 +28,15 @@ How it fits together:
   task. A child that exits mid-task is a `BrowseError`, and the next task restarts it.
 
 Pi stops its MCP servers when it shuts down, which is why `close()` closes stdin and waits before it signals.
-A SIGKILLed Pi can leave its MCP server and the browser it started running.
+A SIGKILLed Pi can leave its MCP server and the browser it started running: they are NOT in Pi's process group
+(measured against Pi 1.5.2: `npm exec` and chrome-devtools-mcp each lead a group of their own, Chrome another), so
+`killpg` does not reach them. With a `chrome_profile`, the processes that hold that profile (`--user-data-dir=` for
+Chrome, `--userDataDir=` for chrome-devtools-mcp and the `npm exec` that started it) are ended before every new child
+is started and after `close()`: only those, matched on the exact profile path, never another Chrome.
 
-Failures are `BrowseError`s with a `spoken` sentence; `BrowseStopped` is the caller's own stop. No message, log line
-or error holds the API key or the page's content: tool names and timings only.
+`BrowseAgent` is what the rest of vaice depends on (the `browse` skill and the responder), so another backend can
+take Pi's place. Failures are `BrowseError`s with a `spoken` sentence; `BrowseStopped` is the caller's own stop. No
+message, log line or error holds the API key or the page's content: tool names and timings only.
 """
 import atexit
 import contextlib
@@ -48,6 +53,7 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol
 
 from vaice.conversation import write_json_atomically
 
@@ -62,6 +68,8 @@ TERM_WAIT = 3.0  # seconds between SIGTERM and SIGKILL
 KILL_WAIT = 2.0  # seconds to reap a SIGKILLed child
 WRITE_TIMEOUT = 5.0  # seconds one command may take to go into the child's stdin; then the child counts as wedged
 ASK_GRACE = 5.0  # seconds the gate waits longer than `ask_timeout_s`, so vaice's own "no" (and abort) comes first
+PS_TIMEOUT = 10.0  # seconds `ps` may take when looking for what still holds the browser profile
+MIN_PI_VERSION = (1, 5, 2)  # the Pi this module was measured against (its RPC mode and extension API)
 
 CHROME_DEVTOOLS_MCP = "chrome-devtools-mcp@1.13.0"  # pinned: its flags and tool names are what the policy names
 API_KEY_ENV = "VAICE_PI_API_KEY"  # the usual name of the child's environment variable holding the model's key
@@ -109,6 +117,89 @@ class BrowseDeclined(BrowseError):
 
 class BrowseStopped(Exception):
     """`stop()` ended the task (a barge-in, the app stopping); the browser agent was aborted."""
+
+
+class BrowseAgent(Protocol):
+    """A browser agent: does a goal in the browser and returns the answer text. `PiAgent` is the one backend."""
+
+    def run(self, goal: str, *, stop: Callable[[], bool], on_progress: Callable[[str, dict], None],
+            on_ask: Callable[[str, str, Callable[[], bool]], bool], deadline_s: float) -> str:
+        """Do `goal`. `on_progress(tool, args)` is told of each tool as it starts; `on_ask(title, message, stop)`
+        answers a question about a step that changes a page (True = go ahead) and may block, honoring its `stop`.
+        Raises `BrowseStopped` when `stop()` ended it, `BrowseDeclined` after a no, `BrowseError` otherwise."""
+        ...
+
+    def close(self) -> None:
+        """End the agent and what it started. Idempotent."""
+        ...
+
+
+# --- what is left when a child was killed
+
+
+def _profile_pids(profile: Path, listing: str) -> list[int]:
+    """The pids in `listing` (`ps -axo pid=,command=`) whose command line holds `--user-data-dir=<profile>` or
+    `--userDataDir=<profile>` as a whole argument: the path must be followed by white space or the end, so a sibling
+    such as `<profile>-2` is not matched. Never this process."""
+    pattern = re.compile(rf"(?:^|\s)--(?:user-data-dir|userDataDir)={re.escape(str(profile))}(?=\s|$)")
+    pids = []
+    for line in listing.splitlines():
+        pid, _, command = line.strip().partition(" ")
+        if pid.isdigit() and int(pid) != os.getpid() and pattern.search(command):
+            pids.append(int(pid))
+    return pids
+
+
+def end_profile_processes(profile: Path) -> list[int]:
+    """End whatever still has `profile` open (SIGTERM, then SIGKILL after `TERM_WAIT`) and return the pids found.
+    The browser a killed Pi started is not in Pi's process group, so nothing else ends it, and it holds the profile's
+    lock. Best effort: a `ps` that fails is a warning, and nothing but exact profile matches is ever signalled."""
+    try:
+        listing = subprocess.run(["ps", "-axww", "-o", "pid=,command="], capture_output=True, text=True,
+                                 stdin=subprocess.DEVNULL, timeout=PS_TIMEOUT, check=True).stdout
+    except (OSError, subprocess.SubprocessError) as exc:
+        log.warning("browse: could not look for processes holding the browser profile: %s", type(exc).__name__)
+        return []
+    pids = _profile_pids(profile, listing)
+    if not pids:
+        return []
+    log.info("browse: ending %d process(es) still holding the browser profile", len(pids))
+    _signal(pids, signal.SIGTERM)
+    give_up = time.monotonic() + TERM_WAIT
+    while time.monotonic() < give_up and any(_alive(pid) for pid in pids):
+        time.sleep(POLL_SECONDS)
+    _signal([pid for pid in pids if _alive(pid)], signal.SIGKILL)
+    return pids
+
+
+def _signal(pids: Sequence[int], sig: int) -> None:
+    for pid in pids:
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.kill(pid, sig)
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    try:  # a child of ours that ended is a zombie until reaped: not alive for this purpose
+        return os.waitpid(pid, os.WNOHANG) == (0, 0)
+    except ChildProcessError:
+        return True  # not ours: it is there
+
+
+def pi_version(command: str = "pi") -> tuple[int, ...] | None:
+    """The version `command --version` prints (`1.5.2`) as a tuple, or None when it cannot be read."""
+    try:
+        done = subprocess.run([command, "--version"], capture_output=True, text=True, stdin=subprocess.DEVNULL,
+                              timeout=PS_TIMEOUT, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    match = re.search(r"(?<![\d.])(\d+)\.(\d+)\.(\d+)(?![\d.])", f"{done.stdout}\n{done.stderr}")
+    return tuple(int(part) for part in match.groups()) if match else None
 
 
 # --- Pi's config directory
@@ -273,15 +364,19 @@ class PiAgent:
     """Drives one Pi RPC child. `run()` is thread-safe (tasks are serialized); `close()` ends the child."""
 
     def __init__(self, pi_home: Path, *, log_path: Path, command: str | Sequence[str] = "pi",
-                 ask_timeout_s: float = 60.0, env: Mapping[str, str] | None = None):
+                 ask_timeout_s: float = 60.0, env: Mapping[str, str] | None = None,
+                 chrome_profile: Path | None = None):
         """`pi_home` is a directory `write_pi_home` filled. `log_path` receives the child's stderr (0600).
         `command` is the pi executable (or a whole argv prefix). `ask_timeout_s` is how long a question gets before
-        it counts as a no. `env` is added to the child's environment: the model's API key goes here."""
+        it counts as a no. `env` is added to the child's environment: the model's API key goes here.
+        `chrome_profile` is the browser profile `write_pi_home` was given (`--userDataDir`): what still holds it is
+        ended before a new child starts and after `close()` (see the module docstring)."""
         self._home = pi_home
         self._log_path = log_path
         self._argv = [command] if isinstance(command, str) else list(command)
         self._ask_timeout = ask_timeout_s
         self._extra_env = dict(env or {})
+        self._chrome_profile = chrome_profile
         self._child: _Child | None = None
         self._closed = False
         self._registered = False
@@ -334,6 +429,8 @@ class PiAgent:
                 return child
             if child is not None:
                 child.end()  # reaps it and what it left in its group
+            if self._chrome_profile is not None:
+                end_profile_processes(self._chrome_profile)  # the browser it started is in no group of Pi's
             child = self._child = self._spawn()
             if not self._registered:
                 self._registered = True
@@ -543,6 +640,8 @@ class PiAgent:
         except subprocess.TimeoutExpired:
             log.warning("browse: the browser agent did not exit within %g seconds of its stdin closing", CLOSE_WAIT)
         child.end()  # whatever is left of its group
+        if self._chrome_profile is not None:
+            end_profile_processes(self._chrome_profile)
 
 
 def _text_of(message: dict) -> str:
