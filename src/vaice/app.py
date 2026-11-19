@@ -435,12 +435,13 @@ def _open_browse() -> PiAgent | None:
                    ask_timeout_s=CONFIRM_SECONDS + BROWSE_ASK_EXTRA_SECONDS, chrome_profile=profile)
 
 
-def _open_mcp() -> mcp_skills.McpTools | None:
+def _open_mcp(browse: bool = False) -> mcp_skills.McpTools | None:
     """Assistant mode: start the MCP servers in VAICE_MCP_CONFIG (None when it is unset) and say what each offers:
-    tool names only, never the file's `env` values."""
+    tool names only, never the file's `env` values. `browse`: the `browse` skill is offered, which is the one browser
+    path (a chrome-devtools-mcp server is skipped)."""
     if config.MCP_CONFIG is None:
         return None
-    tools = mcp_skills.start(config.MCP_CONFIG, config.MCP_TIMEOUT, config.ASSISTANT_AUTO_SECONDS)
+    tools = mcp_skills.start(config.MCP_CONFIG, config.MCP_TIMEOUT, config.ASSISTANT_AUTO_SECONDS, browse=browse)
     for name, offered in tools.summaries:
         log.info("mcp server %s: %d tools offered (%s)", name, len(offered), ", ".join(offered) or "none")
     return tools
@@ -462,8 +463,8 @@ def main() -> None:
             if config.LLAMACPP_TOOLS:
                 log.warning("VAICE_LLAMACPP_TOOLS is ignored in assistant mode: the skills run in vaice, "
                             "not on llama-server")
-            mcp_tools = _open_mcp()
-            browse_agent = _open_browse()
+            browse_agent = _open_browse()  # before the MCP servers: with it, they leave the browser to it
+            mcp_tools = _open_mcp(browse=browse_agent is not None)
             responder = AssistantResponder(memory=_open_memory(), vision=_vision_skill(),
                                            extra_skills=mcp_tools.skills if mcp_tools else (), browse=browse_agent)
             _announce_brain()

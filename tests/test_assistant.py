@@ -3274,7 +3274,8 @@ class FakeAgent:
         self.entered = threading.Event()
         self.finished = threading.Event()
 
-    def run(self, goal, *, stop, on_progress, on_ask, deadline_s):
+    def run(self, goal, *, stop, on_progress, on_ask, deadline_s, on_text=None):
+        self.on_text = on_text
         self.goals.append(goal)
         self.stops.append(stop)
         self.deadline = deadline_s
@@ -3329,13 +3330,15 @@ def end_browser_tasks():
     wait_until(browse_over)
 
 
-def browsing(script, *replies, outbox=True, **options):
+def browsing(script, *replies, outbox=True, control=False, brain=None, **options):
     """A responder with the browse skill and a fake agent, driven through the reply that starts the task (the brain
-    asks for `browse`); `replies` are the brain's later replies. The outbox is primed like a draining connection."""
+    asks for `browse`); `replies` are the brain's later replies. The outbox is primed like a draining connection.
+    `control`: the responder's own skill set (with `browser_status` and `stop_browsing`) instead of `browse` alone."""
     agent = FakeAgent(script)
-    brain = FakeBrain(ask(("browse", GOAL)), *replies)
+    brain = brain or FakeBrain(ask(("browse", GOAL)), *replies)
     confirmations = Confirmations()
-    resp = AssistantResponder("http://server", 5.0, "Be brief.", "female", Skills([browse_task.browse_skill()]), brain,
+    resp = AssistantResponder("http://server", 5.0, "Be brief.", "female",
+                              None if control else Skills([browse_task.browse_skill()]), brain,
                               confirmations, progress_seconds=0, browse=agent, **options)
     s = SimpleNamespace(resp=resp, brain=brain, agent=agent, confirmations=confirmations, turn=Turn(), outbox=None)
     BROWSERS.append(resp)
@@ -3407,30 +3410,29 @@ def test_the_result_goes_to_the_brain_as_the_tool_message_in_a_tainted_fresh_tas
     assert messages[-2]["tool_calls"][0]["function"]["name"] == "browse"
     assert tool_events(s.turn) == [("browse", BROWSE_ANSWER)]
     serve(s.outbox)
-    # the outcome is the record; the progress line ("Opening python.org.") is spoken but is not
+    # quiet until the result: nothing is spoken between the opening line and the outcome
     assert s.turn.assistant_text == f"{browse_task.WORKING} The page is called Welcome to Python dot org."
-    assert served_text(tts) == [browse_task.WORKING, "Opening python.org.",
-                                "The page is called Welcome to Python dot org."]
+    assert served_text(tts) == [browse_task.WORKING, "The page is called Welcome to Python dot org."]
 
 
-def test_progress_is_at_most_one_line_per_interval_and_only_for_opening_a_page(tts, monkeypatch):
-    now = [100.0]
-    monkeypatch.setattr(browse_task.time, "monotonic", lambda: now[0])
+def test_the_tools_a_task_uses_are_never_spoken_only_kept_for_the_status(tts):
+    release = threading.Event()
 
     def script(agent, goal, stop, on_progress, on_ask, deadline_s):
         on_progress("mcp__chrome__navigate_page", {"url": "https://news.ycombinator.com/"})
-        on_progress("mcp__chrome__new_page", {"url": "https://www.python.org/"})  # too soon
-        on_progress("mcp__chrome__take_screenshot", {})
-        on_progress("mcp__chrome__list_pages", {})
-        now[0] += browse_task.PROGRESS_LINE_SECONDS
-        on_progress("mcp__chrome__click", {"uid": "1"})  # gated steps are silent
         on_progress("mcp__chrome__new_page", {"url": "https://www.python.org/"})
-        return BROWSE_ANSWER
+        on_progress("mcp__chrome__take_snapshot", {})
+        return held_until_released(release)(agent, goal, stop, on_progress, on_ask, deadline_s)
 
-    browsing(script, answer("Done."))
+    s = browsing(script, answer("Done."))
+    wait_until(lambda: "3 tool calls" in s.resp._browser_status().detail)
+
+    status = s.resp._browser_status()
+    assert "navigate_page https://news.ycombinator.com/" in status.detail
+    assert "now on python.org" in status.speech
+    release.set()
     wait_until(browse_over)
-
-    assert served_text(tts) == [browse_task.WORKING, "Opening news.ycombinator.com.", "Opening python.org.", "Done."]
+    assert served_text(tts) == [browse_task.WORKING, "Done."]  # nothing was said while the task worked
 
 
 def test_a_gated_step_is_asked_by_a_fixed_sentence_on_the_screen_and_armed_only_once_its_audio_was_served(tts):
@@ -3504,22 +3506,6 @@ def test_a_spoken_no_stops_the_task_and_says_once_that_it_stopped(tts, heard):
     assert tool_events(s.turn) == [("browse", "declined")] and len(s.brain.calls) == 1
 
 
-def test_anything_else_ends_the_task_drops_the_question_and_is_answered_as_a_new_question(tts, heard):
-    s = browsing(asks_then_answers, answer("It is noon."))
-    armed_question(s)
-    heard.text = "What time is it?"
-    second = Turn()
-
-    frames = drive(s.resp, turn=second)
-
-    wait_until(browse_over)
-    assert s.agent.approved is False and s.agent.stops[0]()  # stopped, not refused: the agent sees BrowseStopped
-    assert s.resp.pending() is None and len(frames) == 1 and second.assistant_text == "It is noon."
-    assert tool_events(s.turn) == [("browse", "stopped")]
-    serve(s.outbox)
-    assert "Okay, I stopped there." not in " ".join(served_text(tts))
-
-
 def test_an_empty_transcript_leaves_the_question_and_the_task_alone(tts, heard):
     s = browsing(asks_then_answers, answer("Done."))
     pending = armed_question(s)
@@ -3531,32 +3517,17 @@ def test_an_empty_transcript_leaves_the_question_and_the_task_alone(tts, heard):
     assert s.resp.browsing() and pending.waiter.wait(0) is None
 
 
-def test_a_question_whose_audio_was_not_served_is_not_answerable_so_a_yes_is_a_new_question(tts, heard):
+def test_a_question_whose_audio_was_not_served_is_not_answerable_so_a_yes_is_an_ordinary_question(tts, heard):
     s = browsing(asks_then_answers, answer("Okay, hello."))
     pending = question_pending(s)
     wait_until(lambda: len(s.outbox) > 0)
     heard.text = "Yes"
 
-    drive(s.resp, turn=Turn())
+    frames = drive(s.resp, turn=Turn())
 
-    wait_until(browse_over)
-    assert pending.armed_at is None and s.agent.stops[0]()  # cancelled, as every new utterance does
-    assert pending.waiter.wait(0) is False
-
-
-def test_without_a_question_a_new_utterance_cancels_the_running_task_at_once(tts, heard):
-    def hold(agent, goal, stop, on_progress, on_ask, deadline_s):
-        agent.wait_for_stop(stop)
-
-    s = browsing(hold, answer("Hello."))
-    assert s.agent.entered.wait(5)
-    heard.text = "Hello there"
-
-    drive(s.resp, turn=Turn())
-
-    wait_until(browse_over)
-    assert s.agent.stops[0]() and tool_events(s.turn) == [("browse", "stopped")]
-    assert len(s.outbox) == 0  # nothing of the stopped task is left to be spoken
+    assert len(frames) == 1 and pending.armed_at is None  # answered by the brain, not taken for the answer
+    assert s.resp.pending() is pending and not s.agent.stops[0]() and pending.waiter.wait(0) is None
+    assert len(s.outbox) > 0  # the question's queued audio (and its arming marker) was not cleared by the utterance
 
 
 def test_the_run_button_is_the_yes_and_cancel_the_no_and_neither_runs_a_skill(tts):
@@ -3632,39 +3603,6 @@ def test_without_an_outbox_the_task_still_runs_and_records_and_a_question_is_ans
 
     assert served_text(tts) == [browse_task.WORKING]  # nothing was spoken by the task
     assert tool_events(s.turn) == [("browse", BROWSE_ANSWER)] and s.turn.assistant_text == browse_task.WORKING
-
-
-def test_progress_waits_for_a_question_to_be_spoken_and_armed(monkeypatch):
-    gate = threading.Event()
-    spoken = []
-
-    def make(text):
-        spoken.append(text)
-        slow = text == "Shall I click something on python.org?"
-        return FakeResponse([pcm_bytes(50), pcm_bytes(50)], gate=gate) if slow else FakeResponse([pcm_bytes(50)])
-
-    monkeypatch.setattr(assistant.requests, "post", FakeTTS(make))
-    outbox = Outbox()
-    outbox.poll(True)
-    confirmations = Confirmations()
-    hooks = assistant._BrowseHooks("http://server", 5.0, "female", confirmations, outbox, Turn(), lambda: False)
-    hooks._limiter = browse_task.ProgressLimiter(0)  # no spacing: this test is about order
-    hooks.progress("mcp__chrome__navigate_page", {"url": "https://www.python.org/"})  # names the host, speaks it
-    asking = start_thread(lambda: hooks.ask(CLICK_STEP[0], CLICK_STEP[1], lambda: False), "ask")
-    wait_until(lambda: "Shall I click something on python.org?" in spoken)  # the question's audio is being fetched
-    other = start_thread(lambda: hooks.progress("mcp__chrome__new_page", {"url": "https://example.com/"}), "progress")
-    time.sleep(0.2)
-    assert spoken == ["Opening python.org.", "Shall I click something on python.org?"]  # the line waits behind it
-    gate.set()
-    wait_until(lambda: has_marker(outbox))
-    assert other.join() is None
-    # the first line (1 frame), the question (3 frames), its arming marker and only then the second line (1 frame)
-    with outbox._lock:
-        kinds = ["marker" if isinstance(item, Marker) else "frame" for item in outbox._items]
-    assert kinds == ["frame", "frame", "frame", "frame", "marker", "frame"]
-    assert spoken[-1] == "Opening example.com."
-    confirmations.answer(confirmations.current().id, True)
-    assert asking.join() is True
 
 
 def test_a_background_call_ends_the_decision_drops_the_calls_after_it_and_keeps_the_chat_valid(caplog):
@@ -3749,7 +3687,7 @@ def browse_task_declined():
     return DECLINED
 
 
-def test_anything_but_a_yes_or_no_after_the_question_was_settled_still_ends_the_task_and_is_a_new_question(
+def test_anything_but_a_yes_or_no_after_the_question_was_settled_is_an_ordinary_question_and_the_task_goes_on(
         tts, monkeypatch):
     s = browsing(hold_after_approval, answer("It is noon."))
     pending = armed_question(s)
@@ -3762,8 +3700,7 @@ def test_anything_but_a_yes_or_no_after_the_question_was_settled_still_ends_the_
 
     drive(s.resp, turn=Turn())
 
-    wait_until(browse_over)
-    assert s.agent.approved is True and s.agent.stops[0]()  # a new question ends the task the click approved
+    assert s.agent.approved is True and not s.agent.stops[0]() and s.resp.browsing()  # the task goes on
     assert s.brain.calls[-1][0][-1] == {"role": "user", "content": "What time is it?"}
 
 
@@ -3850,3 +3787,220 @@ def test_a_chained_task_is_not_started_after_a_new_utterance_ended_the_chain(tts
 
     wait_until(browse_over)
     assert len(s.agent.goals) == 2 and not s.resp.browsing()
+
+
+# --- PR 3: a quiet background task that an utterance does not stop
+
+
+def held_until_released(release):
+    """A task that works until `release` is set (then answers) or it is stopped."""
+
+    def script(agent, goal, stop, on_progress, on_ask, deadline_s):
+        while not release.is_set():
+            if stop():
+                raise BrowseStopped
+            time.sleep(0.005)
+        return BROWSE_ANSWER
+
+    return script
+
+
+def test_an_ordinary_utterance_during_a_running_task_leaves_it_running_and_is_answered_by_the_brain(tts, heard):
+    release = threading.Event()
+    s = browsing(held_until_released(release), answer("Paris."))
+    assert s.agent.entered.wait(5)
+    heard.text = "What is the capital of France?"
+    second = Turn()
+
+    frames = drive(s.resp, turn=second)
+
+    assert len(frames) == 1 and second.assistant_text == "Paris."
+    assert s.brain.calls[1][0][-1] == {"role": "user", "content": "What is the capital of France?"}
+    assert not s.agent.stops[0]() and s.resp.browsing() and tool_events(s.turn) == []
+    release.set()
+    wait_until(browse_over)
+
+
+def test_an_ordinary_utterance_while_a_step_question_is_pending_leaves_it_pending_and_a_later_yes_approves_it(
+        tts, heard):
+    s = browsing(asks_then_answers, answer("It is noon."), answer("Done, the title is Welcome."))
+    pending = armed_question(s)
+    heard.text = "What time is it?"
+    second = Turn()
+
+    frames = drive(s.resp, turn=second)
+
+    assert len(frames) == 1 and second.assistant_text == "It is noon."
+    assert s.resp.pending() is pending and pending.waiter.wait(0) is None  # not dropped, not a no
+    assert not s.agent.stops[0]() and s.resp.browsing()
+    heard.text = "Yes."
+
+    assert drive(s.resp, turn=Turn()) == []  # the yes answers the question, silently
+
+    wait_until(browse_over)
+    assert s.agent.approved is True and tool_events(s.turn) == [("browse", BROWSE_ANSWER)]
+
+
+def test_the_outcome_is_spoken_and_recorded_on_the_asking_turn_after_the_user_spoke_meanwhile(tts, heard):
+    release = threading.Event()
+    s = browsing(held_until_released(release), answer("It is noon."), answer("The title is Welcome."))
+    assert s.agent.entered.wait(5)
+    s.turn.close()  # the next utterance's turn closed it, as `Conversation.start_turn` does
+    heard.text = "What time is it?"
+    second = Turn()
+    drive(s.resp, turn=second)
+
+    release.set()
+    wait_until(browse_over)
+
+    serve(s.outbox)
+    assert "The title is Welcome." in served_text(tts)
+    assert s.turn.assistant_text == f"{browse_task.WORKING} The title is Welcome."
+    assert tool_events(s.turn) == [("browse", BROWSE_ANSWER)]
+    assert second.assistant_text == "It is noon."
+
+
+def test_a_follow_up_browse_after_the_outcome_still_starts_when_the_user_spoke_during_the_task(tts, heard):
+    release = threading.Event()
+
+    def first_then_hold(agent, goal, stop, on_progress, on_ask, deadline_s):
+        if len(agent.goals) == 1:
+            return held_until_released(release)(agent, goal, stop, on_progress, on_ask, deadline_s)
+        return agent.wait_for_stop(stop)
+
+    s = browsing(first_then_hold, answer("It is noon."), ask(("browse", '{"goal": "now open example.com"}')))
+    assert s.agent.entered.wait(5)
+    heard.text = "What time is it?"
+    drive(s.resp, turn=Turn())
+
+    release.set()
+
+    wait_until(lambda: len(s.agent.goals) == 2)  # the epoch moved with the utterance; the chain must not care
+    assert s.agent.goals[1] == "now open example.com"
+    s.resp.stop_task()
+    wait_until(browse_over)
+
+
+def test_the_status_skill_reports_the_running_task_to_the_brain_as_a_tool_result(tts, heard):
+    release = threading.Event()
+
+    def script(agent, goal, stop, on_progress, on_ask, deadline_s):
+        on_progress("mcp__chrome__navigate_page", {"url": "https://www.python.org/"})
+        agent.on_text("Looking for the title")
+        return held_until_released(release)(agent, goal, stop, on_progress, on_ask, deadline_s)
+
+    s = browsing(script, ask(("browser_status", "{}")), answer("It is on python.org."), control=True)
+    wait_until(lambda: "latest words" in s.resp._browser_status().detail)
+    heard.text = "How is the browser task going?"
+    second = Turn()
+
+    frames = drive(s.resp, turn=second)
+
+    assert len(frames) == 1 and second.assistant_text == "It is on python.org."
+    report = s.brain.calls[2][0][-1]  # the tool message the brain answered from
+    assert report["role"] == "tool" and "now on python.org" in report["content"]
+    assert "the agent's latest words: Looking for the title" in report["content"]
+    assert tool_events(second)[0][0] == "browser_status" and "navigate_page https://www.python.org/" in \
+        tool_events(second)[0][1]  # the panel's detail is the fuller one
+    assert not s.agent.stops[0]() and s.resp.browsing()
+    release.set()
+    wait_until(browse_over)
+
+
+def test_the_status_shows_a_step_that_waits_for_approval_until_it_is_answered(tts):
+    s = browsing(asks_then_answers, answer("Done."), control=True)
+    armed_question(s)
+
+    assert "a step is waiting for approval: click something" in s.resp._browser_status().speech
+    s.resp.approve(s.resp.pending().id)
+    wait_until(browse_over)
+
+    assert s.resp._browser_status().speech == browse_task.NO_TASK
+
+
+def test_the_status_and_the_stop_skill_say_so_when_no_task_is_running(tts):
+    resp = AssistantResponder("http://server", 5.0, "p", "female", brain=FakeBrain(), browse=FakeAgent(None))
+
+    assert resp.skills.run("browser_status", "{}").speech == "no browser task is running"
+    assert resp.skills.run("stop_browsing", "{}").speech == "no browser task is running"
+    assert resp.stop_task() is False
+
+
+def test_the_status_and_stop_skills_are_offered_only_with_browse(tts):
+    plain = AssistantResponder("http://server", 5.0, "p", "female", brain=FakeBrain())
+    with_browse = AssistantResponder("http://server", 5.0, "p", "female", brain=FakeBrain(), browse=FakeAgent(None))
+
+    assert not {"browse", "browser_status", "stop_browsing"} & set(plain.skills.names)
+    assert {"browse", "browser_status", "stop_browsing"} <= set(with_browse.skills.names)
+
+
+def test_the_stop_skill_ends_the_task_quietly_and_the_brain_says_so(tts, heard):
+    s = browsing(held_until_released(threading.Event()), ask(("stop_browsing", "{}")), answer("Okay, it is stopped."),
+                 control=True)
+    assert s.agent.entered.wait(5)
+    heard.text = "Stop the browser task."
+    second = Turn()
+
+    frames = drive(s.resp, turn=second)
+
+    wait_until(browse_over)
+    assert len(frames) == 1 and second.assistant_text == "Okay, it is stopped."
+    assert s.brain.calls[2][0][-1]["content"] == "stopped the browser task"
+    assert s.agent.stops[0]() and not s.resp.browsing()
+    assert tool_events(s.turn) == [("browse", "stopped")]  # quiet: nothing was spoken for the stop itself
+    assert served_text(tts) == [browse_task.WORKING, "Okay, it is stopped."]
+
+
+def test_a_second_browse_call_while_one_runs_is_refused_with_the_fixed_sentence_and_starts_nothing(tts, heard):
+    release = threading.Event()
+    s = browsing(held_until_released(release), ask(("browse", '{"goal": "open example.com"}')), control=True)
+    assert s.agent.entered.wait(5)
+    heard.text = "Now open example.com too."
+    second = Turn()
+
+    drive(s.resp, turn=second)
+
+    assert second.assistant_text == browse_task.BUSY and " ".join(served_text(tts)[1:]) == browse_task.BUSY
+    assert len(s.agent.goals) == 1 and s.resp.browsing() and not s.agent.stops[0]()
+    release.set()
+    wait_until(browse_over)
+
+
+def test_a_browse_call_after_the_task_stopped_is_a_new_task(tts, heard):
+    s = browsing(held_until_released(threading.Event()), ask(("stop_browsing", "{}")), answer("Stopped."),
+                 ask(("browse", '{"goal": "open example.com"}')), control=True)
+    assert s.agent.entered.wait(5)
+    drive(s.resp, turn=Turn())
+    wait_until(browse_over)
+    heard.text = "Open example.com instead."
+
+    drive(s.resp, turn=Turn())
+
+    wait_until(lambda: len(s.agent.goals) == 2)
+    assert s.agent.goals[1] == "open example.com"
+    s.resp.stop_task()
+    wait_until(browse_over)
+
+
+def test_new_conversation_ends_the_task_even_while_its_outcome_is_being_phrased(tts):
+    class GatedBrain(FakeBrain):
+        def __init__(self, *replies):
+            super().__init__(*replies)
+            self.entered, self.release = threading.Event(), threading.Event()
+
+        def complete(self, messages, tools):
+            if messages[-1]["role"] == "tool":  # the outcome's call
+                self.entered.set()
+                assert self.release.wait(5)
+            return super().complete(messages, tools)
+
+    brain = GatedBrain(ask(("browse", GOAL)), answer("The title is Welcome."))
+    s = browsing(navigate_then_answer, brain=brain)
+    assert brain.entered.wait(5) and not s.resp.browsing()  # the agent is done: nothing to stop, but the outcome waits
+
+    s.resp.clear_pending()
+    brain.release.set()
+    wait_until(browse_over)
+
+    serve(s.outbox)
+    assert served_text(tts) == [browse_task.WORKING]  # the outcome of the old conversation is not spoken

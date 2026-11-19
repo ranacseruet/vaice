@@ -10,9 +10,10 @@ that long after its question was fully spoken (`AssistantResponder._countdown`, 
 `approve`, so it is exactly as atomic as a click). A call approved by a click or a countdown runs outside any reply,
 so its task continues on a daemon thread of its own (`_continue`) and the outcome is spoken through the `Outbox` that
 the handler's idle emit() serves (see `outbox.py`). The `browse` skill (`VAICE_BROWSE`) is the same machinery with a
-longer task: the reply says one line and ends, a browser agent works on a daemon thread (`_browse`), speaks its
-progress and its questions through the outbox, and when it has finished its answer goes back to the brain as the tool
-result, so the brain phrases the outcome (`_continue`).
+longer task: the reply says one line and ends, a browser agent works on a daemon thread (`_browse`) and speaks only
+its step questions through the outbox, and when it has finished its answer goes back to the brain as the tool result,
+so the brain phrases the outcome (`_continue`). A new utterance does not stop it: it is an ordinary reply while the
+task runs, and `browser_status` / `stop_browsing` are how the user asks about it and ends it.
 
 Threading follows `LlamaCppResponder`: `respond()` starts one daemon thread that does all the blocking
 work and hands frames to the generator through a queue, so fastrtc may resume the generator from any
@@ -535,22 +536,31 @@ def _continue(url: str, timeout: float, voice_name: str, skills: Skills, brain: 
             confirmations.take(question.id)
 
 
-class _BrowseHooks:
-    """What the browser agent calls while it works (`BrowseAgent.run`'s `on_progress` and `on_ask`), on the task's own
-    thread: it speaks through the `outbox` (nothing is spoken without one) and asks through `confirmations`.
+@dataclass
+class _BrowseRun:
+    """The running browser task as the responder holds it: its cancel event (the Stop button, `stop_browsing`, "New
+    conversation", the app ending) and what it has reported about itself (`browser_status`). Kept until the whole task
+    is over, its outcome included; `status.ended` says whether the agent still works."""
 
-    Every spoken unit is a sink of its own (`_OutboxSink` captures the outbox's generation, and a clear, such as the
-    speech start of the user's next utterance, makes the one in use stale for good). A progress line (`Opening
-    python.org.`, at most one per `PROGRESS_LINE_SECONDS`) and a question are spoken but not recorded on the asking
-    turn: only the first line of the task and its outcome are the conversation. One lock makes a progress line wait for
-    a question's audio AND its arming marker, so nothing is queued between them."""
+    cancelled: threading.Event
+    status: browse_task.BrowseStatus
+
+
+class _BrowseHooks:
+    """What the browser agent calls while it works (`BrowseAgent.run`'s `on_progress`, `on_text` and `on_ask`), on the
+    task's own thread: it keeps the task's `status` and speaks through the `outbox` (nothing is spoken without one)
+    and asks through `confirmations`.
+
+    The task is quiet: only a step question (and the task's last words, `say`) is spoken. Every spoken unit is a sink
+    of its own (`_OutboxSink` captures the outbox's generation, and a clear, such as the speech start of the user's
+    next utterance, makes the one in use stale for good). A question is spoken but not recorded on the asking turn:
+    only the first line of the task and its outcome are the conversation."""
 
     def __init__(self, url: str, timeout: float, voice_name: str, confirmations: Confirmations, outbox: Outbox | None,
-                 turn: Turn, stop: Callable[[], bool]):
+                 turn: Turn, stop: Callable[[], bool], status: browse_task.BrowseStatus):
         self._url, self._timeout, self._voice = url, timeout, voice_name
         self._confirmations, self._outbox, self._turn, self._stop = confirmations, outbox, turn, stop
-        self._limiter = browse_task.ProgressLimiter()
-        self._lock = threading.Lock()
+        self._status = status
         self._host: str | None = None  # the page most recently opened: a question names it
 
     def say(self, text: str, record: bool = False, strict: bool = False) -> _OutboxSink | None:
@@ -573,14 +583,15 @@ class _BrowseHooks:
         return sink
 
     def progress(self, tool: str, args: dict) -> None:
+        """A browser tool starts: nothing is said, but the status keeps it and a question can name the page."""
         host = browse_task.host_of(args)
         if host:
             self._host = host
-        phrase = browse_task.progress_phrase(tool, args)
-        if phrase is None or self._stop() or not self._limiter.allow():
-            return
-        with self._lock, contextlib.suppress(_Stopped):  # the task is ending: the agent notices its own stop
-            self.say(phrase)
+        self._status.tool(tool, args)
+
+    def text(self, text: str) -> None:
+        """The agent's own words between tools: for the status only, never spoken or recorded."""
+        self._status.text(text)
 
     def ask(self, title: str, message: str, ask_stop: Callable[[], bool]) -> bool:
         """A step that changes a page needs a yes (`browse.GATE_POLICY`). The question is a fixed sentence naming the
@@ -595,27 +606,33 @@ class _BrowseHooks:
         # a Turn of its own: the step's call is not the conversation's (its name would be replayed to the brain)
         question = browse_task.step_question(title, browse_task.host_of(arguments) or self._host)
         pending = Pending(title, message, question, "", [], Turn(), voice=True, waiter=waiter)
-        with self._lock:
-            self._confirmations.ask(pending)  # on the screen at once
-            try:
-                sink = self.say(pending.question, strict=True)
-            except _Stopped:
-                self._confirmations.take(pending.id)
-                return False
-            except Exception:  # noqa: BLE001 - its /tts failed partway: a question cut off was never heard, so a no
-                log.warning("browse dropped a question: its speech failed")
-                self._confirmations.take(pending.id)
-                return False
-            if self._outbox is None:  # nothing can be spoken: answerable from the screen only
-                self._confirmations.arm(pending.id)
-            elif sink is None or sink.frames == 0:  # no audio: never heard, so nobody can say yes
-                log.warning("browse dropped a question: it produced no audio")
-                self._confirmations.take(pending.id)
-                return False
-            else:  # armed when the handler reaches this marker, i.e. once the question's audio was served
-                self._outbox.put_marker(partial(self._confirmations.arm, pending.id),
-                                        on_drop=partial(self._confirmations.take, pending.id),
-                                        generation=sink.generation)
+        self._status.asking(title)
+        try:
+            return self._ask(pending, waiter, ask_stop)
+        finally:
+            self._status.asking(None)
+
+    def _ask(self, pending: Pending, waiter: Waiter, ask_stop: Callable[[], bool]) -> bool:
+        self._confirmations.ask(pending)  # on the screen at once
+        try:
+            sink = self.say(pending.question, strict=True)
+        except _Stopped:
+            self._confirmations.take(pending.id)
+            return False
+        except Exception:  # noqa: BLE001 - its /tts failed partway: a question cut off was never heard, so a no
+            log.warning("browse dropped a question: its speech failed")
+            self._confirmations.take(pending.id)
+            return False
+        if self._outbox is None:  # nothing can be spoken: answerable from the screen only
+            self._confirmations.arm(pending.id)
+        elif sink is None or sink.frames == 0:  # no audio: never heard, so nobody can say yes
+            log.warning("browse dropped a question: it produced no audio")
+            self._confirmations.take(pending.id)
+            return False
+        else:  # armed when the handler reaches this marker, i.e. once the question's audio was served
+            self._outbox.put_marker(partial(self._confirmations.arm, pending.id),
+                                    on_drop=partial(self._confirmations.take, pending.id),
+                                    generation=sink.generation)
         while True:
             answer = waiter.wait(POLL_SECONDS)
             if answer is not None:
@@ -628,27 +645,30 @@ class _BrowseHooks:
 
 def _browse(url: str, timeout: float, voice_name: str, skills: Skills, brain: ChatBrain,
             confirmations: Confirmations, pending: Pending, agent: BrowseAgent, seconds: float,
-            cancelled: threading.Event, outbox: Outbox | None, new_task: Callable[[], Task],
-            done: Callable[[], None], start_next: Callable[[Pending], None] | None = None) -> None:
+            cancelled: threading.Event, status: browse_task.BrowseStatus, outbox: Outbox | None,
+            new_task: Callable[[], Task], done: Callable[[], None],
+            start_next: Callable[[Pending], None] | None = None) -> None:
     """Daemon thread: a `browse` task (`pending`: the brain's call, carrying the chat so far), started after the reply
-    that said `WORKING` ended. The agent works for at most `seconds`; its progress and its questions are spoken
-    through `outbox` (`_BrowseHooks`). When it has answered, the answer goes to the brain as the call's result in a
-    fresh task (tainted, as after any tool) and `_continue` records and speaks what the brain makes of it. Every other
-    end is recorded on the asking turn and spoken once: a stop (a new utterance, "New conversation", the Stop button,
-    the app ending) quietly, a refusal and a failure with their own sentence. Takes only plain data, never the
-    responder; `done` runs last, whatever happened. `start_next` starts the task the brain asks for after this one's
-    answer (see `_continue`; None refuses it)."""
+    that said `WORKING` ended. The agent works for at most `seconds`, quietly: only its step questions are spoken
+    through `outbox` (`_BrowseHooks`), and `status` keeps what it reports for `browser_status`. A new utterance does
+    not stop it. When it has answered, the answer goes to the brain as the call's result in a fresh task (tainted, as
+    after any tool) and `_continue` records and speaks what the brain makes of it, on the asking turn however many
+    turns came since. Every other end is recorded on the asking turn and spoken once: a stop (the Stop button,
+    `stop_browsing`, "New conversation", the app ending) quietly, a refusal and a failure with their own sentence.
+    Takes only plain data, never the responder; `done` runs last, whatever happened. `start_next` starts the task the
+    brain asks for after this one's answer (see `_continue`; None refuses it)."""
 
     def stop() -> bool:
         return cancelled.is_set() or lifecycle.stopping.is_set()
 
     turn = pending.turn
-    hooks = _BrowseHooks(url, timeout, voice_name, confirmations, outbox, turn, stop)
+    hooks = _BrowseHooks(url, timeout, voice_name, confirmations, outbox, turn, stop, status)
     try:
         goal = browse_task.goal_of(pending.arguments)
         started = time.monotonic()
         try:
-            answer = agent.run(goal, stop=stop, on_progress=hooks.progress, on_ask=hooks.ask, deadline_s=seconds)
+            answer = agent.run(goal, stop=stop, on_progress=hooks.progress, on_ask=hooks.ask, deadline_s=seconds,
+                               on_text=hooks.text)
         except BrowseStopped:
             log.info("browse stopped after %.1fs", time.monotonic() - started)
             turn.add_tool_event(pending.name, pending.arguments, "stopped")
@@ -664,6 +684,8 @@ def _browse(url: str, timeout: float, voice_name: str, skills: Skills, brain: Ch
             turn.add_tool_event(pending.name, pending.arguments, f"failed: {type(exc).__name__}")
             _tell(hooks, browse_task.FAILED, stop)
             return
+        finally:
+            status.end()  # the agent is done: not "running" any more, so the outcome's own `browse` call is no clash
         if stop():
             return
         log.info("browse finished in %.1fs", time.monotonic() - started)
@@ -686,20 +708,19 @@ def _tell(hooks: _BrowseHooks, text: str, stop: Callable[[], bool]) -> None:
 def _decision(prompt: str, history: Sequence[Message], transcript: str, skills: Skills, brain: ChatBrain,
               confirmations: Confirmations, turn: Turn, stop: Callable[[], bool],
               notes: Sequence[str] = (), new_task: Callable[[], Task] = Task.start,
-              cancel_task: Callable[[], None] | None = None, deferred: Pending | None = None) -> Decision:
+              deferred: Pending | None = None) -> Decision:
     """What to say to `transcript`. A request waiting for confirmation is settled first, and only by the
     exact words of `spoken_answer`: yes runs it (that utterance is no question for the brain), no cancels
     it, anything else drops it and is an ordinary question. A request that is not `voice` (a shell command
     that is not provably harmless) survives a yes: it is told to use the button, and stays pending.
 
     A question of a running browser task (`Pending.waiter`) is settled by the same words, but nothing runs: yes lets the
-    task go on and no stops it, each with nothing said here (the task says its own words). `cancel_task` is passed
-    when `respond()` left the running task alone for this very reason: anything that is not an answer ends it first
-    (before the request is taken, so the task sees a stop, not a refusal), as every new utterance does. `deferred` is
+    task go on and no stops it, each with nothing said here (the task says its own words). Anything else is an
+    ordinary question: the task keeps running and its question STAYS pending (not dropped, not a no), so a later yes
+    still answers it; an utterance that is not an armed whole-utterance yes or no never touches it. `deferred` is
     the question `respond()` saw then: transcription takes a while, and a click or the request's expiry may have
     settled it meanwhile (the task has its answer already), so a spoken yes or no that finds it gone is still
-    the answer to that question, said before: nothing is left to do, and it must not cancel the task the click just
-    approved. Anything else still ends the task and is a new question."""
+    the answer to that question, said before: nothing is left to do and nothing is said."""
     pending = confirmations.current()
     gone = deferred is not None and (pending is None or pending.id != deferred.id)
     if gone and spoken_answer(transcript) is not None:
@@ -712,13 +733,7 @@ def _decision(prompt: str, history: Sequence[Message], transcript: str, skills: 
             log.info("assistant browse question answered by voice: %s (%s)", answer,
                      "settled" if settled is not None else "already settled")
             return Decision("")
-    if cancel_task is not None:
-        cancel_task()
-    if pending is not None and pending.waiter is not None:
-        confirmations.take(pending.id)
-        log.info("assistant dropped the question of the browser task: not confirmed (armed: %s)",
-                 pending.armed_at is not None)
-        pending = None
+        pending = None  # an ordinary question: the browser task's question stays pending, untouched
     elif pending is not None:
         if not pending.voice and pending.armed_at is not None and spoken_answer(transcript) == "yes":
             return Decision(NEEDS_BUTTON)
@@ -742,7 +757,6 @@ def _work(url: str, timeout: float, prompt: str, voice_name: str, skills: Skills
           confirmations: Confirmations, audio: AudioFrame, history: Sequence[Message], turn: Turn,
           out: queue.Queue, cancelled: threading.Event, progress_seconds: float = 0.0,
           notes: Sequence[str] = (), new_task: Callable[[], Task] = Task.start,
-          cancel_task: Callable[[], None] | None = None,
           start_browse: Callable[[Pending], None] | None = None,
           deferred: Pending | None = None) -> None:
     """Daemon thread: one reply. Puts `(rate, frame, text so far)` tuples, then an exception if the reply
@@ -752,9 +766,8 @@ def _work(url: str, timeout: float, prompt: str, voice_name: str, skills: Skills
     While the decision is made, a `_Progress` thread may speak a filler (frames with the text `""`, ahead of
     everything this thread queues for the answer); it is not part of what is recorded.
 
-    `cancel_task` and `deferred` are `_decision`'s (see there). A reply whose decision is a `background` skill ends
-    after its line was spoken: `start_browse` then starts the task (only a reply that spoke its line, never a
-    stopped one)."""
+    `deferred` is `_decision`'s (see there). A reply whose decision is a `background` skill ends after its line was
+    spoken: `start_browse` then starts the task (only a reply that spoke its line, never a stopped one)."""
 
     def stop() -> bool:
         return cancelled.is_set() or lifecycle.stopping.is_set()
@@ -775,7 +788,7 @@ def _work(url: str, timeout: float, prompt: str, voice_name: str, skills: Skills
             progress.start()
             try:
                 decision = _decision(prompt, history, transcript, skills, brain, confirmations, turn, stop, notes,
-                                     new_task, cancel_task, deferred)
+                                     new_task, deferred)
             except BrainError as exc:  # audible first: its sentence is spoken below, then the error is raised
                 log.warning("assistant brain failed: %s", exc)
                 decision, failure = Decision(exc.spoken), exc
@@ -863,8 +876,14 @@ class AssistantResponder:
         self.memory = memory  # the user's notes (None: memory is off); the UI's Memory panel reads it
         self._browse_agent = browse  # the `browse` skill is offered with one (VAICE_BROWSE); closed by `main()`
         self._browse_seconds = browse_seconds
+        self._task_lock = threading.Lock()
+        self._browsing: _BrowseRun | None = None  # the browser task, until its outcome is spoken (the Stop button)
+        # `browse` with its busy check, `browser_status` and `stop_browsing`: offered together, only with an agent
+        browse_skills = browse_task.browse_skills(busy=self.browsing, status=self._browser_status,
+                                                  stop=self._stop_browsing) if browse is not None else ()
         self.skills = skills or default_skills(shell=config.ASSISTANT_SHELL, memory=memory, vision=vision,
-                                               extra=extra_skills, browse=browse is not None)
+                                               extra=extra_skills, browse=browse is not None,
+                                               browse_skills=browse_skills)
         self._brain = brain or _default_brain(url, timeout)
         self._confirmations = Confirmations() if confirmations is None else confirmations
         self._progress_seconds = progress_seconds
@@ -874,9 +893,7 @@ class AssistantResponder:
         self._runs_lock = threading.Lock()
         self._outbox: Outbox | None = None  # where a continuation speaks (see `attach_outbox`)
         self._task_cancel: threading.Event | None = None  # the running continuation's; one task at a time
-        self._task_lock = threading.Lock()
         self._task_epoch = 0  # bumped by every `_cancel_task`: an approval begun before it must not continue
-        self._browsing: threading.Event | None = None  # the running browser task's cancel event (the Stop button)
 
     def attach_outbox(self, outbox: Outbox) -> None:
         """Where the outcome of a call approved by a click or an `auto` countdown is spoken: no reply is in flight
@@ -947,61 +964,92 @@ class AssistantResponder:
             daemon=True,
         ).start()
 
-    def _start_browse(self, pending: Pending, epoch: int, chain: int = 1) -> None:
-        """Start the `browse` task the reply that spoke its line decided on (`pending`: the brain's call). One task at
-        a time, like `_start_continuation`: a running one is cancelled, and nothing starts when `epoch` is stale (a new
-        utterance or "New conversation" came since the reply began) or the app is ending, checked under the task
-        lock. The task's continuation after the answer is a fresh `Task` (its own budget and time), not the reply's.
-        `chain` counts the tasks this utterance has led to, this one included: when the brain asks for another after
-        the answer, it starts through here with `chain + 1`, up to `browse_task.MAX_TASKS`. It runs on the running
-        task's own thread, after that task's last words: the registration below ends it (its cancel event is set, which
-        nothing reads any more) and `_browse_done` leaves the new task's registration alone."""
+    def _start_browse(self, pending: Pending, epoch: int | None, chain: int = 1,
+                      parent: threading.Event | None = None) -> None:
+        """Start the `browse` task the reply that spoke its line decided on (`pending`: the brain's call). The task
+        has a registration of its own (`_browsing`), apart from the continuation's (`_task_cancel`): a new utterance
+        does not stop it. Nothing starts when `epoch` is stale ("New conversation" or a newer reply's cancel came since
+        the reply began) or the app is ending, or when `parent` (the task this one follows) was cancelled, checked under
+        the task lock; and one that is still running is never replaced (the brain's call was refused before this, see
+        `browse_task.browse_skill`; this is the race backstop). The task's continuation after the answer is a fresh
+        `Task` (its own budget and time), not the reply's. `chain` counts the tasks this utterance has led to, this one
+        included: when the brain asks for another after the answer, it starts through here with `chain + 1`, up to
+        `browse_task.MAX_TASKS`, on the running task's own thread after its last words, checked against its cancel
+        event (`parent`) and not the epoch, which every utterance since has moved."""
         if self._browse_agent is None:
             return
         cancelled = threading.Event()
+        status = browse_task.BrowseStatus(browse_task.goal_of(pending.arguments))
         with self._task_lock:
-            if epoch != self._task_epoch or lifecycle.stopping.is_set():
+            if (epoch is not None and epoch != self._task_epoch) or (parent is not None and parent.is_set()) \
+                    or lifecycle.stopping.is_set():
                 return
-            if self._task_cancel is not None:
-                self._task_cancel.set()
-            self._task_cancel = self._browsing = cancelled
+            if self._live(self._browsing):
+                log.warning("assistant did not start a browser task: one is running")
+                return
+            run = self._browsing = _BrowseRun(cancelled, status)
         pending.task = None
         threading.Thread(
             target=_browse,
             args=(self._url, self._timeout, self._voice, self.skills, self._brain, self._confirmations, pending,
-                  self._browse_agent, self._browse_seconds, cancelled, self._outbox,
-                  partial(Task.start, self._max_steps, self._task_seconds), partial(self._browse_done, cancelled),
-                  partial(self._start_browse, epoch=epoch, chain=chain + 1)
+                  self._browse_agent, self._browse_seconds, cancelled, status, self._outbox,
+                  partial(Task.start, self._max_steps, self._task_seconds), partial(self._browse_done, run),
+                  partial(self._start_browse, epoch=None, chain=chain + 1, parent=cancelled)
                   if chain < browse_task.MAX_TASKS else None),
             name="vaice-assistant-browse",
             daemon=True,
         ).start()
 
-    def _browse_done(self, cancelled: threading.Event) -> None:
+    def _browse_done(self, run: _BrowseRun) -> None:
         with self._task_lock:
-            if self._browsing is cancelled:
+            if self._browsing is run:
                 self._browsing = None
 
-    def browsing(self) -> bool:
-        """Whether a browser task is running (the UI shows its Stop button)."""
-        with self._task_lock:
-            return self._browsing is not None and not self._browsing.is_set()
+    @staticmethod
+    def _live(run: "_BrowseRun | None") -> bool:
+        """Whether `run` is a browser agent still at work (not stopped, not finished)."""
+        return run is not None and not run.cancelled.is_set() and not run.status.ended
 
-    def stop_task(self) -> None:
-        """The Stop button: end the running task (what it queued to say is dropped, like a new utterance's)."""
-        self._cancel_task()
+    def browsing(self) -> bool:
+        """Whether a browser task is running (the UI shows its Stop button; a second `browse` call is refused)."""
+        with self._task_lock:
+            return self._live(self._browsing)
+
+    def stop_task(self) -> bool:
+        """The Stop button and the `stop_browsing` skill: end the running browser task (what it queued to say is
+        dropped). False when none is running."""
+        with self._task_lock:
+            run = self._browsing
+            if not self._live(run):
+                return False
+            run.cancelled.set()
+        if self._outbox is not None:
+            self._outbox.clear()  # after the cancel: whatever the task was about to queue is refused by its own stop
+        return True
+
+    def _browser_status(self) -> SkillResult:
+        with self._task_lock:
+            run = self._browsing
+            live = self._live(run)
+        return run.status.result() if live else SkillResult(browse_task.NO_TASK)
+
+    def _stop_browsing(self) -> SkillResult:
+        return SkillResult(browse_task.STOPPED if self.stop_task() else browse_task.NO_TASK)
 
     def _cancel_task(self) -> int:
-        """Stop the running continuation or browser task, if any, and drop what it queued: it is no longer wanted.
-        Returns the new epoch, which a reply that goes on to start a task checks (see `_start_browse`)."""
+        """Stop the running continuation (the task a click or an `auto` run started), if any, and drop what it queued:
+        it is no longer wanted. The browser task is not touched: it has its own registration, and a new utterance does
+        not stop it. The outbox is cleared only when a continuation was running, so what the browser task has queued (a
+        step question's audio and the marker that arms it) stays. Returns the new epoch, which a reply that goes on to
+        start a task checks (see `_start_browse`)."""
         with self._task_lock:
             self._task_epoch += 1
             epoch = self._task_epoch
             cancelled, self._task_cancel = self._task_cancel, None
         if cancelled is not None:
             cancelled.set()
-        if self._outbox is not None:
-            self._outbox.clear()  # after the cancel: whatever it was about to queue is refused by its own stop check
+            if self._outbox is not None:
+                self._outbox.clear()  # after the cancel: whatever it was about to queue is refused by its own stop
         return epoch
 
     def cancel(self, pending_id: str) -> None:
@@ -1011,12 +1059,19 @@ class AssistantResponder:
 
     def clear_pending(self) -> None:
         """"New conversation": a request from the old one must not be approvable, a command a click started for
-        it stops, and so does the continuation that followed one (its speech is dropped)."""
+        it stops, and so does the continuation that followed one (its speech is dropped). The browser task ends too,
+        whatever it is doing, its outcome included."""
         self._confirmations.clear()
         with self._runs_lock:
             for cancel in self._runs:
                 cancel.set()
         self._cancel_task()
+        with self._task_lock:
+            run = self._browsing
+            if run is not None:
+                run.cancelled.set()
+        if run is not None and self._outbox is not None:
+            self._outbox.clear()
 
     def _countdown(self, pending_id: str) -> None:
         """Daemon thread: run the armed `auto` request `pending_id` when its time is up. It ends quietly as soon as
@@ -1037,19 +1092,12 @@ class AssistantResponder:
                 return
 
     def respond(self, audio: AudioFrame, history: Sequence[Message], turn: Turn) -> Iterator[AudioFrame]:
-        # A new utterance ends the task a click started or the browser task, and what it had queued to say, at once. Not
-        # while the browser task waits for an answer: the utterance may be that answer, which only its transcript tells
-        # (`_decision`, which ends the task itself when it is anything else; `cancel_task` is that).
+        # A new utterance ends the task a click started, and what it had queued to say, at once. It does not end the
+        # browser task: this is an ordinary reply while that goes on (`_decision` leaves its question alone unless the
+        # utterance is the answer, which only its transcript tells; `deferred` is that question as it is now).
+        epoch = self._cancel_task()
         current = self._confirmations.current()
         deferred = current if current is not None and current.waiter is not None else None  # kept for `_decision`
-        if deferred is not None:
-            with self._task_lock:
-                epoch = [self._task_epoch]
-        else:
-            epoch = [self._cancel_task()]
-
-        def cancel_task() -> None:
-            epoch[0] = self._cancel_task()
 
         chunks: queue.Queue = queue.Queue()
         cancelled = threading.Event()
@@ -1059,8 +1107,7 @@ class AssistantResponder:
             args=(self._url, self._timeout, self._prompt, self._voice, self.skills, self._brain,
                   self._confirmations, audio, list(history), turn, chunks, cancelled, self._progress_seconds,
                   notes, partial(Task.start, self._max_steps, self._task_seconds),
-                  cancel_task if deferred is not None else None,
-                  lambda pending: self._start_browse(pending, epoch[0]), deferred),
+                  lambda pending: self._start_browse(pending, epoch), deferred),
             name="vaice-assistant",
             daemon=True,
         ).start()

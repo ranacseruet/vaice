@@ -30,7 +30,7 @@ import numpy as np
 import requests
 import scoring
 
-from vaice import config
+from vaice import browse_task, config
 from vaice.brain import ChatBrain
 from vaice.conversation import Turn, tool_entry
 from vaice.memory import Memory
@@ -88,6 +88,7 @@ def vision_stub(args: dict) -> str:
 
 
 VISION_STUBS = {"look_at_screen": vision_stub}
+BROWSER_STATUS_STUB = "the browser task is running: open python.org; it has run for 20 seconds; now on python.org"
 TRANSCRIPT_WAIT = 5.0  # the interleaved path's transcript is reported after the reply; wait this long for it
 
 
@@ -234,7 +235,8 @@ def stub_skills(shell: bool = False, memory: Memory | None = None, vision: bool 
     stubbed to always ask, so no check of the machine (is the app running?) is made. `shell` adds `run_shell`,
     `vision` adds `look_at_screen` (its stub answers from `VISION_STUBS`: no screenshot is taken, nothing is sent),
     `browse` adds `browse` (the real definition: it is a background skill that only validates its goal here, so no
-    browser task is started and nothing is run).
+    browser task is started and nothing is run) and the two that ask about and end it, `browser_status` and
+    `stop_browsing` (their stubs answer with a fixed text).
 
     `memory` adds the memory skills, which stay real: they only touch that store, which must be in memory only
     (no path), so an eval can never read or write the app's own `memory.json`."""
@@ -243,6 +245,9 @@ def stub_skills(shell: bool = False, memory: Memory | None = None, vision: bool 
     answers = {**ACTION_STUBS, **SHELL_STUBS, **VISION_STUBS}
     # the real definition, over a brain that is never asked: the stub replaces the skill's `run`
     screen = vision_skill(ChatBrain.helper("http://stub.invalid/v1", 1), "stub") if vision else None
+    # the real definitions of `browse`, `browser_status` and `stop_browsing`; the last two answer with a fixed text
+    control = browse_task.browse_skills(busy=None, status=lambda: SkillResult(BROWSER_STATUS_STUB),
+                                        stop=lambda: SkillResult(browse_task.STOPPED)) if browse else ()
     return Skills([
         skill if skill.name not in answers and skill.name not in SKILL_STUBS else
         replace(skill, run_stoppable=None,
@@ -250,7 +255,8 @@ def stub_skills(shell: bool = False, memory: Memory | None = None, vision: bool 
                 if skill.name in answers else (lambda _args, text=SKILL_STUBS[skill.name]: SkillResult(text)),
                 **({"ask": lambda _args, name=skill.name: f"Shall I run {name.replace('_', ' ')}?"}
                    if skill.kind == "confirm" else {}))
-        for skill in default_skills(shell=shell, memory=memory, vision=screen, browse=browse).skills])
+        for skill in default_skills(shell=shell, memory=memory, vision=screen, browse=browse,
+                                    browse_skills=control).skills])
 
 
 def case_memory(case: dict) -> Memory:

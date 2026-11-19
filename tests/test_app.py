@@ -1029,8 +1029,14 @@ def _mcp(monkeypatch, tmp_path, mode="assistant", fake=None):
     monkeypatch.setattr(app.config, "MCP_CONFIG", tmp_path / "mcp.json")
     monkeypatch.setattr(app.config, "MCP_TIMEOUT", 12.5)
     monkeypatch.setattr(app.config, "ASSISTANT_AUTO_SECONDS", 7.0)
-    monkeypatch.setattr(app.mcp_skills, "start",
-                        lambda path, timeout, auto: started.append((path, timeout, auto)) or fake)
+    fake.browse_flags = []  # the `browse` argument each start() got
+
+    def start(path, timeout, auto, browse=False):
+        started.append((path, timeout, auto))
+        fake.browse_flags.append(browse)
+        return fake
+
+    monkeypatch.setattr(app.mcp_skills, "start", start)
     monkeypatch.setattr(app.config, "MODE", mode)
     return fake, started
 
@@ -1863,3 +1869,14 @@ def test_a_browser_task_shows_a_stop_button_that_ends_it_and_hides_at_once():
     assert shown[-2] == SHOWN
 
     assert stop_fn() == (HIDDEN, "") and responder.stopped == 1  # hidden at once, the blank `seen` redraws
+
+
+def test_the_mcp_servers_leave_the_browser_to_browse_only_when_the_skill_is_offered(browse_on, monkeypatch, tmp_path):
+    fake, _ = _mcp(monkeypatch, tmp_path)
+    assert _assistant_main(monkeypatch, tmp_path)
+    assert fake.browse_flags == [True]  # an agent came back: browse is offered
+
+    monkeypatch.setattr(app.shutil, "which", lambda name: None)  # no `pi`: not offered, the servers are unchanged
+    fake, _ = _mcp(monkeypatch, tmp_path)
+    assert _assistant_main(monkeypatch, tmp_path)
+    assert fake.browse_flags == [False]
