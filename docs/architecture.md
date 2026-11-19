@@ -207,6 +207,8 @@ src/vaice/
   mcp_skills.py     Assistant mode, opt-in (the `mcp` extra): MCP servers over stdio as skills, with a per-tool approval policy
   confirm.py        Assistant mode: the one pending request of a confirm skill, the spoken yes/no test and its 60 s expiry
   shell.py          Assistant mode, opt-in: the run_shell skill: how a command may be approved, and the runner (timeout, output cap, process group)
+  browse.py         Assistant mode, not wired yet: PiAgent drives the Pi coding agent (`pi --mode rpc`) with a goal, through chrome-devtools-mcp; its config directory, child process and abort/kill handling
+  browse_gate.ts    The Pi extension browse.py loads: the approval policy for the browser's tools (read-only run, page-changing ask, the rest ask); shipped in the package
   voice.py          Assistant mode: speakable() cleans text for speech, sentences() splits it for /tts
   audio.py          Mic frame → mono PCM16 at the model's rate (resampled via scipy) and back to float32
   responders/
@@ -216,6 +218,7 @@ src/vaice/
     assistant.py    Assistant mode: transcribe, brain + skills loop, streamed /tts per sentence, on one daemon thread
 tests/
   fake_realtime.py  Fake /v1/realtime WebSocket + HTTP server for testing LlamaCppResponder end to end
+  fixtures/fake_pi.py  A fake `pi --mode rpc` (scripted scenarios, records the commands it gets) for tests/test_browse.py
 evals/
   run.py            Live tool-calling eval against a real llama-server (run by hand; see evals/README.md)
   scoring.py        Pure scoring and aggregation for the eval (unit-tested)
