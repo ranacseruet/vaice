@@ -3982,19 +3982,22 @@ def test_a_browse_call_after_the_task_stopped_is_a_new_task(tts, heard):
     wait_until(browse_over)
 
 
+class OutcomeGatedBrain(FakeBrain):
+    """A brain whose call that phrases a task's outcome (the last message is a tool result) waits for `release`."""
+
+    def __init__(self, *replies):
+        super().__init__(*replies)
+        self.entered, self.release = threading.Event(), threading.Event()
+
+    def complete(self, messages, tools):
+        if messages[-1]["role"] == "tool":
+            self.entered.set()
+            assert self.release.wait(5)
+        return super().complete(messages, tools)
+
+
 def test_new_conversation_ends_the_task_even_while_its_outcome_is_being_phrased(tts):
-    class GatedBrain(FakeBrain):
-        def __init__(self, *replies):
-            super().__init__(*replies)
-            self.entered, self.release = threading.Event(), threading.Event()
-
-        def complete(self, messages, tools):
-            if messages[-1]["role"] == "tool":  # the outcome's call
-                self.entered.set()
-                assert self.release.wait(5)
-            return super().complete(messages, tools)
-
-    brain = GatedBrain(ask(("browse", GOAL)), answer("The title is Welcome."))
+    brain = OutcomeGatedBrain(ask(("browse", GOAL)), answer("The title is Welcome."))
     s = browsing(navigate_then_answer, brain=brain)
     assert brain.entered.wait(5) and not s.resp.browsing()  # the agent is done: nothing to stop, but the outcome waits
 
@@ -4004,3 +4007,51 @@ def test_new_conversation_ends_the_task_even_while_its_outcome_is_being_phrased(
 
     serve(s.outbox)
     assert served_text(tts) == [browse_task.WORKING]  # the outcome of the old conversation is not spoken
+
+
+@pytest.mark.parametrize("late_reply", [answer("The old outcome."), ask(("browse", '{"goal": "open old.example"}'))])
+def test_a_new_conversation_stops_the_first_tasks_outcome_even_after_a_second_task_replaced_its_registration(
+        tts, heard, late_reply):
+    def first_answers_second_holds(agent, goal, stop, on_progress, on_ask, deadline_s):
+        if len(agent.goals) == 1:
+            return BROWSE_ANSWER
+        return agent.wait_for_stop(stop)
+
+    brain = OutcomeGatedBrain(ask(("browse", GOAL)), ask(("browse", '{"goal": "open example.com"}')), late_reply)
+    s = browsing(first_answers_second_holds, brain=brain, control=True)
+    assert brain.entered.wait(5) and not s.resp.browsing()  # the first agent is done; its outcome waits on the brain
+    heard.text = "Open example.com too."
+    drive(s.resp, turn=Turn())
+    wait_until(lambda: len(s.agent.goals) == 2)  # the second task is registered, the first outcome is still pending
+
+    s.resp.clear_pending()  # New conversation
+    brain.release.set()
+    wait_until(browse_over)
+
+    assert s.agent.stops[1]()  # the second task was stopped
+    assert len(s.agent.goals) == 2  # the first outcome started no chained task
+    serve(s.outbox)
+    assert "The old outcome." not in served_text(tts) and "The old outcome." not in s.turn.assistant_text
+
+
+def test_a_new_browse_while_an_earlier_outcome_is_being_phrased_supersedes_it_silently(tts, heard):
+    def first_answers_second_holds(agent, goal, stop, on_progress, on_ask, deadline_s):
+        if len(agent.goals) == 1:
+            return BROWSE_ANSWER
+        return agent.wait_for_stop(stop)
+
+    brain = OutcomeGatedBrain(ask(("browse", GOAL)), ask(("browse", '{"goal": "open example.com"}')),
+                       answer("The old outcome."))
+    s = browsing(first_answers_second_holds, brain=brain, control=True)
+    assert brain.entered.wait(5)
+    heard.text = "Open example.com too."
+    drive(s.resp, turn=Turn())
+    wait_until(lambda: len(s.agent.goals) == 2)
+
+    brain.release.set()  # the first outcome comes back after the second task started: one task at a time, newest wins
+    time.sleep(0.2)
+
+    serve(s.outbox)
+    assert "The old outcome." not in served_text(tts) and s.resp.browsing() and not s.agent.stops[1]()
+    s.resp.stop_task()
+    wait_until(browse_over)

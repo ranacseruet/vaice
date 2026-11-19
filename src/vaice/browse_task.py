@@ -206,15 +206,16 @@ class BrowseStatus:
             return SkillResult(NO_TASK)
         seconds = int(self._clock() - self._started)
         urls = [url for _, url in tools if url]
-        hosts = list(dict.fromkeys(h for h in (host_of({"url": url}) for url in urls) if h))
+        visits = [h for h in (host_of({"url": url}) for url in urls) if h]
+        hosts = list(dict.fromkeys(visits))  # each page once, in order of first visit
         parts = [f"the browser task is running: {_one_line(self._goal, 160)}", f"it has run for {seconds} seconds"]
         if tools:
             latest = ", ".join(name for name, _ in tools[-STATUS_TOOLS_SHOWN:])
             parts.append(f"{len(tools)} tool calls so far, the latest: {latest}")
         else:
             parts.append("no tool calls yet")
-        if hosts:
-            parts.append(f"pages visited: {', '.join(hosts[-3:])}; now on {hosts[-1]}")
+        if visits:
+            parts.append(f"pages visited: {', '.join(hosts[-3:])}; now on {visits[-1]}")
         if asking:
             parts.append(f"a step is waiting for approval: {asking}")
         if text:

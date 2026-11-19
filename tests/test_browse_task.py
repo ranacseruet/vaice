@@ -201,3 +201,14 @@ def test_the_status_is_safe_to_write_and_read_from_two_threads():
     finally:
         stop.set()
         writer.join()
+
+
+def test_the_current_page_is_the_latest_navigation_even_when_it_was_visited_before():
+    status = browse_task.BrowseStatus("goal")
+    for url in ("https://a.test/", "https://b.test/", "https://a.test/again"):
+        status.tool("mcp__chrome__navigate_page", {"url": url})
+    status.tool("mcp__chrome__navigate_page", {"url": "about:blank"})  # not a page: the current one is still a.test
+
+    speech = status.result().speech
+
+    assert "now on a.test" in speech and "pages visited: a.test, b.test" in speech

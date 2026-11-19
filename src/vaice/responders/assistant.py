@@ -538,9 +538,10 @@ def _continue(url: str, timeout: float, voice_name: str, skills: Skills, brain: 
 
 @dataclass
 class _BrowseRun:
-    """The running browser task as the responder holds it: its cancel event (the Stop button, `stop_browsing`, "New
+    """A browser task as the responder holds it: its cancel event (the Stop button, `stop_browsing`, "New
     conversation", the app ending) and what it has reported about itself (`browser_status`). Kept until the whole task
-    is over, its outcome included; `status.ended` says whether the agent still works."""
+    is over, its outcome included (`AssistantResponder._browse_runs`); `status.ended` says whether the agent still
+    works."""
 
     cancelled: threading.Event
     status: browse_task.BrowseStatus
@@ -877,7 +878,8 @@ class AssistantResponder:
         self._browse_agent = browse  # the `browse` skill is offered with one (VAICE_BROWSE); closed by `main()`
         self._browse_seconds = browse_seconds
         self._task_lock = threading.Lock()
-        self._browsing: _BrowseRun | None = None  # the browser task, until its outcome is spoken (the Stop button)
+        self._browsing: _BrowseRun | None = None  # the latest browser task (the Stop button, `browser_status`)
+        self._browse_runs: list[_BrowseRun] = []  # every browser task not over yet, its outcome included
         # `browse` with its busy check, `browser_status` and `stop_browsing`: offered together, only with an agent
         browse_skills = browse_task.browse_skills(busy=self.browsing, status=self._browser_status,
                                                   stop=self._stop_browsing) if browse is not None else ()
@@ -987,7 +989,16 @@ class AssistantResponder:
             if self._live(self._browsing):
                 log.warning("assistant did not start a browser task: one is running")
                 return
+            # one task at a time, the newest wins: an earlier task whose agent is done but whose outcome is still being
+            # phrased is cancelled (its outcome is dropped), so nothing of it can run on unseen by "New conversation"
+            # or Stop. A chained task (`parent`) replaces the one that started it, which is about to end.
+            superseded = [r for r in self._browse_runs if not r.cancelled.is_set()]
+            for old in superseded:
+                old.cancelled.set()
             run = self._browsing = _BrowseRun(cancelled, status)
+            self._browse_runs.append(run)
+        if superseded and parent is None and self._outbox is not None:
+            self._outbox.clear()  # what the superseded outcome had queued; a chain's own line is not dropped
         pending.task = None
         threading.Thread(
             target=_browse,
@@ -1004,6 +1015,8 @@ class AssistantResponder:
         with self._task_lock:
             if self._browsing is run:
                 self._browsing = None
+            if run in self._browse_runs:
+                self._browse_runs.remove(run)
 
     @staticmethod
     def _live(run: "_BrowseRun | None") -> bool:
@@ -1016,13 +1029,14 @@ class AssistantResponder:
             return self._live(self._browsing)
 
     def stop_task(self) -> bool:
-        """The Stop button and the `stop_browsing` skill: end the running browser task (what it queued to say is
-        dropped). False when none is running."""
+        """The Stop button and the `stop_browsing` skill: end every browser task that is not over (the agent at work or
+        its outcome being phrased; what it queued to say is dropped). False when there is none."""
         with self._task_lock:
-            run = self._browsing
-            if not self._live(run):
-                return False
-            run.cancelled.set()
+            stopped = [r for r in self._browse_runs if not r.cancelled.is_set()]
+            for run in stopped:
+                run.cancelled.set()
+        if not stopped:
+            return False
         if self._outbox is not None:
             self._outbox.clear()  # after the cancel: whatever the task was about to queue is refused by its own stop
         return True
@@ -1067,10 +1081,10 @@ class AssistantResponder:
                 cancel.set()
         self._cancel_task()
         with self._task_lock:
-            run = self._browsing
-            if run is not None:
+            runs = list(self._browse_runs)
+            for run in runs:
                 run.cancelled.set()
-        if run is not None and self._outbox is not None:
+        if runs and self._outbox is not None:
             self._outbox.clear()
 
     def _countdown(self, pending_id: str) -> None:

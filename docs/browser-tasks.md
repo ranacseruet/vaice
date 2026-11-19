@@ -39,7 +39,8 @@ VAICE_MODE=assistant VAICE_BRAIN_URL=http://localhost:1234/v1 VAICE_BRAIN_MODEL=
   screen shows more). It says "no browser task is running" when there is none. No new command is sent to Pi.
 - **Stop.** Say "Stop the browser task" (`stop_browsing`) or press the **Stop the browser task** button. *New
   conversation*, closing vaice and `VAICE_BROWSE_SECONDS` (default 180) stop it too; a new utterance does not. Only one
-  task runs at a time: a second `browse` request while one runs is refused with a spoken sentence.
+  task runs at a time: a second `browse` request while one works is refused with a spoken sentence, and one made
+  while the previous task's outcome is still being phrased replaces it (the old outcome is dropped).
 - **Quiet.** Nothing is spoken while the task works except its opening line ("Working in the browser."), the step
   questions and the outcome. Step questions and the outcome are not recorded in the conversation, apart from the
   outcome, which is added to the turn that asked for the task even if you spoke meanwhile. The *Tool activity* panel
