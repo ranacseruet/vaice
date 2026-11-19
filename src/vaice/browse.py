@@ -185,6 +185,7 @@ class _Child:
                 except ValueError:
                     record = None
                 self.events.put(record if isinstance(record, dict) else {"type": "_unparsed", "size": len(line)})
+        self.dead = True  # at once, not when the task thread reads _EOF: an open question polls this
         self.events.put(_EOF)
 
     def next_id(self) -> str:
@@ -502,7 +503,7 @@ class PiAgent:
         if method == "confirm":
             asked_at = time.monotonic()
 
-            def ended() -> bool:  # also when close() ended the agent meanwhile: nobody is left to ask for
+            def ended() -> bool:  # also when the child exited or close() ended it: nobody is left to ask for
                 return budget.stop() or time.monotonic() >= budget.deadline or child.dead or self._closed
 
             def ask_stop() -> bool:

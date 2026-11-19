@@ -315,6 +315,27 @@ def test_close_during_an_open_question_fails_the_task_at_once(harness):
     assert isinstance(result["error"], BrowseError) and not isinstance(result["error"], BrowseDeclined)
 
 
+def test_a_child_that_dies_during_an_open_question_fails_the_task_at_once(harness):
+    h = harness(FAKE_PI_SCENARIO="confirm")
+
+    waited = []
+
+    def kill_then_wait(title, message, stop):
+        os.kill(h.pids()[0], 9)
+        started = time.monotonic()
+        while not stop():
+            time.sleep(0.02)
+        waited.append(time.monotonic() - started)  # asserted outside: an error in on_ask counts as a no
+        return True
+
+    with pytest.raises(BrowseError) as caught:
+        h.run(on_ask=kill_then_wait)
+    assert waited[0] < 3  # not the question timeout or the task deadline
+    assert not isinstance(caught.value, BrowseDeclined)
+    assert h.run("scenario=normal") == "The title is Python."  # the next task restarts the child
+    assert len(h.pids()) == 2
+
+
 def test_a_stop_during_a_question_is_a_stop_not_a_refusal(harness):
     h = harness(FAKE_PI_SCENARIO="confirm")
 
