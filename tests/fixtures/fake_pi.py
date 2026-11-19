@@ -48,6 +48,8 @@ def emit(record: dict) -> None:
 def reader() -> None:
     for line in iter(sys.stdin.buffer.readline, b""):
         commands.put(json.loads(line))
+        if os.environ.get("FAKE_PI_STOP_READING") == "1" and json.loads(line).get("type") == "new_session":
+            time.sleep(3600)  # wedged: never reads stdin again, so a big enough write fills the pipe
     commands.put(None)  # stdin closed: an orderly shutdown
 
 

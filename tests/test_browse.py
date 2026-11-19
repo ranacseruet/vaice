@@ -30,6 +30,7 @@ def quick(monkeypatch):
     monkeypatch.setattr(browse, "CLOSE_WAIT", 1.0)
     monkeypatch.setattr(browse, "TERM_WAIT", 0.3)
     monkeypatch.setattr(browse, "KILL_WAIT", 2.0)
+    monkeypatch.setattr(browse, "WRITE_TIMEOUT", 0.5)
 
 
 class Harness:
@@ -403,6 +404,43 @@ def test_end_kills_a_group_member_that_ignores_sigterm_after_pi_exits(tmp_path):
     assert time.monotonic() - started < browse.TERM_WAIT + browse.KILL_WAIT + 1
     assert wait_dead(descendant)
     assert proc.returncode is not None
+
+
+BIG_GOAL = "x" * 1_000_000  # far larger than a pipe's buffer
+
+
+def test_a_child_that_stops_reading_ends_the_task_and_the_next_one_restarts(harness):
+    h = harness(FAKE_PI_STOP_READING="1")
+    started = time.monotonic()
+    with pytest.raises(BrowseError) as caught:
+        h.run(BIG_GOAL)
+    assert "stopped reading" in str(caught.value)
+    assert time.monotonic() - started < 5  # WRITE_TIMEOUT, then the child is ended
+    assert wait_dead(h.pids()[0])
+
+
+def test_close_during_a_blocked_write_returns_and_fails_the_task(harness, monkeypatch):
+    monkeypatch.setattr(browse, "WRITE_TIMEOUT", 30.0)  # only close() can end this write
+    h = harness(FAKE_PI_STOP_READING="1")
+    result = {}
+
+    def task():
+        try:
+            h.run(BIG_GOAL)
+        except BaseException as exc:
+            result["error"] = exc
+
+    thread = threading.Thread(target=task, daemon=True)
+    thread.start()
+    deadline = time.monotonic() + 5
+    while not h.pids() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    time.sleep(0.3)  # the prompt is now stuck in the full pipe
+    started = time.monotonic()
+    h.agent.close()
+    assert time.monotonic() - started < 3
+    thread.join(3)
+    assert not thread.is_alive() and isinstance(result["error"], BrowseError)
 
 
 def test_a_child_that_exits_mid_task_is_an_error_and_the_next_task_restarts(harness):

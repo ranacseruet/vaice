@@ -40,6 +40,7 @@ import logging
 import os
 import queue
 import re
+import select
 import signal
 import subprocess
 import threading
@@ -59,6 +60,7 @@ ABORT_WAIT = 10.0  # seconds after `abort` for `agent_settled`, normally about 1
 CLOSE_WAIT = 5.0  # seconds a child gets to exit after its stdin is closed
 TERM_WAIT = 3.0  # seconds between SIGTERM and SIGKILL
 KILL_WAIT = 2.0  # seconds to reap a SIGKILLed child
+WRITE_TIMEOUT = 5.0  # seconds one command may take to go into the child's stdin; then the child counts as wedged
 ASK_GRACE = 5.0  # seconds the gate waits longer than `ask_timeout_s`, so vaice's own "no" (and abort) comes first
 
 CHROME_DEVTOOLS_MCP = "chrome-devtools-mcp@1.13.0"  # pinned: its flags and tool names are what the policy names
@@ -168,6 +170,9 @@ class _Child:
         self._ids = 0
         self._ended = False
         self._end_lock = threading.Lock()
+        assert proc.stdin is not None
+        self._stdin_fd = proc.stdin.fileno()
+        os.set_blocking(self._stdin_fd, False)  # writes go through os.write + select, bounded (see write)
         threading.Thread(target=self._read, name="vaice-browse-reader", daemon=True).start()
 
     def _read(self) -> None:
@@ -187,13 +192,26 @@ class _Child:
         return f"v{self._ids}"
 
     def write(self, record: dict) -> None:
-        assert self.proc.stdin is not None
-        try:
-            self.proc.stdin.write(json.dumps(record).encode("utf-8") + b"\n")
-            self.proc.stdin.flush()
-        except (OSError, ValueError):  # a closed pipe: the child is gone
-            self.dead = True
-            raise BrowseError("the browser agent's process is gone", FAILED) from None
+        """Send one JSONL record. Bounded: a child that stops reading its stdin (a full pipe) is ended after
+        `WRITE_TIMEOUT`, and one marked dead (`close()`, `end()`) stops the write within `POLL_SECONDS`. The
+        buffered `proc.stdin` object is never written to, so closing it never waits on a blocked writer."""
+        data = json.dumps(record).encode("utf-8") + b"\n"
+        give_up = time.monotonic() + WRITE_TIMEOUT
+        while data:
+            if self.dead:
+                raise BrowseError("the browser agent's process is gone", FAILED)
+            if time.monotonic() >= give_up:
+                self.end()
+                raise BrowseError("the browser agent stopped reading its input", FAILED)
+            try:
+                _, writable, _ = select.select([], [self._stdin_fd], [], POLL_SECONDS)
+                if writable:
+                    data = data[os.write(self._stdin_fd, data):]
+            except BlockingIOError:
+                continue
+            except (OSError, ValueError):  # a closed pipe: the child is gone
+                self.dead = True
+                raise BrowseError("the browser agent's process is gone", FAILED) from None
 
     def send(self, command: str, **fields) -> str:
         """Send a command with a fresh id and return the id."""
