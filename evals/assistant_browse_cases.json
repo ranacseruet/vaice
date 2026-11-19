@@ -12,6 +12,11 @@
   {"id": "browse-weather-site", "say": "Check a weather website for Toronto and tell me the temperature.",
    "expect": {"tools": ["browse"], "args": {"browse": {"goal": {"contains": "toronto"}}}}},
 
+  {"id": "status-going", "say": "How is the browser task going?", "expect": {"tools": ["browser_status"]}},
+  {"id": "status-update", "say": "Any update on the browser?", "expect": {"tools": ["browser_status"]}},
+  {"id": "status-doing", "say": "What is it doing in the browser right now?", "expect": {"tools": ["browser_status"]}},
+  {"id": "stop-task", "say": "Stop the browser task.", "expect": {"tools": ["stop_browsing"]}},
+
   {"id": "nobrowse-sky", "say": "Why is the sky blue?",
    "expect": {"tools": []}},
   {"id": "nobrowse-capital", "say": "What is the capital of France?",
@@ -27,5 +32,7 @@
   {"id": "nobrowse-battery", "say": "How much battery is left?",
    "expect": {"tools": ["battery_status"]}},
   {"id": "nobrowse-open-safari", "say": "Open Safari.",
-   "expect": {"tools": ["open_app"], "args": {"open_app": {"name": "Safari"}}}}
+   "expect": {"tools": ["open_app"], "args": {"open_app": {"name": "Safari"}}}},
+  {"id": "nobrowse-time", "say": "What time is it?", "expect": {"tools": []}},
+  {"id": "nobrowse-sea", "say": "What colour is the sea?", "expect": {"tools": []}}
 ]

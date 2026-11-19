@@ -167,7 +167,7 @@ class Skills:
             return asked if isinstance(asked, Question) else Question(asked)
         except SkillError as exc:
             log.warning("skill %s cannot be asked about: %s", name, exc)
-            return SkillResult(f"{label} failed: {exc}")
+            return SkillResult(f"{label} failed: {exc}", answer=exc.answer)
         except Exception as exc:
             log.exception("skill %s could not be asked about", name)
             return SkillResult(f"{label} failed: {type(exc).__name__}: {exc}")
@@ -533,11 +533,13 @@ def _mute_sound(args: dict) -> SkillResult:
 
 
 def default_skills(shell: bool = False, memory: "Memory | None" = None, vision: Skill | None = None,
-                   extra: Sequence[Skill] = (), browse: bool = False) -> Skills:
+                   extra: Sequence[Skill] = (), browse: bool = False,
+                   browse_skills: Sequence[Skill] = ()) -> Skills:
     """The skills the assistant path offers: five read-only checks, then the actions, with `shell`
     (`VAICE_ASSISTANT_SHELL`) `run_shell`, which asks first, with a `memory` (`VAICE_ASSISTANT_MEMORY`) the
     skills that keep and forget notes (see `memory.py`), with `browse` (`VAICE_BROWSE`) the background `browse` skill
-    (see `browse_task.py`), with a `vision` skill (`VAICE_VISION_URL`, built by
+    (see `browse_task.py`; `browse_skills` replaces it with the set the responder builds: `browse` with its busy
+    check, `browser_status` and `stop_browsing`), with a `vision` skill (`VAICE_VISION_URL`, built by
     `vision.vision_skill`) `look_at_screen`, which comes right after the read-only checks, and with `extra` (the MCP
     tools, `VAICE_MCP_CONFIG`, see `mcp_skills.py`) last. An MCP name always holds `__` and no built-in does, so
     the two cannot collide."""
@@ -597,8 +599,8 @@ def default_skills(shell: bool = False, memory: "Memory | None" = None, vision: 
         from vaice.memory import memory_skills  # memory imports this module: not at the top
 
         skills += memory_skills(memory)
-    if browse:
+    if browse or browse_skills:
         from vaice.browse_task import browse_skill  # it imports this module: not at the top
 
-        skills.append(browse_skill())
+        skills += browse_skills or [browse_skill()]
     return Skills([*skills, *extra])

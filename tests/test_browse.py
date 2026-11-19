@@ -58,7 +58,7 @@ class Harness:
         return self.agent.run(
             goal, stop=callbacks.get("stop", self.stop_flag.is_set),
             on_progress=callbacks.get("on_progress", self.on_progress),
-            on_ask=callbacks.get("on_ask", self.on_ask), deadline_s=deadline_s)
+            on_ask=callbacks.get("on_ask", self.on_ask), deadline_s=deadline_s, on_text=callbacks.get("on_text"))
 
     def facts(self) -> list[dict]:
         return [json.loads(line) for line in self.record.read_text().splitlines()] if self.record.exists() else []
@@ -137,6 +137,22 @@ def test_the_fake_does_orphan_a_prompt_sent_before_new_sessions_response(tmp_pat
         proc.wait()
     assert b"agent_settled" not in out
     assert {"orphaned": True} in [json.loads(line) for line in record.read_text().splitlines()]
+
+
+def test_the_agents_words_are_reported_as_each_message_ends_and_a_failing_callback_does_not_end_the_task(
+        harness, caplog):
+    h = harness()
+    texts = []
+
+    assert h.run(on_text=texts.append) == "The title is Python."
+    assert texts == ["I'll open the page.", "The title is Python."]  # between tools too, not only the last
+
+    def boom(text):
+        raise RuntimeError("callback bug")
+
+    with caplog.at_level(logging.WARNING, logger="vaice.browse"):
+        assert h.run(on_text=boom) == "The title is Python."
+    assert "text callback failed" in caplog.text
 
 
 def test_a_progress_callback_that_raises_does_not_end_the_task(harness, caplog):

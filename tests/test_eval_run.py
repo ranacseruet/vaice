@@ -600,8 +600,11 @@ def test_the_browse_skill_is_offered_only_with_the_flag_and_nothing_is_started(m
 
     assert eval_run.stub_skills(browse=False).definitions() == default_skills().definitions()
     skills = eval_run.stub_skills(browse=True)
-    assert "browse" in skills.names
+    assert {"browse", "browser_status", "stop_browsing"} <= set(skills.names)
     assert isinstance(skills.prepare("browse", '{"goal": "open python.org"}'), Started)  # validated, nothing run
+    assert skills.run("browser_status", "{}").speech == eval_run.BROWSER_STATUS_STUB  # canned, nothing asked
+    assert skills.run("stop_browsing", "{}").speech == "stopped the browser task"
+    assert "browser_status" not in eval_run.stub_skills(browse=False).names
 
 
 def test_the_browse_flag_is_off_by_default():

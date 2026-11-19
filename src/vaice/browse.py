@@ -1,6 +1,6 @@
 """A browsing agent for assistant mode: `PiAgent` hands a goal ("open python.org and tell me its title") to the Pi
 coding agent (`pi`) running in its RPC mode, which drives Chrome through the chrome-devtools MCP server, and returns
-the answer text. Nothing here is wired into the app yet (a later change adds the `browse` skill and its settings).
+the answer text. The `browse` skill and its settings live in `browse_task.py`, `responders/assistant.py` and `app.py`.
 
 How it fits together:
 
@@ -93,7 +93,9 @@ _EOF: dict = {"type": "_eof"}  # the reader's last record, compared by identity
 _DIALOGS = ("select", "confirm", "input", "editor")  # the extension UI methods that wait for an answer
 _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 
-PROMPT = "Use the chrome browser tools to do this task in the browser, then answer in plain text. Task: {goal}"
+PROMPT = ("Use the chrome browser tools to do this task in the browser, then answer in plain text. To search the "
+          "web use Bing or DuckDuckGo, never Google: Google shows an automated browser a bot check instead of "
+          "results. Task: {goal}")
 CANT_START = "I couldn't start the browser agent."
 FAILED = "The browser agent ran into a problem."
 NO_ANSWER = "The browser agent did not give an answer."
@@ -123,9 +125,12 @@ class BrowseAgent(Protocol):
     """A browser agent: does a goal in the browser and returns the answer text. `PiAgent` is the one backend."""
 
     def run(self, goal: str, *, stop: Callable[[], bool], on_progress: Callable[[str, dict], None],
-            on_ask: Callable[[str, str, Callable[[], bool]], bool], deadline_s: float) -> str:
+            on_ask: Callable[[str, str, Callable[[], bool]], bool], deadline_s: float,
+            on_text: Callable[[str], None] | None = None) -> str:
         """Do `goal`. `on_progress(tool, args)` is told of each tool as it starts; `on_ask(title, message, stop)`
-        answers a question about a step that changes a page (True = go ahead) and may block, honoring its `stop`.
+        answers a question about a step that changes a page (True = go ahead) and may block, honoring its `stop`;
+        `on_text(text)`, optional, is told of the agent's own words as each message ends (what `browser_status` can
+        report; a backend without them never calls it).
         Raises `BrowseStopped` when `stop()` ended it, `BrowseDeclined` after a no, `BrowseError` otherwise."""
         ...
 
@@ -495,11 +500,13 @@ class PiAgent:
     # -- a task
 
     def run(self, goal: str, *, stop: Callable[[], bool], on_progress: Callable[[str, dict], None],
-            on_ask: Callable[[str, str, Callable[[], bool]], bool], deadline_s: float) -> str:
+            on_ask: Callable[[str, str, Callable[[], bool]], bool], deadline_s: float,
+            on_text: Callable[[str], None] | None = None) -> str:
         """Do `goal` in the browser and return the answer text.
 
         `on_progress(tool_name, args)` is called as each tool starts (an exception from it is logged, nothing
-        more). `on_ask(title, message, stop)` answers a gate question and may block: it runs on the task's own thread
+        more); `on_text(text)` with the text of each assistant message when it ends (likewise).
+        `on_ask(title, message, stop)` answers a gate question and may block: it runs on the task's own thread
         and nothing else moves meanwhile, so IT owns honoring `stop`, which it is given and which also turns true when
         the question has waited `ask_timeout_s`. A False (or an exception) is a no, and aborts the task.
 
@@ -513,12 +520,13 @@ class PiAgent:
             budget = _Budget(stop, started + deadline_s, deadline_s)
             budget.check()
             child = self._ensure_child(budget)
-            return self._task(child, goal, budget, on_progress, on_ask, started)
+            return self._task(child, goal, budget, on_progress, on_ask, started, on_text)
         finally:
             self._run_lock.release()
 
     def _task(self, child: _Child, goal: str, budget: _Budget, on_progress: Callable[[str, dict], None],
-              on_ask: Callable[[str, str, Callable[[], bool]], bool], started: float) -> str:
+              on_ask: Callable[[str, str, Callable[[], bool]], bool], started: float,
+              on_text: Callable[[str], None] | None = None) -> str:
         while True:  # whatever an earlier task left behind (late events, unread responses)
             try:
                 if child.events.get_nowait() is _EOF:
@@ -556,6 +564,7 @@ class PiAgent:
                     text = _text_of(message)
                     if text:
                         final = text
+                        self._text(on_text, text)
             elif kind == "tool_execution_start":
                 tools += 1
                 name = str(event.get("toolName"))
@@ -590,6 +599,15 @@ class PiAgent:
             on_progress(name, args if isinstance(args, dict) else {})
         except Exception:  # a callback must not kill the task
             log.warning("browse: the progress callback failed for %s", name, exc_info=True)
+
+    @staticmethod
+    def _text(on_text: Callable[[str], None] | None, text: str) -> None:
+        if on_text is None:
+            return
+        try:
+            on_text(text)
+        except Exception:  # a callback must not kill the task
+            log.warning("browse: the text callback failed", exc_info=True)
 
     def _ui_request(self, child: _Child, event: dict, budget: _Budget,
                     on_ask: Callable[[str, str, Callable[[], bool]], bool]) -> bool:

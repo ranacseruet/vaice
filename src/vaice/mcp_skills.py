@@ -516,15 +516,36 @@ class McpTools:
             loop.close()
 
 
-def start(path: Path, timeout: float, auto_seconds: float = 0.0) -> McpTools:
+BROWSER_SERVER = "chrome-devtools-mcp"  # the browser server the `browse` skill drives itself (browse.py)
+
+
+def without_browser_servers(configs: list[ServerConfig]) -> list[ServerConfig]:
+    """`configs` minus the servers that run chrome-devtools-mcp (in their `command` or any of their `args`), with one
+    warning for each. Used while the `browse` skill is offered: with both, the brain mixes the two browsers' tools,
+    and the per-step questions of these tools drown the task that does the browsing quietly."""
+    kept = []
+    for cfg in configs:
+        if any(BROWSER_SERVER in part for part in (cfg.command, *cfg.args)):
+            log.warning("mcp server %s is not started: it runs %s, the browser the browse skill already drives (with "
+                        "both the model mixes the two); set VAICE_BROWSE=off to use this server instead",
+                        cfg.name, BROWSER_SERVER)
+        else:
+            kept.append(cfg)
+    return kept
+
+
+def start(path: Path, timeout: float, auto_seconds: float = 0.0, *, browse: bool = False) -> McpTools:
     """Start the servers in the config file at `path` (a server that fails to start is a warning and is skipped) and
-    return them with their skills (`auto_seconds`: see `McpTools`). Exits when the `mcp` package is missing or the
-    file is unusable."""
+    return them with their skills (`auto_seconds`: see `McpTools`). `browse`: the `browse` skill is offered, so a
+    chrome-devtools-mcp server is not started (`without_browser_servers`). Exits when the `mcp` package is missing or
+    the file is unusable."""
     try:
         from mcp import Client, MCPError, StdioServerParameters, stdio_client  # noqa: F401 - checks the v2 SDK is there
     except ImportError:
         raise SystemExit(INSTALL_HINT) from None
     configs = load_config(path)
+    if browse:
+        configs = without_browser_servers(configs)
     tools = McpTools(timeout, auto_seconds)
     try:
         tools._start(configs)

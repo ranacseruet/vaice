@@ -674,3 +674,33 @@ def test_nothing_is_registered_with_atexit_when_there_is_nothing_to_start(sdk, t
     mcp.close()
 
     assert mcp.skills == [] and atexit._ncallbacks() == before
+
+
+def _server(name, command="npx", args=()):
+    return mcp_skills.ServerConfig(name, command, tuple(args))
+
+
+def test_a_chrome_devtools_server_is_dropped_with_one_warning_while_browse_is_offered(caplog):
+    chrome = _server("chrome", "npx", ["-y", "chrome-devtools-mcp@latest", "--headless"])
+    direct = _server("devtools", "/opt/bin/chrome-devtools-mcp")
+    notes = _server("notes", "uvx", ["notes-mcp"])
+
+    with caplog.at_level(logging.WARNING, logger="vaice.mcp_skills"):
+        kept = mcp_skills.without_browser_servers([chrome, notes, direct])
+
+    assert kept == [notes]
+    assert [r.getMessage().split(" is not started")[0] for r in caplog.records] == ["mcp server chrome",
+                                                                                   "mcp server devtools"]
+    assert "VAICE_BROWSE=off" in caplog.text and "headless" not in caplog.text  # the name, never the arguments
+
+
+def test_start_leaves_the_servers_alone_without_browse_and_drops_the_chrome_one_with_it(tmp_path, monkeypatch):
+    pytest.importorskip("mcp")
+    path = write_config(tmp_path, {"chrome": {"command": "npx", "args": ["chrome-devtools-mcp@latest"]}})
+    started = []
+    monkeypatch.setattr(mcp_skills.McpTools, "_start", lambda self, configs: started.append([c.name for c in configs]))
+
+    mcp_skills.start(path, 5.0)
+    mcp_skills.start(path, 5.0, browse=True)
+
+    assert started == [["chrome"], []]  # unchanged without browse; with it the server is never handed to the loop

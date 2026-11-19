@@ -485,10 +485,12 @@ def test_the_vision_cases_are_consistent_with_the_skills_when_look_at_screen_is_
 
 
 def test_the_browse_cases_are_consistent_with_the_skills_when_browse_is_on():
-    from vaice.skills import default_skills
+    from vaice import browse_task
+    from vaice.skills import SkillResult, default_skills
 
     cases = load("assistant_browse_cases.json")
-    skills = default_skills(browse=True)
+    skills = default_skills(browse_skills=browse_task.browse_skills(
+        busy=None, status=lambda: SkillResult("s"), stop=lambda: SkillResult("t")))
     ids = [c["id"] for c in cases]
     assert len(ids) == len(set(ids))
     assert len(cases) >= 10
@@ -505,6 +507,9 @@ def test_the_browse_cases_are_consistent_with_the_skills_when_browse_is_on():
 
     assert sum(1 for c in cases if c["expect"]["tools"] == ["browse"]) >= 5
     assert sum(1 for c in cases if "browse" not in c["expect"]["tools"]) >= 5  # tempting ones, no browser
+    assert sum(1 for c in cases if c["expect"]["tools"] == ["browser_status"]) >= 2
+    assert any(c["expect"]["tools"] == ["stop_browsing"] for c in cases)
+    assert sum(1 for c in cases if c["expect"]["tools"] == []) >= 2  # ordinary questions call none of the three
     # without --browse the skill does not exist: this file is only for runs that pass it
     assert "browse" not in default_skills().names
 
