@@ -350,7 +350,7 @@ class PiAgent:
                 raise BrowseError("the browser agent exited", FAILED)
             if event.get("type") == "response" and event.get("id") == rid:
                 if not event.get("success"):
-                    raise BrowseError(f"{event.get('command')} failed: {self._scrub(str(event.get('error'))[:200])}")
+                    raise BrowseError(f"{event.get('command')} failed: {self._scrub(str(event.get('error')))[:200]}")
                 return event
 
     def _abort(self, child: _Child) -> None:
@@ -455,7 +455,7 @@ class PiAgent:
                 raise BrowseError("an extension of the browser agent failed")
             elif kind == "response" and event.get("id") == prompt_id:
                 if not event.get("success"):
-                    raise BrowseError(f"prompt failed: {self._scrub(str(event.get('error'))[:200])}")
+                    raise BrowseError(f"prompt failed: {self._scrub(str(event.get('error')))[:200]}")
                 if (event.get("data") or {}).get("disposition") == "handled":  # no run started: nothing will settle
                     raise BrowseError("the prompt was not run", FAILED)
             elif kind == "_unparsed":
@@ -463,7 +463,7 @@ class PiAgent:
 
         log.info("browse: done in %.1fs, %d tool calls", time.monotonic() - started, tools)
         if last_stop == "error":
-            raise BrowseError(f"the model failed: {self._scrub(last_error[:200])}", FAILED)
+            raise BrowseError(f"the model failed: {self._scrub(last_error)[:200]}", FAILED)
         if not final:
             raise BrowseError("the browser agent finished without text", NO_ANSWER)
         return final
@@ -494,7 +494,7 @@ class PiAgent:
             except Exception:  # a failed question is a no
                 log.warning("browse: the question callback failed", exc_info=True)
                 approved = False
-            if ended():  # a task out of time (or stopped) must not authorize another browser action
+            if ask_stop():  # an expired question, a stopped task or one out of time authorizes nothing
                 approved = False
             child.write({"type": "extension_ui_response", "id": rid, "confirmed": approved})
             # a stop or deadline that cut the question short is handled by the loop, not as a refusal

@@ -164,12 +164,14 @@ def test_an_unreadable_line_is_skipped(harness, caplog):
     assert "unreadable record" in caplog.text
 
 
-def test_a_failed_model_call_is_an_error_without_the_key(harness, caplog):
-    h = harness(FAKE_PI_SCENARIO="error", VAICE_PI_API_KEY=KEY)
+@pytest.mark.parametrize("key", [KEY, "sk-" + "k" * 250])  # the long one spans the 200-character cut
+def test_a_failed_model_call_is_an_error_without_the_key(harness, caplog, key):
+    h = harness(FAKE_PI_SCENARIO="error", VAICE_PI_API_KEY=key)
     with caplog.at_level(logging.INFO, logger="vaice.browse"), pytest.raises(BrowseError) as caught:
         h.run()
     assert "model failed" in str(caught.value)
-    assert KEY not in str(caught.value) and KEY not in caught.value.spoken and KEY not in caplog.text
+    for text in (str(caught.value), caught.value.spoken, caplog.text):
+        assert key[:12] not in text  # not even a prefix of it
 
 
 def test_a_prompt_that_started_no_run_is_an_error(harness):
@@ -262,6 +264,26 @@ def test_the_deadline_ends_an_open_question_and_approves_nothing(harness):
     answers = [f for f in h.facts() if f.get("cmd") == "extension_ui_response"]
     assert answers and answers[0]["confirmed"] is False
     assert "abort" in h.commands()
+
+
+def test_a_yes_after_the_question_timed_out_approves_nothing(tmp_path):
+    h = Harness(tmp_path, FAKE_PI_SCENARIO="confirm")
+    h.agent = PiAgent(h.home, log_path=h.stderr_log, command=[sys.executable, str(FAKE)], ask_timeout_s=0.1,
+                      env={"FAKE_PI_LOG": str(h.record), "FAKE_PI_SCENARIO": "confirm"})
+
+    def wait_then_approve(title, message, stop):
+        while not stop():
+            time.sleep(0.02)
+        return True  # too late: the question expired
+
+    try:
+        with pytest.raises(BrowseDeclined):
+            h.run(on_ask=wait_then_approve)
+        answers = [f for f in h.facts() if f.get("cmd") == "extension_ui_response"]
+        assert answers and answers[0]["confirmed"] is False
+        assert "abort" in h.commands()
+    finally:
+        h.agent.close()
 
 
 def test_a_stop_during_a_question_is_a_stop_not_a_refusal(harness):
