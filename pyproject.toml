@@ -33,9 +33,12 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest", "pytest-cov", "ruff"]
-# assistant mode's MCP tools (VAICE_MCP_CONFIG, mcp_skills.py). Written against the v2 SDK (2.3.0); the next major
+# MCP tools for the model (VAICE_MCP_CONFIG, mcp_skills.py). Written against the v2 SDK (2.3.0); the next major
 # may rename things again, so the range stops before it. Imported lazily: vaice runs without it.
 mcp = ["mcp>=2.3,<3"]
+# the browser agent (VAICE_BROWSE, acp_agent.py): the Agent Client Protocol client SDK, built against 1.0.0. Imported
+# lazily: vaice runs without it.
+browse = ["agent-client-protocol>=1.0,<2"]
 
 [project.urls]
 Homepage = "https://github.com/ranacseruet/vaice"

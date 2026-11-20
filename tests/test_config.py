@@ -423,13 +423,13 @@ def test_a_bad_mcp_timeout_is_a_clean_error(monkeypatch, value):
 
 def test_browse_is_off_by_default(monkeypatch):
     for name in ("VAICE_BROWSE", "VAICE_BROWSE_SECONDS", "VAICE_BROWSE_HEADLESS", "VAICE_BROWSE_CONFIRM",
-                 "VAICE_BROWSE_URL", "VAICE_BROWSE_MODEL", "VAICE_BROWSE_API_KEY"):
+                 "VAICE_BROWSE_URL", "VAICE_BROWSE_MODEL", "VAICE_BROWSE_API_KEY", "VAICE_BROWSE_AGENT"):
         monkeypatch.delenv(name, raising=False)
     try:
         reloaded = importlib.reload(config)
         assert (reloaded.BROWSE_URL, reloaded.BROWSE_MODEL, reloaded.BROWSE_API_KEY) == ("", "", "")
         assert reloaded.BROWSE == "off" and reloaded.BROWSE_SECONDS == 180.0 and reloaded.BROWSE_HEADLESS is False
-        assert reloaded.BROWSE_CONFIRM == "ask"
+        assert reloaded.BROWSE_CONFIRM == "ask" and reloaded.BROWSE_AGENT == ""
     finally:
         monkeypatch.undo()
         importlib.reload(config)
@@ -449,6 +449,20 @@ def test_the_browse_settings_are_read_from_the_environment(monkeypatch):
         assert reloaded.BROWSE_MODEL == "big-model" and reloaded.BROWSE_API_KEY == "fake-key-123"
         assert reloaded.BROWSE == "pi" and reloaded.BROWSE_SECONDS == 90.0 and reloaded.BROWSE_HEADLESS is True
         assert reloaded.BROWSE_CONFIRM == "off"
+    finally:
+        monkeypatch.undo()
+        importlib.reload(config)
+
+
+def test_browse_takes_any_acp_agent_by_its_command_line(monkeypatch):
+    monkeypatch.setenv("VAICE_BROWSE", "acp")
+    monkeypatch.setenv("VAICE_BROWSE_AGENT", "  opencode acp \n")
+    try:
+        reloaded = importlib.reload(config)
+        assert reloaded.BROWSE == "acp" and reloaded.BROWSE_AGENT == "opencode acp"
+        monkeypatch.setenv("VAICE_BROWSE", "rpc")
+        with pytest.raises(SystemExit, match="VAICE_BROWSE"):
+            importlib.reload(config)
     finally:
         monkeypatch.undo()
         importlib.reload(config)

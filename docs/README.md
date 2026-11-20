@@ -27,7 +27,7 @@ everything else.
 | [The assistant](assistant.md) | Skills, confirmation, shell commands and memory |
 | [Screen vision](screen-vision.md) | The `look_at_screen` skill and its vision model |
 | [MCP tools](mcp-tools.md) | Offer tools from MCP servers as skills, with a per-tool approval policy |
-| [Browser tasks](browser-tasks.md) | The `browse` skill: a Chrome window driven by the Pi agent in the background, asking before it changes a page |
+| [Browser tasks](browser-tasks.md) | The `browse` skill: a Chrome window driven in the background by a browser agent (Pi, or any ACP agent), asking before it changes a page |
 
 ## Working on vaice
 

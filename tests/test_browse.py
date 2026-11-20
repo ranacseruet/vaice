@@ -1,591 +1,24 @@
-"""browse.py against tests/fixtures/fake_pi.py: a stand-in for `pi --mode rpc` that speaks the protocol measured on
-Pi 1.5.2 and records what it receives. The real Pi is checked by hand (see the PR), not here."""
-import atexit
+"""browse.py: the settings of Pi's config directory, the launcher and the environments the two presets give an agent,
+the gate preflight, what is left to clean up after a killed browser agent, and the Pi version check. The agent itself is
+tested in test_acp_agent.py; the real agents are checked by hand (see the PR), not here."""
 import json
 import logging
 import os
 import stat
 import subprocess
 import sys
-import threading
 import time
 from pathlib import Path
 
 import pytest
-from threads import run_on_thread, start_thread
 
 from vaice import browse
-from vaice.browse import BrowseDeclined, BrowseError, BrowseStopped, PiAgent, write_pi_home
+from vaice.browse import write_pi_home
 
-FAKE = Path(__file__).parent / "fixtures" / "fake_pi.py"
 KEY = "sk-test-secret-key"
 
 
-@pytest.fixture(autouse=True)
-def quick(monkeypatch):
-    """Short waits, so the failure paths take a fraction of a second."""
-    monkeypatch.setattr(browse, "START_TIMEOUT", 5.0)
-    monkeypatch.setattr(browse, "NEW_SESSION_TIMEOUT", 2.0)
-    monkeypatch.setattr(browse, "ABORT_WAIT", 0.5)
-    monkeypatch.setattr(browse, "CLOSE_WAIT", 1.0)
-    monkeypatch.setattr(browse, "TERM_WAIT", 0.3)
-    monkeypatch.setattr(browse, "KILL_WAIT", 2.0)
-    monkeypatch.setattr(browse, "WRITE_TIMEOUT", 0.5)
-
-
-class Harness:
-    """A PiAgent on the fake, its record of the fake's received commands, and the callbacks' calls."""
-
-    def __init__(self, tmp_path: Path, **env: str):
-        self.home = tmp_path / "pi"
-        self.record = tmp_path / "fake.log"
-        self.stderr_log = tmp_path / "logs" / "pi.log"
-        self.agent = PiAgent(self.home, log_path=self.stderr_log, command=[sys.executable, str(FAKE)],
-                             env={"FAKE_PI_LOG": str(self.record), **env})
-        self.progress: list[tuple[str, dict]] = []
-        self.asked: list[tuple[str, str]] = []
-        self.answer = True
-        self.stop_flag = threading.Event()
-
-    def on_progress(self, name, args):
-        self.progress.append((name, args))
-
-    def on_ask(self, title, message, stop):
-        self.asked.append((title, message))
-        return self.answer
-
-    def run(self, goal="Open x.test and read the title.", *, deadline_s=20.0, **callbacks):
-        return self.agent.run(
-            goal, stop=callbacks.get("stop", self.stop_flag.is_set),
-            on_progress=callbacks.get("on_progress", self.on_progress),
-            on_ask=callbacks.get("on_ask", self.on_ask), deadline_s=deadline_s, on_text=callbacks.get("on_text"))
-
-    def facts(self) -> list[dict]:
-        return [json.loads(line) for line in self.record.read_text().splitlines()] if self.record.exists() else []
-
-    def commands(self) -> list[str]:
-        return [f["cmd"] for f in self.facts() if "cmd" in f]
-
-    def pids(self) -> list[int]:
-        return [f["start"]["pid"] for f in self.facts() if "start" in f]
-
-
-@pytest.fixture
-def harness(tmp_path):
-    made = []
-
-    def make(**env):
-        h = Harness(tmp_path, **env)
-        made.append(h)
-        return h
-
-    yield make
-    for h in made:
-        h.agent.close()
-
-
-def alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    return True
-
-
-def wait_dead(pid: int, seconds: float = 3.0) -> bool:
-    end = time.monotonic() + seconds
-    while time.monotonic() < end:
-        if not alive(pid):
-            return True
-        time.sleep(0.02)
-    return False
-
-
-# --- a task
-
-
-def test_a_task_returns_the_last_assistant_text_and_reports_progress(harness):
-    h = harness()
-    assert h.run() == "The title is Python."  # not "I'll open the page.The title...", not the empty last message
-    assert h.progress == [("mcp__chrome__navigate_page", {"url": "https://x.test"})]
-    assert h.commands() == ["get_commands", "new_session", "prompt"]
-    prompt = next(f for f in h.facts() if f.get("cmd") == "prompt")
-    assert "Open x.test and read the title." in prompt["message"]
-
-
-def test_the_prompt_is_sent_only_after_new_sessions_response(harness):
-    """The fake answers new_session after a delay and orphans a prompt that arrived before the answer (as Pi 1.5.2
-    does: the prompt never settles). Sent back to back, this task would hang."""
-    h = harness(FAKE_PI_NEW_SESSION_DELAY="0.3")
-    assert h.run(deadline_s=5) == "The title is Python."
-    assert not [f for f in h.facts() if f.get("orphaned")]
-
-
-def test_the_fake_does_orphan_a_prompt_sent_before_new_sessions_response(tmp_path):
-    """Guards the test above: the fake really punishes a back-to-back prompt, so that test can fail."""
-    record = tmp_path / "fake.log"
-    env = {**os.environ, "FAKE_PI_LOG": str(record), "FAKE_PI_NEW_SESSION_DELAY": "0.3"}
-    proc = subprocess.Popen([sys.executable, str(FAKE)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=env)
-    try:
-        for rec in ({"id": "a", "type": "new_session"}, {"id": "b", "type": "prompt", "message": "hi"}):
-            proc.stdin.write(json.dumps(rec).encode() + b"\n")
-        proc.stdin.flush()
-        time.sleep(1.0)
-    finally:
-        proc.kill()
-        out = proc.stdout.read()
-        proc.wait()
-    assert b"agent_settled" not in out
-    assert {"orphaned": True} in [json.loads(line) for line in record.read_text().splitlines()]
-
-
-def test_the_agents_words_are_reported_as_each_message_ends_and_a_failing_callback_does_not_end_the_task(
-        harness, caplog):
-    h = harness()
-    texts = []
-
-    assert h.run(on_text=texts.append) == "The title is Python."
-    assert texts == ["I'll open the page.", "The title is Python."]  # between tools too, not only the last
-
-    def boom(text):
-        raise RuntimeError("callback bug")
-
-    with caplog.at_level(logging.WARNING, logger="vaice.browse"):
-        assert h.run(on_text=boom) == "The title is Python."
-    assert "text callback failed" in caplog.text
-
-
-def test_a_progress_callback_that_raises_does_not_end_the_task(harness, caplog):
-    h = harness()
-
-    def boom(name, args):
-        raise RuntimeError("callback bug")
-
-    with caplog.at_level(logging.WARNING, logger="vaice.browse"):
-        assert h.run(on_progress=boom) == "The title is Python."
-    assert "progress callback failed" in caplog.text
-
-
-def test_dialogs_vaice_cannot_answer_are_cancelled_and_notifications_ignored(harness):
-    h = harness(FAKE_PI_SCENARIO="ui_noise")
-    assert h.run() == "The title is Python."
-    answers = {f["id"]: f for f in h.facts() if f.get("cmd") == "extension_ui_response"}
-    assert answers["s1"]["cancelled"] is True and answers["i1"]["cancelled"] is True
-    assert "n1" not in answers  # notify is fire-and-forget
-
-
-def test_an_unreadable_line_is_skipped(harness, caplog):
-    h = harness(FAKE_PI_SCENARIO="unparsed")
-    with caplog.at_level(logging.WARNING, logger="vaice.browse"):
-        assert h.run() == "The title is Python."
-    assert "unreadable record" in caplog.text
-
-
-@pytest.mark.parametrize("key", [KEY, "sk-" + "k" * 250])  # the long one spans the 200-character cut
-def test_a_failed_model_call_is_an_error_without_the_key(harness, caplog, key):
-    h = harness(FAKE_PI_SCENARIO="error", VAICE_PI_API_KEY=key)
-    with caplog.at_level(logging.INFO, logger="vaice.browse"), pytest.raises(BrowseError) as caught:
-        h.run()
-    assert "model failed" in str(caught.value)
-    for text in (str(caught.value), caught.value.spoken, caplog.text):
-        assert key[:12] not in text  # not even a prefix of it
-
-
-def test_a_prompt_that_started_no_run_is_an_error(harness):
-    h = harness()
-    with pytest.raises(BrowseError, match="was not run"):
-        h.run("scenario=handled")
-
-
-def test_tasks_run_one_after_another_in_one_process(harness):
-    h = harness()
-    assert h.run() == "The title is Python."
-    assert h.run() == "The title is Python."
-    assert len(h.pids()) == 1
-    assert h.commands() == ["get_commands", "new_session", "prompt", "new_session", "prompt"]  # a new session each
-
-
-# --- confirmations
-
-
-def test_a_yes_lets_the_step_run(harness):
-    h = harness(FAKE_PI_SCENARIO="confirm")
-    assert h.run() == "Clicked it."
-    assert h.asked == [("mcp__chrome__click", '{"uid":"1_2"}')]
-    answer = next(f for f in h.facts() if f.get("cmd") == "extension_ui_response")
-    assert answer["id"] == "q1" and answer["confirmed"] is True
-    assert "abort" not in h.commands()
-
-
-def test_a_no_also_aborts_so_the_model_cannot_route_around_it(harness):
-    h = harness(FAKE_PI_SCENARIO="confirm")
-    h.answer = False
-    with pytest.raises(BrowseDeclined) as caught:
-        h.run()
-    assert caught.value.spoken == browse.DECLINED
-    commands = h.commands()
-    assert commands[-2:] == ["extension_ui_response", "abort"]
-    assert not [f for f in h.facts() if f.get("routed_around")]
-    assert h.run("scenario=normal") == "The title is Python."  # the same child, usable again
-    assert len(h.pids()) == 1
-
-
-def test_a_question_callback_that_raises_is_a_no(harness):
-    h = harness(FAKE_PI_SCENARIO="confirm")
-
-    def boom(title, message, stop):
-        raise RuntimeError("ui bug")
-
-    with pytest.raises(BrowseDeclined):
-        h.run(on_ask=boom)
-    assert "abort" in h.commands()
-
-
-def test_a_question_nobody_answers_is_a_no_after_ask_timeout(tmp_path):
-    h = Harness(tmp_path, FAKE_PI_SCENARIO="confirm")
-    h.agent = PiAgent(h.home, log_path=h.stderr_log, command=[sys.executable, str(FAKE)], ask_timeout_s=0.3,
-                      env={"FAKE_PI_LOG": str(h.record), "FAKE_PI_SCENARIO": "confirm"})
-
-    def wait_for_stop(title, message, stop):
-        while not stop():  # the contract: on_ask returns when it is told to stop
-            time.sleep(0.02)
-        return False
-
-    try:
-        started = time.monotonic()
-        with pytest.raises(BrowseDeclined):
-            h.run(on_ask=wait_for_stop)
-        assert time.monotonic() - started < 3
-        assert "abort" in h.commands()
-    finally:
-        h.agent.close()
-
-
-def test_the_deadline_ends_an_open_question_and_approves_nothing(harness):
-    h = harness(FAKE_PI_SCENARIO="confirm")
-    approve_late = []
-
-    def wait_then_approve(title, message, stop):
-        while not stop():  # honors stop, then says yes: too late, the task is out of time
-            time.sleep(0.02)
-        approve_late.append(True)
-        return True
-
-    started = time.monotonic()
-    with pytest.raises(BrowseError) as caught:
-        h.run(on_ask=wait_then_approve, deadline_s=0.4)
-    assert not isinstance(caught.value, BrowseDeclined)
-    assert caught.value.spoken == "I stopped the browser task after 0.4 seconds."
-    assert time.monotonic() - started < 2  # not the 60 s question timeout
-    assert approve_late
-    answers = [f for f in h.facts() if f.get("cmd") == "extension_ui_response"]
-    assert answers and answers[0]["confirmed"] is False
-    assert "abort" in h.commands()
-
-
-def test_a_yes_after_the_question_timed_out_approves_nothing(tmp_path):
-    h = Harness(tmp_path, FAKE_PI_SCENARIO="confirm")
-    h.agent = PiAgent(h.home, log_path=h.stderr_log, command=[sys.executable, str(FAKE)], ask_timeout_s=0.1,
-                      env={"FAKE_PI_LOG": str(h.record), "FAKE_PI_SCENARIO": "confirm"})
-
-    def wait_then_approve(title, message, stop):
-        while not stop():
-            time.sleep(0.02)
-        return True  # too late: the question expired
-
-    try:
-        with pytest.raises(BrowseDeclined):
-            h.run(on_ask=wait_then_approve)
-        answers = [f for f in h.facts() if f.get("cmd") == "extension_ui_response"]
-        assert answers and answers[0]["confirmed"] is False
-        assert "abort" in h.commands()
-    finally:
-        h.agent.close()
-
-
-def test_close_during_an_open_question_fails_the_task_at_once(harness):
-    h = harness(FAKE_PI_SCENARIO="confirm")
-    asked = threading.Event()
-
-    def wait_for_stop(title, message, stop):
-        asked.set()
-        while not stop():
-            time.sleep(0.02)
-        return True
-
-    result = {}
-
-    def task():
-        try:
-            h.run(on_ask=wait_for_stop)
-        except BaseException as exc:
-            result["error"] = exc
-
-    thread = threading.Thread(target=task, daemon=True)
-    thread.start()
-    assert asked.wait(5)
-    started = time.monotonic()
-    h.agent.close()
-    thread.join(5)
-    assert not thread.is_alive() and time.monotonic() - started < 3  # not the 60 s question timeout
-    assert isinstance(result["error"], BrowseError) and not isinstance(result["error"], BrowseDeclined)
-
-
-def test_a_child_that_dies_during_an_open_question_fails_the_task_at_once(harness):
-    h = harness(FAKE_PI_SCENARIO="confirm")
-
-    waited = []
-
-    def kill_then_wait(title, message, stop):
-        os.kill(h.pids()[0], 9)
-        started = time.monotonic()
-        while not stop():
-            time.sleep(0.02)
-        waited.append(time.monotonic() - started)  # asserted outside: an error in on_ask counts as a no
-        return True
-
-    with pytest.raises(BrowseError) as caught:
-        h.run(on_ask=kill_then_wait)
-    assert waited[0] < 3  # not the question timeout or the task deadline
-    assert not isinstance(caught.value, BrowseDeclined)
-    assert h.run("scenario=normal") == "The title is Python."  # the next task restarts the child
-    assert len(h.pids()) == 2
-
-
-def test_a_stop_during_a_question_is_a_stop_not_a_refusal(harness):
-    h = harness(FAKE_PI_SCENARIO="confirm")
-
-    def stop_while_asked(title, message, stop):
-        h.stop_flag.set()
-        return False
-
-    with pytest.raises(BrowseStopped):
-        h.run(on_ask=stop_while_asked)
-    assert "abort" in h.commands()
-
-
-# --- stopping
-
-
-def test_stop_aborts_the_task_and_keeps_the_process(harness):
-    h = harness(FAKE_PI_SCENARIO="slow")
-
-    def stop_at_first_tool(name, args):
-        h.stop_flag.set()
-
-    started = time.monotonic()
-    with pytest.raises(BrowseStopped):
-        h.run(on_progress=stop_at_first_tool)
-    assert time.monotonic() - started < 3  # abort settles at once; nothing waits for ABORT_WAIT
-    assert h.commands()[-1] == "abort"
-    h.stop_flag.clear()
-    assert h.run("scenario=normal") == "The title is Python."
-    assert len(h.pids()) == 1
-
-
-def test_a_stop_before_anything_starts_nothing(harness):
-    h = harness()
-    h.stop_flag.set()
-    with pytest.raises(BrowseStopped):
-        h.run()
-    assert h.agent._child is None
-    assert h.pids() == []
-
-
-def test_the_deadline_aborts_with_a_spoken_sentence(harness):
-    h = harness(FAKE_PI_SCENARIO="slow")
-    with pytest.raises(BrowseError) as caught:
-        h.run(deadline_s=0.6)
-    assert caught.value.spoken == "I stopped the browser task after 0.6 seconds."
-    assert h.commands()[-1] == "abort"
-    assert h.run("scenario=normal") == "The title is Python."
-    assert len(h.pids()) == 1
-
-
-@pytest.mark.parametrize("ignore_term", ["0", "1"])
-def test_an_abort_that_never_settles_ends_the_process_and_the_next_task_restarts(harness, ignore_term):
-    h = harness(FAKE_PI_SCENARIO="abort_ignored", FAKE_PI_IGNORE_TERM=ignore_term)
-
-    def stop_at_first_tool(name, args):  # not a timer: a slow runner may still be in new_session, which is no abort
-        h.stop_flag.set()
-
-    with pytest.raises(BrowseStopped):
-        h.run(on_progress=stop_at_first_tool)
-    first = h.pids()[0]
-    assert wait_dead(first)  # SIGTERM, or SIGKILL when the child ignores it
-    h.stop_flag.clear()
-    assert h.run("scenario=normal") == "The title is Python."
-    assert len(h.pids()) == 2 and alive(h.pids()[1])
-
-
-def test_end_kills_a_group_member_that_ignores_sigterm_after_pi_exits(tmp_path):
-    """Pi exits on SIGTERM, a descendant in its group ignores it and keeps stdout open: end() must still SIGKILL
-    the group and return without waiting on the pipe."""
-    pid_file = tmp_path / "descendant.pid"
-    script = (
-        "import os, signal, subprocess, sys, time\n"
-        # the descendant writes its pid only once it ignores SIGTERM, so end() cannot race its setup
-        "kid = subprocess.Popen([sys.executable, '-c', 'import os, signal, sys, time; "
-        "signal.signal(signal.SIGTERM, signal.SIG_IGN); open(sys.argv[1], \"w\").write(str(os.getpid())); "
-        f"time.sleep(60)', {str(pid_file)!r}])\n"
-        "print('{}', flush=True)\n"
-        "time.sleep(60)\n")
-    proc = subprocess.Popen([sys.executable, "-c", script], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                            start_new_session=True)
-    child = browse._Child(proc)
-    deadline = time.monotonic() + 5
-    while not (pid_file.exists() and pid_file.read_text()) and time.monotonic() < deadline:
-        time.sleep(0.02)
-    descendant = int(pid_file.read_text())
-    started = time.monotonic()
-    child.end()
-    assert time.monotonic() - started < browse.TERM_WAIT + browse.KILL_WAIT + 1
-    assert wait_dead(descendant)
-    assert proc.returncode is not None
-
-
-BIG_GOAL = "x" * 1_000_000  # far larger than a pipe's buffer
-
-
-def test_a_child_that_stops_reading_ends_the_task_and_the_next_one_restarts(harness):
-    h = harness(FAKE_PI_STOP_READING="1")
-    started = time.monotonic()
-    with pytest.raises(BrowseError) as caught:
-        h.run(BIG_GOAL)
-    assert "stopped reading" in str(caught.value)
-    assert time.monotonic() - started < 5  # WRITE_TIMEOUT, then the child is ended
-    assert wait_dead(h.pids()[0])
-
-
-def test_close_during_a_blocked_write_returns_and_fails_the_task(harness, monkeypatch):
-    monkeypatch.setattr(browse, "WRITE_TIMEOUT", 30.0)  # only close() can end this write
-    h = harness(FAKE_PI_STOP_READING="1")
-    result = {}
-
-    def task():
-        try:
-            h.run(BIG_GOAL)
-        except BaseException as exc:
-            result["error"] = exc
-
-    thread = threading.Thread(target=task, daemon=True)
-    thread.start()
-    deadline = time.monotonic() + 5
-    while not h.pids() and time.monotonic() < deadline:
-        time.sleep(0.02)
-    time.sleep(0.3)  # the prompt is now stuck in the full pipe
-    started = time.monotonic()
-    h.agent.close()
-    assert time.monotonic() - started < 3
-    thread.join(3)
-    assert not thread.is_alive() and isinstance(result["error"], BrowseError)
-
-
-def test_a_child_that_exits_mid_task_is_an_error_and_the_next_task_restarts(harness):
-    h = harness(FAKE_PI_SCENARIO="exit_midtask")
-    with pytest.raises(BrowseError, match="exited"):
-        h.run()
-    assert h.run("scenario=normal") == "The title is Python."
-    assert len(h.pids()) == 2
-
-
-def test_a_new_session_that_never_answers_ends_the_child(harness, monkeypatch):
-    monkeypatch.setattr(browse, "NEW_SESSION_TIMEOUT", 0.3)
-    h = harness(FAKE_PI_NEW_SESSION_DELAY="3")
-    with pytest.raises(BrowseError, match="did not answer"):
-        h.run()
-    assert wait_dead(h.pids()[0])
-    assert "prompt" not in h.commands()  # never sent without the new session
-
-
-def test_an_extension_error_aborts_the_task(harness):
-    h = harness(FAKE_PI_SCENARIO="ext_error")
-    with pytest.raises(BrowseError, match="extension"):
-        h.run()
-    assert h.commands()[-1] == "abort"
-
-
-def test_a_child_without_the_gate_is_refused(harness):
-    h = harness(FAKE_PI_NO_GATE="1")
-    with pytest.raises(BrowseError, match="tool gate") as caught:
-        h.run()
-    assert caught.value.spoken == browse.CANT_START
-    assert wait_dead(h.pids()[0])
-    assert "new_session" not in h.commands() and "prompt" not in h.commands()
-
-
-def test_a_missing_pi_is_a_spoken_error(tmp_path):
-    agent = PiAgent(tmp_path / "pi", log_path=tmp_path / "pi.log", command="/nonexistent/pi")
-    with pytest.raises(BrowseError) as caught:
-        agent.run("x", stop=lambda: False, on_progress=lambda n, a: None, on_ask=lambda t, m, s: True, deadline_s=5)
-    assert caught.value.spoken == browse.CANT_START
-
-
-# --- threads, close
-
-
-def test_tasks_from_different_threads_share_the_child(harness):
-    h = harness()
-    for i in range(3):
-        assert run_on_thread(h.run, f"fastrtc-worker-{i}") == "The title is Python."
-    assert len(h.pids()) == 1
-
-
-def test_one_task_at_a_time_and_a_waiting_one_honors_stop(harness):
-    h = harness(FAKE_PI_SCENARIO="slow")
-    first = start_thread(lambda: h.run(deadline_s=10), "task-1")
-    deadline = time.monotonic() + 5
-    while "prompt" not in h.commands() and time.monotonic() < deadline:
-        time.sleep(0.02)
-    second_stop = threading.Event()
-    second = start_thread(lambda: h.run(stop=second_stop.is_set), "task-2")
-    time.sleep(0.3)
-    assert second.thread.is_alive()  # waiting for the first
-    second_stop.set()
-    assert isinstance(second.join(), BrowseStopped)
-    h.stop_flag.set()
-    assert isinstance(first.join(), BrowseStopped)
-    assert h.commands().count("prompt") == 1  # the second never reached the child
-
-
-def test_close_ends_the_process_is_idempotent_and_unregisters_the_backstop(harness, monkeypatch):
-    registered, unregistered = [], []
-    monkeypatch.setattr(atexit, "register", lambda fn, *a: registered.append(fn))
-    monkeypatch.setattr(atexit, "unregister", lambda fn: unregistered.append(fn))
-    h = harness()
-    h.run()
-    h.run()
-    assert len(registered) == 1 and registered[0] == h.agent.close
-    pid = h.pids()[0]
-    assert alive(pid)
-    h.agent.close()
-    h.agent.close()
-    assert wait_dead(pid)
-    assert unregistered and unregistered[0] == h.agent.close
-    with pytest.raises(BrowseError, match="closed"):
-        h.run()
-
-
-def test_close_before_any_task_is_fine(harness):
-    h = harness()
-    h.agent.close()
-    h.agent.close()
-
-
-def test_close_during_a_task_fails_that_task(harness):
-    h = harness(FAKE_PI_SCENARIO="slow")
-    running = start_thread(lambda: h.run(deadline_s=10), "task")
-    deadline = time.monotonic() + 5
-    while "prompt" not in h.commands() and time.monotonic() < deadline:
-        time.sleep(0.02)
-    pid = h.pids()[0]
-    h.agent.close()
-    assert isinstance(running.join(), BrowseError)
-    assert wait_dead(pid)
-
-
-# --- the child's environment
-
+# --- the presets' environments
 
 def test_the_ungated_policy_runs_every_browser_tool_and_still_asks_about_anything_else():
     policy = browse.UNGATED_POLICY
@@ -593,39 +26,189 @@ def test_the_ungated_policy_runs_every_browser_tool_and_still_asks_about_anythin
     assert not any(key.startswith("mcp__chrome__") and value != "run" for key, value in policy.items())
 
 
-def test_the_child_gets_the_gate_policy_it_was_given(tmp_path):
-    h = Harness(tmp_path)
-    h.agent = PiAgent(h.home, log_path=h.stderr_log, command=[sys.executable, str(FAKE)],
-                      env={"FAKE_PI_LOG": str(h.record)}, gate_policy=browse.UNGATED_POLICY)
-    try:
-        h.run()
-        start = next(f["start"] for f in h.facts() if "start" in f)
-        assert json.loads(start["env"]["VAICE_GATE_POLICY"]) == browse.UNGATED_POLICY
-    finally:
-        h.agent.close()
+PI_NONCE = "0123456789abcdef"
 
 
-def test_the_child_runs_isolated_and_logs_to_a_private_file(harness, monkeypatch):
+def test_the_pi_environment_is_an_allowlist_plus_the_gate_settings_and_the_key(tmp_path, monkeypatch):
+    monkeypatch.setenv("PATH", "/usr/bin")
     monkeypatch.setenv("VAICE_VISION_API_KEY", "another-secret")
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "aws-secret")
-    h = harness(VAICE_PI_API_KEY=KEY)
-    h.run()
-    start = next(f["start"] for f in h.facts() if "start" in f)
-    assert start["env"]["PI_CODING_AGENT_DIR"] == str(h.home)
-    assert start["env"]["HOME"] == str(h.home / "home")
-    assert start["env"]["VAICE_PI_API_KEY"] == KEY  # the one thing passed on purpose
-    assert "VAICE_VISION_API_KEY" not in start["env_names"] and "AWS_SECRET_ACCESS_KEY" not in start["env_names"]
-    assert Path(start["cwd"]).resolve() == (h.home / "work").resolve()
-    assert json.loads(start["env"]["VAICE_GATE_POLICY"]) == browse.GATE_POLICY
-    assert int(start["env"]["VAICE_GATE_TIMEOUT_MS"]) == 65000  # ask_timeout_s 60 + the grace
-    argv = start["argv"]
-    assert argv[:2] == ["--mode", "rpc"] and "--no-builtin-tools" in argv and "--no-extensions" not in argv
-    assert argv[argv.index("-e") + 1] == str(browse.GATE_FILE)
-    assert stat.S_IMODE(h.stderr_log.stat().st_mode) == 0o600
-    assert "fake pi stderr line" in h.stderr_log.read_text()
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-secret")
+    home = tmp_path / "pi"
+    env = browse.pi_environment(home, ask_timeout_s=60, gate_policy=browse.GATE_POLICY, nonce=PI_NONCE, api_key=KEY)
+    assert env["PATH"] == "/usr/bin"
+    assert env["PI_CODING_AGENT_DIR"] == str(home) and env["HOME"] == str(home / "home")
+    assert env[browse.API_KEY_ENV] == KEY  # the one secret passed on purpose
+    assert json.loads(env["VAICE_GATE_POLICY"]) == browse.GATE_POLICY
+    assert int(env["VAICE_GATE_TIMEOUT_MS"]) == 65000  # ask_timeout_s 60 + the grace
+    assert env["VAICE_GATE_NONCE"] == PI_NONCE
+    assert env["PI_ACP_PI_COMMAND"] == str(browse.launcher_path(home))
+    assert (env["PI_OFFLINE"], env["PI_SKIP_VERSION_CHECK"], env["PI_TELEMETRY"]) == ("1", "1", "0")
+    assert env["npm_config_cache"]  # HOME moves, the package cache does not
+    for name in ("VAICE_VISION_API_KEY", "AWS_SECRET_ACCESS_KEY", "OPENAI_API_KEY"):
+        assert name not in env
+    assert set(env) <= {*browse._INHERITED_ENV, "PI_CODING_AGENT_DIR", "HOME", "PI_OFFLINE", "PI_SKIP_VERSION_CHECK",
+                        "PI_TELEMETRY", "VAICE_GATE_POLICY", "VAICE_GATE_TIMEOUT_MS", "VAICE_GATE_NONCE",
+                        "PI_ACP_PI_COMMAND", browse.API_KEY_ENV}
 
 
-# --- the config directory and the policy
+def test_the_pi_environment_without_a_key_has_none(tmp_path):
+    env = browse.pi_environment(tmp_path / "pi", ask_timeout_s=1, gate_policy=browse.UNGATED_POLICY, nonce=PI_NONCE)
+    assert browse.API_KEY_ENV not in env
+    assert json.loads(env["VAICE_GATE_POLICY"]) == browse.UNGATED_POLICY
+
+
+def test_the_acp_environment_is_the_environment_without_the_vaice_variables():
+    environ = {"PATH": "/usr/bin", "HOME": "/home/u", "ANTHROPIC_API_KEY": "sk-ant-1234567890",
+               "VAICE_VISION_API_KEY": "another-secret", "VAICE_BROWSE_AGENT": "opencode acp", "VAICE_PORT": "7860"}
+    assert browse.acp_environment(environ) == {"PATH": "/usr/bin", "HOME": "/home/u",
+                                               "ANTHROPIC_API_KEY": "sk-ant-1234567890"}
+
+
+def test_secret_values_are_the_long_enough_values_of_credential_looking_names():
+    env = {"OPENAI_API_KEY": "sk-1234567890", "GITHUB_TOKEN": "ghp_abcdefgh", "DB_PASSWORD": "short",
+           "PATH": "/usr/bin", "MY_CREDENTIALS": "credential-value", "TERM": "xterm-256color"}
+    assert sorted(browse.secret_values(env)) == sorted(["sk-1234567890", "ghp_abcdefgh", "credential-value"])
+
+
+def test_the_nonce_is_random_and_the_marker_is_the_gate_command_then_the_nonce():
+    assert browse.new_nonce() != browse.new_nonce() and len(browse.new_nonce()) >= 16
+    assert browse.gate_marker(PI_NONCE) == f"vaice-gate {PI_NONCE}"
+
+
+def test_the_pi_agent_is_pi_acp_pinned_with_the_gate_marker_and_its_key_scrubbed(tmp_path):
+    pytest.importorskip("acp")  # the optional `browse` extra
+    env = browse.pi_environment(tmp_path / "pi", ask_timeout_s=60, gate_policy=browse.GATE_POLICY, nonce=PI_NONCE,
+                                api_key=KEY)
+    agent = browse.pi_agent(tmp_path / "pi", env=env, nonce=PI_NONCE, log_path=tmp_path / "pi.log", ask_timeout_s=60)
+    try:
+        assert agent._argv == ["npx", "-y", browse.PI_ACP] and browse.PI_ACP == "pi-acp@0.0.34"
+        assert agent._marker == f"vaice-gate {PI_NONCE}" and agent.permissions == "ask" and agent.pi_dialogs
+        assert agent._mcp_servers == []  # pi-acp ignores them: Pi's own mcp.json holds the browser server
+        assert agent._cwd == browse.work_dir(tmp_path / "pi") and agent._secrets == (KEY,)
+        assert agent._scrub(f"Bearer {KEY}") == "Bearer ***"
+    finally:
+        agent.close()
+
+
+def test_the_acp_agent_passes_the_pinned_browser_server_and_the_environment_without_vaice_variables(tmp_path):
+    pytest.importorskip("acp")  # the optional `browse` extra
+    environ = {"PATH": "/usr/bin", "ANTHROPIC_API_KEY": "sk-ant-1234567890", "VAICE_VISION_API_KEY": "another-secret"}
+    agent = browse.acp_agent(["opencode", "acp"], work=tmp_path / "acp-work", log_path=tmp_path / "acp.log",
+                             browser_args=["--userDataDir=/p"], ask_timeout_s=60, environ=environ)
+    try:
+        assert agent._argv == ["opencode", "acp"] and agent.permissions == "ask" and agent._marker is None
+        assert agent._env == {"PATH": "/usr/bin", "ANTHROPIC_API_KEY": "sk-ant-1234567890"}
+        assert agent._secrets == ("sk-ant-1234567890",)
+        (chrome,) = agent._mcp_servers
+        assert (chrome.name, chrome.command, chrome.env) == ("chrome", "npx", [])
+        assert chrome.args == ["-y", browse.CHROME_DEVTOOLS_MCP, "--no-usage-statistics", "--no-performance-crux",
+                               "--userDataDir=/p"]
+        assert stat.S_IMODE((tmp_path / "acp-work").stat().st_mode) == 0o700
+    finally:
+        agent.close()
+
+
+def test_the_acp_agent_allows_each_step_without_asking_when_confirmation_is_off(tmp_path):
+    pytest.importorskip("acp")  # the optional `browse` extra
+    agent = browse.acp_agent(["x"], work=tmp_path / "w", log_path=tmp_path / "log", browser_args=[], ask_timeout_s=60,
+                             confirm=False, environ={})
+    try:
+        assert agent.permissions == "allow"
+    finally:
+        agent.close()
+
+
+# --- the launcher
+
+
+def test_the_launcher_runs_pi_with_the_isolation_flags_and_the_gate_extension_and_nothing_else(tmp_path):
+    path = browse.launcher_path(tmp_path)
+    browse.write_launcher(path)
+    assert stat.S_IMODE(path.stat().st_mode) == 0o700
+    text = path.read_text()
+    assert text.startswith("#!/bin/sh\n") and text.rstrip().endswith('"$@"')
+    for flag in ("--no-session", "--no-builtin-tools", "--no-context-files", "--no-skills", "--no-prompt-templates",
+                 "--offline"):
+        assert flag in text
+    assert "--no-extensions" not in text  # that would turn off Pi's built-in MCP client
+    assert f"-e {browse.GATE_FILE}" in text or f"-e '{browse.GATE_FILE}'" in text
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_the_launcher_quotes_a_path_with_spaces(tmp_path, monkeypatch):
+    monkeypatch.setattr(browse, "GATE_FILE", tmp_path / "a dir" / "gate.ts")
+    path = browse.launcher_path(tmp_path)
+    browse.write_launcher(path)
+    assert "'" + str(tmp_path / "a dir" / "gate.ts") + "'" in path.read_text()
+
+
+# --- the gate preflight: a tiny `pi` that answers get_commands (or does not)
+
+
+def stub_home(tmp_path, body: str) -> Path:
+    """A Pi config directory whose launcher is `body` (a shell script) instead of the real one."""
+    home = tmp_path / "pi"
+    home.mkdir()
+    launcher = browse.launcher_path(home)
+    launcher.write_text(f"#!/bin/sh\n{body}\n")
+    launcher.chmod(0o700)
+    return home
+
+
+def answering(commands: list[str]) -> str:
+    """A launcher that reads the request, answers it with `commands` and exits (as Pi does when its stdin closes)."""
+    data = json.dumps({"id": "g1", "type": "response", "command": "get_commands", "success": True,
+                       "data": {"commands": [{"name": name} for name in commands]}})
+    return f"cat > /dev/null\necho '{json.dumps({'type': 'noise'})}'\necho '{data}'"
+
+
+def test_the_gate_check_is_true_when_pi_lists_the_gate_command(tmp_path):
+    home = stub_home(tmp_path, answering(["compact", "vaice-gate"]))
+    assert browse.check_gate(home, {"PATH": os.environ["PATH"]}, log_path=tmp_path / "pi.log") is True
+
+
+def test_the_gate_check_is_false_when_the_gate_extension_did_not_load(tmp_path):
+    home = stub_home(tmp_path, answering(["compact"]))
+    assert browse.check_gate(home, {"PATH": os.environ["PATH"]}) is False
+
+
+def test_the_gate_check_gets_the_get_commands_request_on_stdin_and_the_environment_it_was_given(tmp_path):
+    record = tmp_path / "seen"
+    home = stub_home(tmp_path, f'head -n 1 > {record}\necho "$VAICE_GATE_NONCE" >> {record}\n'
+                                  + answering(["vaice-gate"]).split("\n", 1)[1])
+    env = {"PATH": os.environ["PATH"], "VAICE_GATE_NONCE": PI_NONCE}
+    assert browse.check_gate(home, env) is True
+    request, nonce = record.read_text().splitlines()
+    assert json.loads(request) == {"id": "g1", "type": "get_commands"} and nonce == PI_NONCE
+
+
+@pytest.mark.parametrize("body", ["exit 3", "echo not json", "cat > /dev/null", "exec /nonexistent/pi"])
+def test_the_gate_check_is_false_for_a_pi_that_fails_or_says_nothing_useful(tmp_path, body):
+    assert browse.check_gate(stub_home(tmp_path, body), {"PATH": os.environ["PATH"]}) is False
+
+
+def test_the_gate_check_is_false_when_the_launcher_is_missing(tmp_path):
+    assert browse.check_gate(tmp_path / "pi", {"PATH": os.environ["PATH"]}) is False
+
+
+def test_the_gate_check_ends_a_pi_that_does_not_answer_in_time(tmp_path, monkeypatch):
+    monkeypatch.setattr(browse, "START_TIMEOUT", 0.5)
+    monkeypatch.setattr(browse, "TERM_WAIT", 0.3)
+    home = stub_home(tmp_path, "sleep 60")
+    started = time.monotonic()
+    assert browse.check_gate(home, {"PATH": os.environ["PATH"]}) is False
+    assert time.monotonic() - started < 5
+
+
+def test_the_gate_check_logs_pis_stderr_to_a_private_file(tmp_path):
+    home = stub_home(tmp_path, "echo 'pi complaint' >&2\nexit 1")
+    log = tmp_path / "pi.log"
+    browse.check_gate(home, {"PATH": os.environ["PATH"]}, log_path=log)
+    assert stat.S_IMODE(log.stat().st_mode) == 0o600 and "pi complaint" in log.read_text()
+
+
+# --- the Pi's config directory and the policy
 
 
 def test_write_pi_home_writes_private_files_without_the_key(tmp_path, monkeypatch):
@@ -661,6 +244,7 @@ def test_write_pi_home_without_a_key_writes_a_placeholder_and_rewrites_cleanly(t
     assert args[-1] == f"--userDataDir={tmp_path / 'profile'}"
     assert "--headless" not in args and "--isolated" not in args  # the default is a visible window, a kept profile
     assert sorted(p.name for p in home.iterdir()) == ["home", "mcp.json", "models.json", "settings.json", "work"]
+    assert json.loads((home / "settings.json").read_text())["quietStartup"] is True
 
 
 @pytest.mark.parametrize("name", ["", "A-B", "1X", "A B", "$X"])
@@ -767,34 +351,6 @@ def test_a_failing_ps_is_a_warning_and_signals_nothing(tmp_path, monkeypatch, ca
     assert "could not look for processes" in caplog.text
 
 
-def test_the_agent_sweeps_the_profile_before_every_new_child_and_after_close(tmp_path, monkeypatch):
-    swept = []
-    monkeypatch.setattr(browse, "end_profile_processes", lambda profile: swept.append(profile) or [])
-    profile = tmp_path / "chrome-profile"
-    agent = PiAgent(tmp_path / "pi", log_path=tmp_path / "pi.log", command=[sys.executable, str(FAKE)],
-                    env={"FAKE_PI_LOG": str(tmp_path / "fake.log")}, chrome_profile=profile)
-    try:
-        agent.run("one", stop=lambda: False, on_progress=lambda *a: None, on_ask=lambda *a: True, deadline_s=20)
-        assert swept == [profile]  # before the first child
-        agent._child.end()  # the child died: the next task starts a new one
-        agent._child.dead = True
-        agent.run("two", stop=lambda: False, on_progress=lambda *a: None, on_ask=lambda *a: True, deadline_s=20)
-        assert swept == [profile, profile]
-    finally:
-        agent.close()
-    assert swept == [profile, profile, profile]  # and once more after close()
-
-
-def test_without_a_profile_nothing_is_swept(tmp_path, monkeypatch):
-    monkeypatch.setattr(browse, "end_profile_processes", lambda profile: pytest.fail("swept"))
-    agent = PiAgent(tmp_path / "pi", log_path=tmp_path / "pi.log", command=[sys.executable, str(FAKE)],
-                    env={"FAKE_PI_LOG": str(tmp_path / "fake.log")})
-    try:
-        agent.run("one", stop=lambda: False, on_progress=lambda *a: None, on_ask=lambda *a: True, deadline_s=20)
-    finally:
-        agent.close()
-
-
 # --- the version check
 
 def script_printing(tmp_path, text, code=0):
@@ -816,8 +372,3 @@ def test_an_unrunnable_pi_has_no_version(tmp_path):
 
 def test_versions_compare_as_tuples():
     assert (1, 10, 0) > browse.MIN_PI_VERSION > (1, 5, 1)
-
-
-def test_pi_agent_is_a_browse_agent():
-    agent: browse.BrowseAgent = PiAgent(Path("/nonexistent"), log_path=Path("/nonexistent/log"))
-    assert callable(agent.run) and callable(agent.close)

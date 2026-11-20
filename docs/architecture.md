@@ -112,7 +112,7 @@ and, when its audio is estimated still playing, fastrtc's playback queue; with `
 | `run_shell` (opt-in) | `shell.py` | Always a confirm skill: through `zsh -c` after Run, with a 30 s timeout, an output cap and a process group that stopping kills; `sudo` is refused |
 | `remember`, `forget`, `forget_everything` (opt-in) | `memory.py` | Explicit notes only, saved to `memory.json` and appended to the instructions. A note is text that outlives its conversation, so it is cleaned, capped, and refused if a tool ran earlier in the same reply |
 | `look_at_screen` (opt-in) | `vision.py` | One `screencapture` + `sips` shrink, asked of a vision model, never kept or logged. See [Screen vision](screen-vision.md) |
-| `browse` (opt-in) | `browse_task.py`, `browse.py` | A `background` skill: the reply says one line and ends, then a task thread runs the Pi agent quietly. A step that changes a page is a button-only pending request with a spoken heads-up; the outcome is spoken by a text-input session through the outbox and recorded on the asking turn. A new utterance does not stop the task; the Stop button, `stop_browsing`, *New conversation* and exit do, and `browser_status` reports on it. One task at a time. See [Browser tasks](browser-tasks.md) |
+| `browse` (opt-in) | `browse_task.py`, `browse.py`, `acp_agent.py` | A `background` skill: the reply says one line and ends, then a task thread runs the browser agent (Pi through pi-acp, or any ACP agent) quietly. A step that changes a page is a button-only pending request with a spoken heads-up; the outcome is spoken by a text-input session through the outbox and recorded on the asking turn. A new utterance does not stop the task; the Stop button, `stop_browsing`, *New conversation* and exit do, and `browser_status` reports on it. One task at a time. See [Browser tasks](browser-tasks.md) |
 | MCP tools (opt-in) | `mcp_skills.py` | Each listed tool of each stdio server becomes `<server>__<tool>` with a `run` or `click` policy. See [MCP tools](mcp-tools.md) |
 
 ## Safety model
@@ -182,16 +182,17 @@ src/vaice/
   memory.py         Opt-in: long-term notes (Memory, kept in memory.json) and the remember / forget / forget_everything skills
   mcp_skills.py     Opt-in (the `mcp` extra): MCP servers over stdio as skills, with a per-tool run/click policy
   shell.py          Opt-in: the run_shell skill and the runner (timeout, output cap, process group)
-  browse.py         Opt-in: PiAgent drives the Pi coding agent (`pi --mode rpc`) with a goal, through chrome-devtools-mcp; its config directory, child process, abort/kill handling and the cleanup of Chrome processes on its profile
+  acp_agent.py      Opt-in (the `browse` extra): `AcpAgent`, an ACP client (the official SDK) that drives a browser agent over its stdin/stdout: one long-lived process, a session per task, permission requests to Run/Cancel, `session/cancel` on a no, a stop or the deadline, the gate tripwire
+  browse.py         Opt-in: the errors and the `BrowseAgent` protocol, the two presets that build an `AcpAgent` (Pi through pi-acp with its config directory, launcher and environment, and the gate preflight; any ACP agent) and the cleanup of Chrome processes on the browser profile
   browse_task.py    Opt-in: the `browse`, `browser_status` and `stop_browsing` skill definitions and the pure pieces (fixed lines, step questions, result text, the status record)
-  browse_gate.ts    The Pi extension browse.py loads: the approval policy for the browser's tools (read-only run, page-changing ask, the rest ask); shipped in the package
+  browse_gate.ts    The Pi extension the Pi preset loads: the approval policy for the browser's tools (read-only run, page-changing ask, the rest ask) and the marker notification the tripwire waits for; shipped in the package
   audio.py          Mic frame → mono PCM16 at the model's rate (resampled via scipy) and back to float32; the `AudioFrame` type
   realtime.py       llama-server /v1/realtime: `RealtimeResponder` (the reply session: tool rounds, repetition breaker), the parallel transcription session, text-input speech (`speak`), `spoken_part`, startup check
   assistant.py      `Assistant`: a `RealtimeResponder` with the skills as tools, the per-reply executor, Run/Cancel, and the browser task thread
 tests/
   fake_realtime.py  Fake /v1/realtime WebSocket + HTTP server for testing the assistant end to end
   threads.py        fastrtc's real threading (a fresh thread per resume) for generator tests
-  fixtures/fake_pi.py  A fake `pi --mode rpc` (scripted scenarios, records the commands it gets) for tests/test_browse.py
+  fixtures/fake_acp_agent.py  A scripted ACP agent built on the SDK's agent side (scenarios from an environment variable, records what it receives) for tests/test_acp_agent.py
   fixtures/mcp_server.py  A small stdio MCP server the MCP tests start for real (tests/test_mcp_skills.py)
 evals/
   run.py            Live tool-calling eval against a real llama-server (run by hand; see evals/README.md)

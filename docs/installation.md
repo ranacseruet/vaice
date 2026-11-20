@@ -60,12 +60,17 @@ llama-server -hf LiquidAI/LFM3-Omni-2B-GGUF:Q8_0 --temp 0 --port 8001
 > **Context:** the model supports 32K tokens. If you pass `-c/--ctx-size` explicitly, use at least 8192 — a realtime conversation that overflows its slot fails with "the conversation does not fit in the context".
 > **How `-hf` works:** `-hf` (`--hf-repo`) is a built-in `llama-server` flag — you do **not** need the `huggingface-cli` / `hf` command-line tool installed. On first run, `llama-server` downloads the GGUF model weights and audio projector directly from Hugging Face into its local cache (`~/Library/Caches/llama.cpp` on macOS or `~/.cache/llama.cpp` on Linux) and starts listening on `http://localhost:8001`.
 
+### Optional: the browser agent
+
+[Browser tasks](browser-tasks.md) need the ACP client SDK, an optional extra, and Node.js (`npx` on `PATH`), which starts `pi-acp` and the browser's server: `uv sync --extra dev --extra browse`. The agent itself (Pi, or any ACP agent) you install yourself.
+
 ---
 
 ## Requirements & Compatibility
 
 - **Python 3.12** (tested in CI on macOS; `uv sync` downloads it when it is missing; dependencies also resolve on 3.13 and 3.14, but runtime behavior is not validated there).
 - **[uv](https://docs.astral.sh/uv/)** for reproducible dependency management (`uv sync` installs the exact versions from `uv.lock`).
+- **Node.js (`npx`)**, only for [browser tasks](browser-tasks.md) (and the optional MCP servers that are `npx` packages).
 - **llama.cpp `llama-server` b11960+** running a model with audio output.
   - **Only llama.cpp `llama-server` is supported and tested.** `vaice` speaks its `/v1/realtime` WebSocket protocol and checks `/health` and `/v1/models` at startup to verify that the loaded model advertises audio output (`output_modalities` includes `"audio"`). It also reads `/props` and warns when the server's text sampling temperature is above 0 (the LFM3-Audio model card recommends `--temp 0`); when `/props` reports no params or the read fails, `vaice` logs a distinct hint instead of staying silent, so a missing warning is never mistaken for `--temp 0` being set. Other servers (Ollama, LM Studio, oMLX, …) will not work.
   - Point `VAICE_LLAMACPP_URL` at a different host or port if `llama-server` isn't on `:8001`.

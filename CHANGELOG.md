@@ -28,8 +28,10 @@ the pull requests (#53 to #126).
   - MCP tools from stdio servers with a `run` or `click` policy per tool, `VAICE_MCP_CONFIG` behind the `mcp` extra
     (#104);
   - browser tasks through the Pi agent, `VAICE_BROWSE=pi` with its own `VAICE_BROWSE_URL` model (#117, #118, #121,
-    #122, #123): they run in the background, quietly, a step that changes a page needs **Run**, and
-    `browser_status` / `stop_browsing` and a Stop button report on and end them.
+    #122, #123), or any [ACP](https://agentclientprotocol.com) agent, `VAICE_BROWSE=acp` with `VAICE_BROWSE_AGENT`
+    (both behind the `browse` extra): they run in the background, quietly; with Pi a step that changes a page needs
+    **Run** (another agent asks only what its own config makes it ask: OpenCode, checked, does not ask before every
+    step); `browser_status` / `stop_browsing` and a Stop button report on and end them.
 - **`vaice up`**: one command that starts `llama-server` when none is running and opens the UI (#89).
 - **A live eval** (`evals/run.py`) that measures how reliably spoken requests become the right skill call, with repeats
   (#88).
@@ -48,6 +50,12 @@ the pull requests (#53 to #126).
   that is still set is ignored and named in one startup warning (#124, #125; see `docs/configuration.md`).
 - **Python 3.12 only** (was 3.10 to 3.12, #102). CI can be started by hand (#105).
 - The documentation lives in `docs/` (#106); the code in `src/vaice` is flat (`realtime.py`, `assistant.py`, #126).
+
+- **Browser tasks speak ACP.** vaice talks to the browser agent with the Agent Client Protocol (the official Python SDK,
+  the optional `browse` extra: `uv sync --extra browse`) instead of Pi's own JSONL protocol. Pi is now reached through
+  `pi-acp` (pinned, started with `npx`, so Node.js is needed); a Pi extension still gates its tools, checked at startup
+  and by a marker before each task's first tool call. With Pi the Chrome window now closes between tasks (`pi-acp` ends the
+  previous session); the profile, and so logins, is kept.
 
 ### Fixed
 - The transcript and the end of every reply were reported 1 s late, waiting on a close handshake `llama-server` never
