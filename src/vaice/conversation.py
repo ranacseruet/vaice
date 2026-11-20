@@ -20,16 +20,12 @@ INAUDIBLE = "(inaudible)"
 INTERRUPTED = " (interrupted)"
 _clock = time.monotonic  # when playback started/stopped; tests substitute a fake
 _VERSION = 1
-# The model-facing tool output was already compacted (responders/llamacpp toolcaps); what is recorded
+# The model-facing tool output was already compacted (responders/llamacpp `_speech_friendly`); what is recorded
 # and shown in the UI's activity panel is stored capped, so a long file does not bloat the panel or
 # conversation.json. The cap is idempotent: re-applying it to an already-capped value changes nothing.
 TOOL_EVENT_OUTPUT_CHARS = 800
 _TRUNCATED = "... (truncated)"
-TOOL_HISTORY_OUTPUT_CHARS = 300  # a past tool result in a prompt: enough to answer a follow-up, not to bloat it
-# A past call's arguments in a prompt, as compact JSON: replayed whole or not at all (a cut-off JSON string is
-# invalid and hosted endpoints reject it), so a longer object is replayed as `{}`
-TOOL_HISTORY_ARGUMENT_CHARS = 300
-# The output recorded for a call that asked the user first; its result is recorded as a second event
+# The output recorded for a call that asked the user first; its result is recorded as a second event (the Run click)
 WAITING_FOR_CONFIRMATION = "waiting for confirmation"
 
 
@@ -237,55 +233,9 @@ def tool_activity_for_ui(turns: list[Turn], events: int = 10) -> str:
     return "\n\n".join(shown[-events:])
 
 
-def replay_arguments(raw: object) -> str:
-    """The arguments to replay for a past call: the stored JSON object as compact JSON, else `{}`.
-
-    A string that is not valid JSON, is not an object (list, string, number, null) or is empty, and an object
-    whose compact form is over `TOOL_HISTORY_ARGUMENT_CHARS`, give `{}`: never a cut-off or malformed value.
-    """
-    try:
-        value = json.loads(raw)  # type: ignore[arg-type]  # a non-str (a hand-edited file) raises TypeError
-    except (TypeError, ValueError, RecursionError):
-        return "{}"
-    if not isinstance(value, dict):
-        return "{}"
-    compact = json.dumps(value, separators=(",", ":"), ensure_ascii=False)
-    return compact if len(compact) <= TOOL_HISTORY_ARGUMENT_CHARS else "{}"
-
-
-def tool_entry(name: str, arguments: str, output: str) -> str:
-    """The text of a `("tool", text)` history entry that carries the call's arguments.
-
-    A JSON object `{"name", "arguments", "output"}` (`arguments` is itself a JSON string). An entry without
-    arguments is the plain `"<name>: <output>"`; the two cannot be confused, because a tool name never starts
-    with `{`. `parse_tool_entry` reads either.
-    """
-    return json.dumps({"name": name, "arguments": arguments, "output": output}, ensure_ascii=False)
-
-
-def parse_tool_entry(text: str) -> tuple[str, str, str]:
-    """(name, arguments, output) of a tool history entry, either form; `arguments` is `replay_arguments`' result."""
-    if text.startswith("{"):
-        try:
-            entry = json.loads(text)
-        except ValueError:
-            entry = None
-        if (isinstance(entry, dict) and isinstance(entry.get("name"), str) and isinstance(entry.get("output"), str)
-                and isinstance(entry.get("arguments", ""), str)):
-            return entry["name"], replay_arguments(entry.get("arguments", "")), entry["output"]
-    name, _, output = text.partition(": ")
-    return name, "{}", output
-
-
-def to_messages(turns: list[Turn], tools: bool = False) -> list[Message]:
-    """The prompt messages for `turns`: what the user said and what was answered.
-
-    With `tools`, each answered turn's tool events come between its two messages as
-    `("tool", "<name>: <output>")` (output capped), so a follow-up can use an earlier result; a call that
-    had arguments is `("tool", tool_entry(...))` instead, so a replay can repeat them (see `replay_arguments`).
-    A turn with no assistant message carries none: there is no answer for them to explain. A call that waited
-    for confirmation is stored as two events (the wait, then its result); the wait is left out once a later event
-    of the turn has the same name and arguments, so the model sees the call once. Nothing stored changes.
+def to_messages(turns: list[Turn]) -> list[Message]:
+    """The prompt messages for `turns`: what the user said and what was answered. Tool events are not replayed:
+    the next reply sees only what was said.
 
     A turn whose transcript is still pending is dropped whole: the question has not been
     transcribed yet, so the answer to it would be a dangling reply, and `(inaudible)` would
@@ -299,17 +249,6 @@ def to_messages(turns: list[Turn], tools: bool = False) -> list[Message]:
             continue
         messages.append(("user", turn.user_text or INAUDIBLE))
         if turn.assistant_text:
-            if tools:
-                events = turn.tool_events
-                for i, event in enumerate(events):
-                    if event["output"] == WAITING_FOR_CONFIRMATION and any(
-                            later["name"] == event["name"] and later["arguments"] == event["arguments"]
-                            for later in events[i + 1:]):
-                        continue
-                    output = _cap(event["output"], TOOL_HISTORY_OUTPUT_CHARS)
-                    arguments = replay_arguments(event["arguments"])
-                    messages.append(("tool", f"{event['name']}: {output}" if arguments == "{}"
-                                     else tool_entry(event["name"], arguments, output)))
             messages.append(("assistant", _spoken(turn)))
     return messages
 
@@ -337,18 +276,15 @@ class Conversation:
             self._save()
             return turn
 
-    def history(self, before: Turn, tools: bool = False) -> list[Message]:
-        """The (windowed) messages from the turns before `before`, ready for a model prompt.
-
-        `tools=True` (for a responder with `tool_history`) adds each turn's tool results; see `to_messages`.
-        """
+    def history(self, before: Turn) -> list[Message]:
+        """The (windowed) messages from the turns before `before`, ready for a model prompt."""
         with self._lock:
             turns = self._turns[: next((i for i, t in enumerate(self._turns) if t is before), 0)]
             turns = turns[window_start(len(turns), self._window) :]
         if turns:  # its transcript is produced off the critical path; don't leave a hole if it's close
             turns[-1].transcribed.wait(TRANSCRIPT_WAIT)
         with self._lock:
-            return to_messages(turns, tools)
+            return to_messages(turns)
 
     def messages_for_ui(self) -> list[dict]:
         """Every turn in Gradio's chatbot "messages" format, including ones still in progress."""

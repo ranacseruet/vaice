@@ -37,11 +37,53 @@ def short_waits(monkeypatch):
     monkeypatch.setattr(conv, "_clock", itertools.count(0, 60).__next__)
 
 
+def button_fn(stream, label):
+    """The click function of the button with this label."""
+    config = stream.ui.get_config_file()
+    (button,) = [c for c in config["components"] if c["type"] == "button" and c["props"]["value"] == label]
+    (click,) = [d for d in config["dependencies"] if d["targets"][0] == (button["id"], "click")]
+    return stream.ui.fns[click["id"]].fn
+
+
+def tick_fn(stream):
+    """The 1 s timer's function (fastrtc has a timer of its own; ours is the one at our period)."""
+    config = stream.ui.get_config_file()
+    ours = [c for c in config["components"] if c["type"] == "timer" and c["props"]["value"] == VIEW_REFRESH_SECONDS]
+    (tick,) = [d for d in config["dependencies"] if d["targets"][0] == (ours[0]["id"], "tick")]
+    return stream.ui.fns[tick["id"]].fn
+
+
 class FakeResponder:
+    """What `app` needs of an `AssistantResponder`: respond plus the outbox, panel and Stop hooks."""
+
     name = "fake"
+    memory = None
 
     def __init__(self):
         self.calls = []
+        self.outbox = None
+        self.cleared = 0
+
+    def attach_outbox(self, outbox):
+        self.outbox = outbox
+
+    def pending(self):
+        return None
+
+    def browsing(self):
+        return False
+
+    def approve(self, request_id):
+        return None
+
+    def cancel(self, request_id):
+        return None
+
+    def clear_pending(self):
+        self.cleared += 1
+
+    def stop_task(self):
+        return False
 
     def respond(self, audio, history, turn):
         self.calls.append((list(history), turn))
@@ -209,18 +251,18 @@ def test_ui_has_the_transcript_a_reset_button_and_loads_the_stored_conversation(
     config = stream.ui.get_config_file()
 
     (chatbot,) = [c for c in config["components"] if c["type"] == "chatbot"]
-    (button,) = [c for c in config["components"] if c["type"] == "button"]
+    (new_conversation,) = [c for c in config["components"] if c["type"] == "button"
+                           and c["props"]["value"] == "New conversation"]
     (accordion,) = [c for c in config["components"] if c["type"] == "accordion"]
     assert accordion["props"]["label"] == "Tool activity"
     assert accordion["props"]["open"] is False
-    (click_outputs,) = [tuple(d["outputs"]) for d in config["dependencies"] if d["targets"][0][1] == "click"]
-    assert len(click_outputs) == 2 and chatbot["id"] in click_outputs  # chatbot + tool panel
+    (click,) = [d for d in config["dependencies"] if d["targets"][0] == (new_conversation["id"], "click")]
+    assert len(click["outputs"]) == 2 and chatbot["id"] in click["outputs"]  # chatbot + tool panel
     (load_output,) = [tuple(d["outputs"]) for d in config["dependencies"] if d["targets"][0][1] == "load"]
     assert load_output == (chatbot["id"],)  # a page load fills only the chatbot; the timer fills the panel
-    (click,) = [d for d in config["dependencies"] if d["targets"][0] == (button["id"], "click")]
 
     conversation.start_turn().set_user_text("hello")
-    assert stream.ui.fns[click["id"]].fn() == ([], "")  # the reset clears the chatbot and the tool panel
+    assert button_fn(stream, "New conversation")() == ([], "")  # the reset clears the chatbot and the tool panel
     assert conversation.messages_for_ui() == []
 
     # the chatbot's trash icon clears the stored conversation too, not just the view
@@ -260,53 +302,43 @@ def test_the_chatbot_is_taller_and_does_not_render_html_tags():
 def test_a_late_transcript_reaches_the_chatbot_after_the_reply_ran_out():
     conversation = Conversation()
     stream = build_stream(FakeResponder(), conversation)
-    config = stream.ui.get_config_file()
+    tick = tick_fn(stream)
 
-    # fastrtc has a timer of its own; ours is the one running at our period
-    ours = [c for c in config["components"] if c["type"] == "timer" and c["props"]["value"] == VIEW_REFRESH_SECONDS]
-    assert len(ours) == 1
-    (tick,) = [d for d in config["dependencies"] if d["targets"][0] == (ours[0]["id"], "tick")]
-    tick_fn = stream.ui.fns[tick["id"]].fn
-
-    view, tools, seen = tick_fn("")  # the State starts blank, so the first tick shows the empty view once
+    view, tools, *_, seen = tick("")  # the State starts blank, so the first tick shows the empty view once
     assert view == [] and tools == ""
     turn = conversation.start_turn()
-    view, tools, seen = tick_fn(seen)  # the question was heard; its transcript has not arrived yet
+    view, tools, *_, seen = tick(seen)  # the question was heard; its transcript has not arrived yet
     assert view == [{"role": "user", "content": "…"}]
     turn.set_user_text("and after the reply?")  # the transcript lands late, past the final update
-    view, tools, seen = tick_fn(seen)
+    view, tools, *_, seen = tick(seen)
     assert view[-1] == {"role": "user", "content": "and after the reply?"}  # the stuck "…" is replaced
-    assert tick_fn(seen)[0] == {"__type__": "update"}  # unchanged again: silent
+    assert tick(seen)[0] == {"__type__": "update"}  # unchanged again: silent
 
 
 def test_a_tool_round_fills_the_collapsed_tool_panel():
     conversation = Conversation()
     stream = build_stream(FakeResponder(), conversation)
-    config = stream.ui.get_config_file()
-    ours = [c for c in config["components"] if c["type"] == "timer" and c["props"]["value"] == VIEW_REFRESH_SECONDS]
-    (tick,) = [d for d in config["dependencies"] if d["targets"][0] == (ours[0]["id"], "tick")]
-    tick_fn = stream.ui.fns[tick["id"]].fn
+    tick = tick_fn(stream)
 
-    _, _, seen = tick_fn("")
+    *_, seen = tick("")
     turn = conversation.start_turn()
     turn.set_user_text("what is this machine?")
     turn.add_tool_event("get_info", "{}", "os: Darwin")
     turn.set_assistant_text("It is a Mac.")
     turn.finish()
 
-    view, tools, seen = tick_fn(seen)
+    view, tools, *_, seen = tick(seen)
     assert view[-1] == {"role": "assistant", "content": "It is a Mac."}
     assert "**get_info** `{}`" in tools and "os: Darwin" in tools
-    assert tick_fn(seen)[0] == {"__type__": "update"}  # unchanged: silent
+    assert tick(seen)[0] == {"__type__": "update"}  # unchanged: silent
 
 
 def test_what_you_say_after_new_conversation_is_the_next_turn():
     conversation = Conversation()
     stream = build_stream(FakeResponder(), conversation)
-    (click,) = [d for d in stream.ui.get_config_file()["dependencies"] if d["targets"][0][1] == "click"]
 
     conversation.start_turn().set_user_text("said before the reset")
-    stream.ui.fns[click["id"]].fn()  # the button
+    button_fn(stream, "New conversation")()
 
     turn = conversation.start_turn()  # what you say next
     assert conversation.history(before=turn) == []  # the old conversation is gone
@@ -345,9 +377,8 @@ def test_the_reset_button_silences_a_playing_reply(tmp_path):
         _clear_queue = staticmethod(lambda: stopped.append("queue"))
 
     stream.handlers["connection-1"] = PlayingReply()  # type: ignore[assignment]
-    (button,) = [d for d in stream.ui.get_config_file()["dependencies"] if d["targets"][0][1] == "click"]
 
-    stream.ui.fns[button["id"]].fn()
+    button_fn(stream, "New conversation")()
 
     assert stopped == ["reset", "queue"]
 
@@ -552,7 +583,7 @@ def test_main_installs_the_stop_handler_and_asks_the_app_to_stop_when_the_server
 
     monkeypatch.setattr(app, "parse_args", lambda: argparse.Namespace(command=None))
     monkeypatch.setattr(app, "check_server", lambda: startup.append("check"))
-    monkeypatch.setattr(app, "LlamaCppResponder", lambda **_: startup.append("construct") or FakeResponder())
+    monkeypatch.setattr(app, "AssistantResponder", lambda **_: startup.append("construct") or FakeAssistant())
     monkeypatch.setattr(app, "build_stream", lambda responder, conversation: FakeStream())
     monkeypatch.setattr(app.config, "CONVERSATION_FILE", tmp_path / "conversation.json")
 
@@ -581,18 +612,10 @@ def _fake_stream_class(launched=None):
     return FakeStream
 
 
-def _main_with(monkeypatch, tmp_path, fetch_tools=None, write_capable_tools=None, tools=True,
-               conversation_file="default", command=None):
+def _main_with(monkeypatch, tmp_path, conversation_file="default", command=None):
     launched = []
-    if tools is not None:
-        monkeypatch.setattr(app.config, "LLAMACPP_TOOLS", tools)
-    if fetch_tools is not None:
-        monkeypatch.setattr(app, "fetch_tools", fetch_tools)
-    if write_capable_tools is not None:
-        monkeypatch.setattr(app, "write_capable_tools", write_capable_tools)
     monkeypatch.setattr(app, "parse_args", lambda: argparse.Namespace(command=command))
     monkeypatch.setattr(app, "check_server", lambda: None)
-    monkeypatch.setattr(app, "LlamaCppResponder", lambda **_: FakeResponder())
     monkeypatch.setattr(app, "build_stream", lambda responder, conversation: _fake_stream_class(launched)())
     monkeypatch.setattr(app.config, "CONVERSATION_FILE",
                         tmp_path / "conversation.json" if conversation_file == "default" else None)
@@ -602,53 +625,6 @@ def _main_with(monkeypatch, tmp_path, fetch_tools=None, write_capable_tools=None
     finally:
         signal.signal(signal.SIGINT, previous)
     return launched
-
-
-def test_main_continues_without_tools_when_the_servers_tools_are_unavailable(monkeypatch, tmp_path, caplog):
-    def boom(url):
-        raise requests.ConnectionError("refused")
-
-    with caplog.at_level(logging.WARNING, logger="vaice.app"):
-        _main_with(monkeypatch, tmp_path, fetch_tools=boom)
-
-    assert "continuing without" in caplog.text
-
-
-def test_main_logs_the_advertised_tools(monkeypatch, tmp_path, caplog):
-    with caplog.at_level(logging.INFO, logger="vaice.app"):
-        _main_with(monkeypatch, tmp_path,
-                   fetch_tools=lambda url: [{"name": "get_info"}],
-                   write_capable_tools=lambda url: [])
-
-    assert "tools enabled: get_info" in caplog.text
-
-
-def test_main_warns_when_the_advertised_tools_can_write(monkeypatch, tmp_path, caplog):
-    with caplog.at_level(logging.WARNING, logger="vaice.app"):
-        _main_with(monkeypatch, tmp_path,
-                   fetch_tools=lambda url: [{"name": "exec_shell_command"}],
-                   write_capable_tools=lambda url: ["exec_shell_command"])
-
-    assert "can change this machine" in caplog.text
-
-
-def test_main_warns_when_write_capability_cannot_be_checked(monkeypatch, tmp_path, caplog):
-    def boom(url):
-        raise requests.ConnectionError("refused")
-
-    with caplog.at_level(logging.WARNING, logger="vaice.app"):
-        _main_with(monkeypatch, tmp_path,
-                   fetch_tools=lambda url: [{"name": "get_info"}],
-                   write_capable_tools=boom)
-
-    assert "could not check whether the advertised tools can modify this machine" in caplog.text
-
-
-def test_main_warns_when_the_server_advertises_no_tools(monkeypatch, tmp_path, caplog):
-    with caplog.at_level(logging.WARNING, logger="vaice.app"):
-        _main_with(monkeypatch, tmp_path, fetch_tools=lambda url: [])
-
-    assert "advertises none" in caplog.text
 
 
 def test_main_reports_a_keyboard_interrupt_and_still_requests_stop(monkeypatch, tmp_path, caplog):
@@ -702,7 +678,7 @@ def test_vaice_up_ensures_the_server_before_the_startup_check_and_opens_the_brow
     monkeypatch.setattr(app, "ensure_server", lambda: events.append("ensure") or FakeManagedServer(events))
     monkeypatch.setattr(app, "parse_args", lambda: argparse.Namespace(command="up"))
     monkeypatch.setattr(app, "check_server", lambda: events.append("check"))
-    monkeypatch.setattr(app, "LlamaCppResponder", lambda **_: FakeResponder())
+    monkeypatch.setattr(app, "AssistantResponder", FakeAssistant)
     monkeypatch.setattr(app, "build_stream", lambda responder, conversation: _fake_stream_class(launched)())
     monkeypatch.setattr(app.config, "CONVERSATION_FILE", tmp_path / "conversation.json")
     previous = signal.getsignal(signal.SIGINT)
@@ -773,10 +749,12 @@ def test_vaice_up_exits_with_the_servers_message_and_starts_nothing_else(monkeyp
         signal.signal(signal.SIGINT, previous)
 
 
-# -- assistant mode
+# -- startup
 
 
 class FakeAssistant:
+    """What `main()` builds in place of `AssistantResponder`, keeping what it was given."""
+
     name = "assistant"
     skills = SimpleNamespace(names=("disk_space", "battery_status"))  # the attribute main() reads
 
@@ -787,52 +765,34 @@ class FakeAssistant:
         self.browse = browse  # the browser agent main() opened, if any
 
 
-def _assistant_main(monkeypatch, tmp_path, tools=None):
-    def no_tools(url):
-        raise AssertionError("assistant mode must not read llama-server's /tools")
-
-    monkeypatch.setattr(app.config, "MODE", "assistant")
+@pytest.fixture(autouse=True)
+def fake_responder_class(monkeypatch):
+    """`main()` builds a `FakeAssistant`: no test starts a real responder."""
     monkeypatch.setattr(app, "AssistantResponder", FakeAssistant)
-    monkeypatch.setattr(app, "fetch_tools", no_tools)
-    monkeypatch.setattr(app, "write_capable_tools", no_tools)
-    return _main_with(monkeypatch, tmp_path, tools=tools)
 
 
-def test_assistant_mode_uses_the_assistant_responder_and_skips_the_tools_block(monkeypatch, tmp_path, caplog):
+def test_main_builds_the_assistant_responder_and_logs_its_skills(monkeypatch, tmp_path, caplog):
     with caplog.at_level(logging.INFO, logger="vaice.app"):
-        launched = _assistant_main(monkeypatch, tmp_path)
+        launched = _main_with(monkeypatch, tmp_path)
 
     assert launched  # the UI started
-    assert "assistant mode: skills disk_space, battery_status" in caplog.text
-    assert "ignored in assistant mode" not in caplog.text  # VAICE_LLAMACPP_TOOLS is unset
+    assert "assistant skills: disk_space, battery_status" in caplog.text
 
 
-def test_assistant_mode_warns_when_shell_commands_are_on_and_is_quiet_when_they_are_off(monkeypatch, tmp_path, caplog):
-    monkeypatch.setattr(app.config, "ASSISTANT_SHELL", True)
+def test_main_warns_when_shell_commands_are_on_and_is_quiet_when_they_are_off(monkeypatch, tmp_path, caplog):
+    monkeypatch.setattr(app.config, "SHELL", True)
     with caplog.at_level(logging.WARNING, logger="vaice.app"):
-        _assistant_main(monkeypatch, tmp_path)
+        _main_with(monkeypatch, tmp_path)
 
-    assert "VAICE_ASSISTANT_SHELL is on" in caplog.text
-    assert "vaice's own permissions" in caplog.text
+    assert "VAICE_SHELL is on" in caplog.text
+    assert "Run button" in caplog.text and "vaice's own permissions" in caplog.text
 
     caplog.clear()
-    monkeypatch.setattr(app.config, "ASSISTANT_SHELL", False)
+    monkeypatch.setattr(app.config, "SHELL", False)
     with caplog.at_level(logging.WARNING, logger="vaice.app"):
-        _assistant_main(monkeypatch, tmp_path)
+        _main_with(monkeypatch, tmp_path)
 
-    assert "VAICE_ASSISTANT_SHELL" not in caplog.text
-
-
-def test_assistant_mode_never_builds_the_chat_responder(monkeypatch, tmp_path):
-    monkeypatch.setattr(app, "_chat_responder", lambda: pytest.fail("chat responder built in assistant mode"))
-    assert _assistant_main(monkeypatch, tmp_path)
-
-
-def test_assistant_mode_warns_that_the_server_tools_setting_is_ignored(monkeypatch, tmp_path, caplog):
-    with caplog.at_level(logging.WARNING, logger="vaice.app"):
-        _assistant_main(monkeypatch, tmp_path, tools=True)
-
-    assert "VAICE_LLAMACPP_TOOLS is ignored in assistant mode" in caplog.text
+    assert "VAICE_SHELL" not in caplog.text
 
 
 FAKE_KEY = "fake-key-do-not-log-9f3a"
@@ -844,16 +804,17 @@ def test_removed_settings_that_are_set_are_warned_about_once_by_name_and_never_b
     monkeypatch.setenv("VAICE_BRAIN_URL", "https://brain.example.net/v1")
     monkeypatch.setenv("VAICE_BRAIN_API_KEY", FAKE_KEY)
     monkeypatch.setenv("VAICE_ASSISTANT_AUTO_SECONDS", "7")
+    monkeypatch.setenv("VAICE_ASSISTANT_SHELL", "1")
     with caplog.at_level(logging.DEBUG):
-        assert _assistant_main(monkeypatch, tmp_path)
+        assert _main_with(monkeypatch, tmp_path)
 
     (warning,) = [r for r in caplog.records if "no longer used" in r.getMessage()]
     assert warning.levelno == logging.WARNING
     text = warning.getMessage()
-    for name in ("VAICE_BRAIN_URL", "VAICE_BRAIN_API_KEY", "VAICE_ASSISTANT_AUTO_SECONDS"):
+    for name in ("VAICE_BRAIN_URL", "VAICE_BRAIN_API_KEY", "VAICE_ASSISTANT_AUTO_SECONDS", "VAICE_ASSISTANT_SHELL"):
         assert name in text
     assert "VAICE_BRAIN_MODEL" not in text  # not set
-    assert "helper brain was removed" in text and "use run or click" in text
+    assert "helper brain was removed" in text and "use run or click" in text and "renamed to VAICE_SHELL" in text
     assert FAKE_KEY not in caplog.text and "brain.example.net" not in caplog.text
 
 
@@ -861,7 +822,7 @@ def test_no_warning_about_removed_settings_when_none_is_set(monkeypatch, tmp_pat
     for name in app.config.REMOVED:
         monkeypatch.delenv(name, raising=False)
     with caplog.at_level(logging.DEBUG):
-        _assistant_main(monkeypatch, tmp_path)
+        _main_with(monkeypatch, tmp_path)
 
     assert "no longer used" not in caplog.text
 
@@ -880,12 +841,11 @@ def test_without_a_vision_url_there_is_no_screen_skill_and_nothing_about_vision_
     monkeypatch.setattr(app.config, "VISION_URL", "")
     built = []
     monkeypatch.setattr(app, "AssistantResponder", lambda **kwargs: built.append(kwargs) or FakeAssistant(**kwargs))
-    monkeypatch.setattr(app.config, "MODE", "assistant")
     with caplog.at_level(logging.DEBUG):
-        assert _main_with(monkeypatch, tmp_path, tools=None)
+        assert _main_with(monkeypatch, tmp_path)
 
     assert built[0]["vision"] is None
-    assert "assistant vision" not in caplog.text and "VAICE_VISION" not in caplog.text
+    assert "vision (look_at_screen)" not in caplog.text and "VAICE_VISION" not in caplog.text
 
 
 @pytest.mark.parametrize("url", ["http://localhost:8002/v1", "http://127.0.0.1:8002/v1", "http://[::1]:8002/v1"])
@@ -893,12 +853,11 @@ def test_a_vision_model_on_this_machine_is_named_without_a_privacy_warning(monke
     _vision(monkeypatch, url)
     built = []
     monkeypatch.setattr(app, "AssistantResponder", lambda **kwargs: built.append(kwargs) or FakeAssistant(**kwargs))
-    monkeypatch.setattr(app.config, "MODE", "assistant")
     with caplog.at_level(logging.DEBUG):
-        assert _main_with(monkeypatch, tmp_path, tools=None)
+        assert _main_with(monkeypatch, tmp_path)
 
     assert built[0]["vision"].name == "look_at_screen"
-    assert "assistant vision (look_at_screen): " in caplog.text and ", model LFM3-Omni-2B" in caplog.text
+    assert "vision (look_at_screen): " in caplog.text and ", model LFM3-Omni-2B" in caplog.text
     assert "not on this machine" not in caplog.text
     assert VISION_KEY not in caplog.text
 
@@ -906,9 +865,9 @@ def test_a_vision_model_on_this_machine_is_named_without_a_privacy_warning(monke
 def test_a_remote_vision_model_gets_a_warning_that_a_screenshot_is_sent(monkeypatch, tmp_path, caplog):
     _vision(monkeypatch, "https://vision.example/v1")
     with caplog.at_level(logging.DEBUG):
-        assert _assistant_main(monkeypatch, tmp_path)
+        assert _main_with(monkeypatch, tmp_path)
 
-    assert "assistant vision (look_at_screen): vision.example, model LFM3-Omni-2B" in caplog.text
+    assert "vision (look_at_screen): vision.example, model LFM3-Omni-2B" in caplog.text
     (warning,) = [r for r in caplog.records if "vision model at" in r.getMessage()]
     assert warning.levelno == logging.WARNING
     text = warning.getMessage()
@@ -920,7 +879,7 @@ def test_a_remote_vision_model_gets_a_warning_that_a_screenshot_is_sent(monkeypa
 def test_a_vision_model_without_a_name_warns_but_the_app_starts(monkeypatch, tmp_path, caplog):
     _vision(monkeypatch, "http://localhost:8002/v1", model="")
     with caplog.at_level(logging.INFO):
-        assert _assistant_main(monkeypatch, tmp_path)
+        assert _main_with(monkeypatch, tmp_path)
 
     assert "VAICE_VISION_MODEL is empty" in caplog.text and "model (none set)" in caplog.text
 
@@ -935,7 +894,7 @@ def test_the_vision_skill_is_built_over_the_configured_endpoint_with_the_key_and
         sent.append((url, json, headers, timeout))
         raise requests.ConnectionError("no network in tests")
 
-    monkeypatch.setattr("vaice.brain.requests.post", post)
+    monkeypatch.setattr("vaice.vision.requests.post", post)
     skill = app._vision_skill()
 
     assert skill.name == "look_at_screen"
@@ -947,26 +906,6 @@ def test_the_vision_skill_is_built_over_the_configured_endpoint_with_the_key_and
     assert body["max_tokens"] == 150  # an unbounded answer ran into the timeout on a busy screen
     assert headers == {"Authorization": f"Bearer {VISION_KEY}"}
     assert VISION_KEY not in skill_result.speech and VISION_KEY not in skill_result.detail
-
-
-def test_chat_mode_ignores_a_vision_url_and_says_so_once(monkeypatch, tmp_path, caplog):
-    _vision(monkeypatch, "https://vision.example/v1")
-    monkeypatch.setattr(app.config, "MODE", "chat")
-    with caplog.at_level(logging.DEBUG):
-        _main_with(monkeypatch, tmp_path, tools=None)
-
-    assert caplog.text.count("VAICE_VISION_URL is ignored in chat mode") == 1
-    assert "assistant vision" not in caplog.text and "not on this machine" not in caplog.text
-    assert VISION_KEY not in caplog.text
-
-
-def test_chat_mode_without_a_vision_url_logs_nothing_about_it(monkeypatch, tmp_path, caplog):
-    monkeypatch.setattr(app.config, "VISION_URL", "")
-    monkeypatch.setattr(app.config, "MODE", "chat")
-    with caplog.at_level(logging.DEBUG):
-        _main_with(monkeypatch, tmp_path, tools=None)
-
-    assert "VAICE_VISION_URL" not in caplog.text
 
 
 class FakeMcp:
@@ -991,7 +930,6 @@ def _mcp(monkeypatch, tmp_path, mode="assistant", fake=None):
         return fake
 
     monkeypatch.setattr(app.mcp_skills, "start", start)
-    monkeypatch.setattr(app.config, "MODE", mode)
     return fake, started
 
 
@@ -1000,9 +938,8 @@ def test_without_an_mcp_config_nothing_is_started_and_nothing_about_it_is_logged
     monkeypatch.setattr(app.mcp_skills, "start", lambda *_: pytest.fail("MCP started without a config"))
     built = []
     monkeypatch.setattr(app, "AssistantResponder", lambda **kwargs: built.append(kwargs) or FakeAssistant(**kwargs))
-    monkeypatch.setattr(app.config, "MODE", "assistant")
     with caplog.at_level(logging.DEBUG):
-        assert _main_with(monkeypatch, tmp_path, tools=None)
+        assert _main_with(monkeypatch, tmp_path)
 
     assert built[0]["extra_skills"] == () and "mcp server" not in caplog.text and "VAICE_MCP" not in caplog.text
 
@@ -1014,7 +951,7 @@ def test_assistant_mode_starts_the_mcp_servers_gives_their_skills_to_the_respond
     built = []
     monkeypatch.setattr(app, "AssistantResponder", lambda **kwargs: built.append(kwargs) or FakeAssistant(**kwargs))
     with caplog.at_level(logging.INFO, logger="vaice.app"):
-        assert _main_with(monkeypatch, tmp_path, tools=None)
+        assert _main_with(monkeypatch, tmp_path)
 
     assert started == [(tmp_path / "mcp.json", 12.5)]
     assert built[0]["extra_skills"] == ["a skill"]
@@ -1025,7 +962,7 @@ def test_assistant_mode_starts_the_mcp_servers_gives_their_skills_to_the_respond
 def test_the_mcp_servers_are_closed_when_the_app_ends_and_when_it_fails_to_start(monkeypatch, tmp_path):
     fake, _ = _mcp(monkeypatch, tmp_path)
     monkeypatch.setattr(app, "AssistantResponder", FakeAssistant)
-    assert _main_with(monkeypatch, tmp_path, tools=None)
+    assert _main_with(monkeypatch, tmp_path)
     assert fake.closed == 1
 
     def boom(**_):
@@ -1033,95 +970,22 @@ def test_the_mcp_servers_are_closed_when_the_app_ends_and_when_it_fails_to_start
 
     monkeypatch.setattr(app, "AssistantResponder", boom)
     with pytest.raises(SystemExit, match="could not be built"):
-        _main_with(monkeypatch, tmp_path, tools=None)
+        _main_with(monkeypatch, tmp_path)
     assert fake.closed == 2  # started before the failure: still ended
-
-
-def test_chat_mode_ignores_an_mcp_config_says_so_once_and_starts_nothing(monkeypatch, tmp_path, caplog):
-    _, started = _mcp(monkeypatch, tmp_path, mode="chat")
-    with caplog.at_level(logging.DEBUG):
-        _main_with(monkeypatch, tmp_path, tools=None)
-
-    assert caplog.text.count("VAICE_MCP_CONFIG is ignored in chat mode") == 1
-    assert started == [] and "mcp server" not in caplog.text
 
 
 def test_a_missing_mcp_package_stops_assistant_mode_with_the_install_hint(monkeypatch, tmp_path):
     monkeypatch.setattr(app.config, "MCP_CONFIG", tmp_path / "mcp.json")
-    monkeypatch.setattr(app.config, "MODE", "assistant")
     monkeypatch.setitem(sys.modules, "mcp", None)
 
     with pytest.raises(SystemExit, match="uv sync --extra mcp"):
-        _main_with(monkeypatch, tmp_path, tools=None)
-
-
-def test_chat_mode_is_unchanged_by_the_assistant_responder_existing(monkeypatch, tmp_path, caplog):
-    fetched = []
-    monkeypatch.setattr(app, "AssistantResponder", lambda: pytest.fail("assistant built in chat mode"))
-    monkeypatch.setattr(app.config, "MODE", "chat")
-
-    with caplog.at_level(logging.INFO, logger="vaice.app"):
-        _main_with(monkeypatch, tmp_path, fetch_tools=lambda url: fetched.append(url) or [{"name": "get_info"}],
-                   write_capable_tools=lambda url: [])
-
-    assert fetched and "tools enabled: get_info" in caplog.text
-    assert "assistant mode" not in caplog.text
-
-
-def test_the_subtitle_names_the_mode(monkeypatch):
-    monkeypatch.setattr(app.config, "MODE", "chat")
-    assert app._subtitle() == "llama-server · speech-to-speech"
-    monkeypatch.setattr(app.config, "MODE", "assistant")
-    assert app._subtitle() == "llama-server · assistant"
-
-    stream = build_stream(FakeResponder(), Conversation())
-    subtitles = [c for c in stream.ui.get_config_file()["components"]
-                 if c["type"] == "markdown" and "assistant" in str(c["props"].get("value", ""))]
-    assert len(subtitles) == 1
+        _main_with(monkeypatch, tmp_path)
 
 
 # --- tool history reaches only the responders that ask for it
 
 
-def _conversation_with_a_skill_turn():
-    conversation = Conversation()
-    first = conversation.start_turn()
-    first.set_user_text("how long has it been on?")
-    first.add_tool_event("system_info", "{}", "up 3 days")
-    first.set_assistant_text("Three days.")
-    first.finish()
-    return conversation
-
-
-def test_a_responder_with_tool_history_gets_the_tool_results_in_its_history():
-    responder = FakeResponder()
-    responder.tool_history = True
-
-    list(make_handler(responder, _conversation_with_a_skill_turn())(AUDIO))
-
-    assert responder.calls[0][0] == [("user", "how long has it been on?"), ("tool", "system_info: up 3 days"),
-                                     ("assistant", "Three days.")]
-
-
-def test_a_responder_without_tool_history_never_gets_tool_entries():
-    responder = FakeResponder()
-
-    list(make_handler(responder, _conversation_with_a_skill_turn())(AUDIO))
-
-    assert responder.calls[0][0] == [("user", "how long has it been on?"), ("assistant", "Three days.")]
-
-
-def test_the_llamacpp_responder_never_receives_tool_entries(monkeypatch):
-    seen = []
-    responder = LlamaCppResponder("http://127.0.0.1:9", "Be brief.")
-    monkeypatch.setattr(responder, "respond", lambda audio, history, turn: iter(seen.append(list(history)) or []))
-
-    list(make_handler(responder, _conversation_with_a_skill_turn())(AUDIO))
-
-    assert seen == [[("user", "how long has it been on?"), ("assistant", "Three days.")]]
-
-
-# --- the confirmation panel (assistant mode)
+# --- the confirmation panel
 
 
 class ConfirmingResponder(FakeResponder):
@@ -1147,7 +1011,7 @@ class ConfirmingResponder(FakeResponder):
 
 
 def waiting_request(arguments='{"name": "Safari"}'):
-    return Pending("quit_app", arguments, "Shall I quit Safari?", "call_0", [], conv.Turn())
+    return Pending("quit_app", arguments, "Shall I quit Safari?", conv.Turn())
 
 
 def confirm_page(responder):
@@ -1168,26 +1032,18 @@ HIDDEN = {"visible": False, "__type__": "update"}
 SHOWN = {"visible": True, "__type__": "update"}
 
 
-def test_chat_mode_has_no_confirmation_panel():
-    page = confirm_page(FakeResponder())
-
-    assert set(page.clicks) == {"New conversation"}
-    assert len(page.tick_dep["outputs"]) == 3  # chatbot, tool panel, seen
-    assert len(page.tick("")) == 3
-
-
-def test_assistant_mode_has_a_hidden_panel_with_run_and_cancel_above_the_tool_activity():
+def test_the_page_has_a_hidden_panel_with_run_and_cancel_above_the_tool_activity():
     responder = ConfirmingResponder()
     page = confirm_page(responder)
     components = page.config["components"]
 
-    assert set(page.clicks) == {"New conversation", "Run", "Cancel"}
+    assert set(page.clicks) == {"New conversation", "Run", "Cancel", "Stop the browser task"}
     (panel,) = [c for c in components if c["type"] == "column" and c["props"].get("visible") is False]
     (accordion,) = [c for c in components if c["type"] == "accordion"]
     order = [c["id"] for c in components]
     assert order.index(panel["id"]) < order.index(accordion["id"])
-    hidden, text, pending_id, run_row, _ = page.tick("")[2:]
-    assert hidden == run_row == HIDDEN and text == "" and pending_id == ""
+    hidden, text, pending_id, run_row, browse_row, _ = page.tick("")[2:]
+    assert hidden == run_row == browse_row == HIDDEN and text == "" and pending_id == ""
 
 
 def test_the_panel_shows_the_question_and_exactly_what_will_run_and_is_drawn_once():
@@ -1197,66 +1053,48 @@ def test_the_panel_shows_the_question_and_exactly_what_will_run_and_is_drawn_onc
     request = waiting_request()
     responder.waiting = request
 
-    *_, shown, text, pending_id, run_row, seen = page.tick(seen)
+    *_, shown, text, pending_id, run_row, _browse_row, seen = page.tick(seen)
 
     assert shown == SHOWN and run_row == SHOWN  # Run and Cancel
     assert text == 'Shall I quit Safari?\n\n```\nquit_app {"name": "Safari"}\n```'
     assert pending_id == request.id
-    assert all(item == {"__type__": "update"} for item in page.tick(seen)[:6])  # unchanged: nothing re-renders
+    assert all(item == {"__type__": "update"} for item in page.tick(seen)[:-1])  # unchanged: nothing re-renders
 
     responder.waiting = None  # settled somewhere else: the panel goes away
-    *_, hidden, text, pending_id, run_row, seen = page.tick(seen)
+    *_, hidden, text, pending_id, run_row, _browse_row, seen = page.tick(seen)
     assert hidden == run_row == HIDDEN and pending_id == ""
 
 
-def shell_request(command, voice, question="Shall I run the command ls? The full command is on the screen."):
-    return Pending("run_shell", json.dumps({"command": command}), question, "call_0", [], conv.Turn(), voice=voice)
+def shell_request(command, question="I would run a command for this request. The command is on the screen."):
+    return Pending("run_shell", json.dumps({"command": command}), question, conv.Turn())
 
 
 def test_a_shell_request_shows_the_command_line_itself_not_the_json():
-    view = app.pending_view(shell_request("ls -la ~/Downloads", voice=True))
+    view = app.pending_view(shell_request("ls -la ~/Downloads"))
 
     text = app.confirmation_panel(view)[1]
 
-    assert text == ("Shall I run the command ls? The full command is on the screen.\n\n"
+    assert text == ("I would run a command for this request. The command is on the screen.\n\n"
                     "```\nls -la ~/Downloads\n```")
-    assert "Only the Run button" not in text  # a spoken yes may approve this one
-
-
-def test_a_request_that_needs_the_button_says_so_under_the_question():
-    view = app.pending_view(shell_request("echo a | wc -l", voice=False, question="I would run a command."))
-
-    assert view["voice"] is False
-    text = app.confirmation_panel(view)[1]
-
-    assert text == ("I would run a command.\n\n"
-                    "Only the Run button can approve this one; saying yes will not.\n\n"
-                    "```\necho a | wc -l\n```")
 
 
 def test_a_shell_command_is_shown_exactly_and_backticks_cannot_close_its_block():
-    text = app.confirmation_panel(app.pending_view(shell_request("echo ```x```\nls", voice=False)))[1]
+    text = app.confirmation_panel(app.pending_view(shell_request("echo ```x```\nls")))[1]
 
     assert text.endswith("````\necho ```x```\nls\n````")  # a newline in the command is shown as it is
 
 
 @pytest.mark.parametrize("arguments", ["{not json", "[]", '{"command": 5}', "{}"])
 def test_a_shell_request_with_odd_arguments_falls_back_to_the_raw_call(arguments):
-    request = Pending("run_shell", arguments, "Q?", "call_0", [], conv.Turn(), voice=False)
+    request = Pending("run_shell", arguments, "Q?", conv.Turn())
 
     text = app.confirmation_panel(app.pending_view(request))[1]
 
     assert f"```\nrun_shell {arguments}\n```" in text
 
 
-def test_the_panel_shows_a_view_without_the_voice_key_as_voice_approvable():
-    view = {"id": "x", "question": "Shall I quit Safari?", "name": "quit_app", "arguments": "{}"}
-
-    assert "Only the Run button" not in app.confirmation_panel(view)[1]
-
-
 def test_an_ordinary_request_shows_the_panel_and_its_run_and_cancel_row():
-    for request in (waiting_request(), shell_request("ls", voice=True), shell_request("ls | wc", voice=False)):
+    for request in (waiting_request(), shell_request("ls"), shell_request("ls | wc")):
         panel, _, _, run_row = app.confirmation_panel(app.pending_view(request))
 
         assert panel == SHOWN and run_row == SHOWN
@@ -1306,7 +1144,7 @@ def test_run_and_cancel_pass_the_id_the_panel_showed_and_hide_it_and_redraw_on_t
     assert len(run_dep["outputs"]) == 3  # the panel, the id the panel holds, and `seen`: the blank forces a redraw
 
 
-def test_new_conversation_clears_a_waiting_request_and_chat_mode_does_not_need_the_method():
+def test_new_conversation_clears_a_waiting_request():
     responder = ConfirmingResponder()
     responder.waiting = waiting_request()
     page = confirm_page(responder)
@@ -1314,28 +1152,20 @@ def test_new_conversation_clears_a_waiting_request_and_chat_mode_does_not_need_t
     page.clicks["New conversation"][0]()
 
     assert responder.cleared == 1 and responder.pending() is None
-    confirm_page(FakeResponder()).clicks["New conversation"][0]()  # no clear_pending: no error
 
 
-# -- assistant mode with memory: the Memory panel, the startup line and the privacy warning
+# -- memory: the Memory panel and the startup line
 
 
 class MemoryResponder(FakeResponder):
-    """What `build_stream` finds on an assistant responder with memory on: a `memory` holding the notes."""
+    """What `build_stream` finds on a responder with memory on: a `memory` holding the notes."""
 
     def __init__(self, memory):
         super().__init__()
         self.memory = memory
 
 
-def _tick_fn(stream):
-    config = stream.ui.get_config_file()
-    ours = [c for c in config["components"] if c["type"] == "timer" and c["props"]["value"] == VIEW_REFRESH_SECONDS]
-    (tick,) = [d for d in config["dependencies"] if d["targets"][0] == (ours[0]["id"], "tick")]
-    return config, tick, stream.ui.fns[tick["id"]].fn
-
-
-def test_the_memory_panel_is_a_collapsed_accordion_under_the_tool_panel_in_assistant_mode_with_memory():
+def test_the_memory_panel_is_a_collapsed_accordion_under_the_tool_panel_when_memory_is_on():
     stream = build_stream(MemoryResponder(Memory(None)), Conversation())
     config = stream.ui.get_config_file()
 
@@ -1345,51 +1175,31 @@ def test_the_memory_panel_is_a_collapsed_accordion_under_the_tool_panel_in_assis
     assert memory_accordion["props"]["open"] is False
 
 
-def test_chat_mode_and_assistant_mode_without_memory_have_no_memory_panel():
-    class NoMemory(FakeResponder):
-        memory = None  # VAICE_ASSISTANT_MEMORY off
+def test_without_memory_there_is_no_memory_panel():
+    stream = build_stream(FakeResponder(), Conversation())  # VAICE_MEMORY off: `memory` is None
+    config = stream.ui.get_config_file()
 
-    for responder in (FakeResponder(), NoMemory()):
-        stream = build_stream(responder, Conversation())
-        config = stream.ui.get_config_file()
-        assert [c["props"]["label"] for c in config["components"] if c["type"] == "accordion"] == ["Tool activity"]
-        _, tick, tick_fn = _tick_fn(stream)
-        assert len(tick["outputs"]) == 3  # chatbot, tool panel, seen: no memory column
-        assert len(tick_fn("")) == 3
+    assert [c["props"]["label"] for c in config["components"] if c["type"] == "accordion"] == ["Tool activity"]
+    assert len(tick_fn(stream)("")) == 8  # chatbot, tool panel, confirm x4, browse row, seen: no memory column
 
 
 def test_the_timer_fills_the_memory_panel_when_the_notes_change_and_is_silent_otherwise():
     memory = Memory(None)
     stream = build_stream(MemoryResponder(memory), Conversation())
-    _, tick, tick_fn = _tick_fn(stream)
-    assert len(tick["outputs"]) == 4  # chatbot, tool panel, memory panel, seen
+    tick = tick_fn(stream)
+    assert len(tick("")) == 9  # chatbot, tool panel, confirm x4, browse row, memory panel, seen
 
-    _, _, shown, seen = tick_fn("")
+    *_, shown, seen = tick("")
     assert shown == "Nothing remembered."
-    assert tick_fn(seen)[0] == {"__type__": "update"}  # unchanged: nothing re-rendered
+    assert tick(seen)[0] == {"__type__": "update"}  # unchanged: nothing re-rendered
 
     memory.add("The user parks on level three.")
-    _, _, shown, seen = tick_fn(seen)
+    *_, shown, seen = tick(seen)
     assert shown == "- The user parks on level three\\."
-    assert tick_fn(seen)[0] == {"__type__": "update"}
+    assert tick(seen)[0] == {"__type__": "update"}
 
     memory.clear()
-    assert tick_fn(seen)[2] == "Nothing remembered."
-
-
-def test_the_memory_panel_comes_after_the_confirmation_panel_when_both_exist():
-    class Asking(MemoryResponder):
-        def pending(self):
-            return None
-
-        approve = cancel = clear_pending = staticmethod(lambda *_args: None)
-
-    stream = build_stream(Asking(Memory(None)), Conversation())
-    _, tick, tick_fn = _tick_fn(stream)
-
-    result = tick_fn("")
-    assert len(tick["outputs"]) == len(result) == 8  # chatbot, tool, confirm x4, memory, seen
-    assert result[6] == "Nothing remembered."
+    assert tick(seen)[-2] == "Nothing remembered."
 
 
 def test_new_conversation_leaves_the_notes_alone():
@@ -1398,10 +1208,9 @@ def test_new_conversation_leaves_the_notes_alone():
     conversation = Conversation()
     stream = build_stream(MemoryResponder(memory), conversation)
     config = stream.ui.get_config_file()
-    (click,) = [d for d in config["dependencies"] if d["targets"][0][1] == "click"]
     conversation.start_turn().set_user_text("hello")
 
-    assert stream.ui.fns[click["id"]].fn() == ([], "")  # still just the chatbot and the tool panel
+    assert button_fn(stream, "New conversation")() == ([], "")  # still just the chatbot and the tool panel
 
     assert conversation.messages_for_ui() == []
     assert memory.notes() == ["The user parks on level three."]  # long-term by design
@@ -1451,7 +1260,7 @@ def test_the_memory_panel_text_round_trips_and_lists_an_empty_memory_plainly():
 
 
 def _memory_main(monkeypatch, tmp_path, notes=None, memory_file="default", on=True):
-    """main() in assistant mode with the real `_open_memory`; returns the `memory` the responder was given."""
+    """main() with the real `_open_memory`; returns the `memory` the responder was given."""
     given = []
 
     class Responder(FakeAssistant):
@@ -1462,11 +1271,10 @@ def _memory_main(monkeypatch, tmp_path, notes=None, memory_file="default", on=Tr
     path = tmp_path / "memory.json" if memory_file == "default" else memory_file
     if notes is not None and path is not None:
         path.write_text(json.dumps({"version": 1, "notes": notes}))
-    monkeypatch.setattr(app.config, "ASSISTANT_MEMORY", on)
+    monkeypatch.setattr(app.config, "MEMORY", on)
     monkeypatch.setattr(app.config, "MEMORY_FILE", path)
-    monkeypatch.setattr(app.config, "MODE", "assistant")
     monkeypatch.setattr(app, "AssistantResponder", Responder)
-    assert _main_with(monkeypatch, tmp_path, tools=None)
+    assert _main_with(monkeypatch, tmp_path)
     return given[0]
 
 
@@ -1504,39 +1312,17 @@ def test_with_memory_off_the_responder_gets_no_memory_the_file_is_left_alone_and
 
     assert memory is None
     assert path.read_text() == "not even json"
-    assert "assistant memory is off" in caplog.text and "VAICE_ASSISTANT_MEMORY" in caplog.text
+    assert "assistant memory is off" in caplog.text and "VAICE_MEMORY" in caplog.text
 
 
-def test_chat_mode_does_not_open_the_memory(monkeypatch, tmp_path):
-    monkeypatch.setattr(app, "_open_memory", lambda: pytest.fail("chat mode opened the memory"))
-    monkeypatch.setattr(app.config, "MODE", "chat")
-
-    assert _main_with(monkeypatch, tmp_path, tools=None)
-
-
-class OutboxResponder(FakeResponder):
-    """An assistant-like responder: it takes an outbox from `build_stream` (the optional `attach_outbox`)."""
-
-    outbox = None
-
-    def attach_outbox(self, outbox):
-        self.outbox = outbox
-
-
-def test_an_assistant_like_responder_gets_the_outbox_the_handler_serves():
-    responder = OutboxResponder()
+def test_the_responder_gets_the_outbox_the_handler_serves():
+    responder = FakeResponder()
 
     stream = build_stream(responder, Conversation())
 
     assert responder.outbox is not None
     assert stream.event_handler.outbox is responder.outbox
     assert stream.event_handler.copy().outbox is responder.outbox  # every connection's copy drains the same outbox
-
-
-def test_a_responder_without_attach_outbox_gets_a_stream_without_one():
-    stream = build_stream(FakeResponder(), Conversation())
-
-    assert stream.event_handler.outbox is None
 
 
 # -- the browse skill (VAICE_BROWSE)
@@ -1684,7 +1470,7 @@ def test_assistant_main_hands_the_agent_to_the_responder_and_closes_it_at_the_en
 
     monkeypatch.setattr(FakeAssistant, "__init__", init)
 
-    assert _assistant_main(monkeypatch, tmp_path)
+    assert _main_with(monkeypatch, tmp_path)
 
     assert seen == [FakePiAgent.made[0]] and FakePiAgent.closed == 1
 
@@ -1693,30 +1479,22 @@ def test_the_agent_is_closed_even_when_startup_fails_after_it(browse_on, monkeyp
     monkeypatch.setattr(FakeAssistant, "__init__", lambda self, **kwargs: (_ for _ in ()).throw(RuntimeError("boom")))
 
     with pytest.raises(RuntimeError, match="boom"):
-        _assistant_main(monkeypatch, tmp_path)
-
-    assert FakePiAgent.closed == 1
-
-
-def test_chat_mode_ignores_the_browse_setting_with_one_warning(monkeypatch, tmp_path, caplog):
-    monkeypatch.setattr(app.config, "BROWSE", "pi")
-    monkeypatch.setattr(app, "_open_browse", lambda: pytest.fail("opened a browser agent in chat mode"))
-
-    with caplog.at_level(logging.WARNING, logger="vaice.app"):
         _main_with(monkeypatch, tmp_path)
 
-    assert caplog.text.count("VAICE_BROWSE is ignored in chat mode") == 1
+    assert FakePiAgent.closed == 1
 
 
 def test_the_stop_row_follows_whether_a_browser_task_runs():
     conversation = Conversation(None, window=10)
 
-    off = app.refresh_view(conversation, "", browsing=lambda: False)
-    on = app.refresh_view(conversation, "", browsing=lambda: True)
+    def view(known, running):
+        return app.refresh_view(conversation, known, pending=lambda: None, browsing=lambda: running)
 
-    assert off[2]["visible"] is False and on[2]["visible"] is True  # after the chatbot and the tool panel
+    off, on = view("", False), view("", True)
+
+    assert off[-2]["visible"] is False and on[-2]["visible"] is True  # the row after the confirmation panel
     assert off[-1] != on[-1]  # the view is part of the dedup key: a change is redrawn
-    assert app.refresh_view(conversation, on[-1], browsing=lambda: True)[2] == app.gr.skip()
+    assert view(on[-1], True)[-2] == app.gr.skip()
 
 
 class BrowsingResponder(ConfirmingResponder):

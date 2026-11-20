@@ -9,10 +9,9 @@ from pathlib import Path
 
 import pytest
 
-from vaice import brain as brain_module
 from vaice import vision
-from vaice.brain import BrainError, BrainReply, ChatBrain
 from vaice.skills import SkillError, Skills, default_skills
+from vaice.vision import VisionClient, VisionError
 
 KEY = "fake-vision-key-ABCDEF123456"
 FULL, SMALL = b"full-size-jpeg", b"resized-jpeg"
@@ -148,25 +147,26 @@ def test_capture_logs_a_size_and_never_the_image(commands, caplog):
 
 
 class FakeVisionBrain:
+    """A stand-in for `VisionClient`: `.calls` holds the messages of each request."""
+
     def __init__(self, reply="A Numbers window.", error=None):
         self.reply, self.error = reply, error
         self.calls = []
 
-    def complete(self, messages, tools):
-        self.calls.append((messages, tools))
+    def complete(self, messages):
+        self.calls.append(messages)
         if self.error:
             raise self.error
-        return BrainReply(self.reply, [], {"role": "assistant", "content": self.reply})
+        return self.reply
 
 
-def test_ask_sends_the_image_and_the_question_with_a_system_line_and_no_tools():
+def test_ask_sends_the_image_and_the_question_with_a_system_line():
     brain = FakeVisionBrain()
 
     answer = vision.ask(brain, b"jpeg-bytes", "What is open?")
 
     assert answer == "A Numbers window."
-    ((messages, tools),) = brain.calls
-    assert tools is None
+    (messages,) = brain.calls
     assert messages == [
         {"role": "system", "content": vision.SYSTEM},
         {"role": "user", "content": [
@@ -190,17 +190,15 @@ def test_a_long_answer_is_cut_with_a_marker():
     assert vision.ask(FakeVisionBrain("a" * vision.MAX_ANSWER_CHARS), b"x", "q") == "a" * vision.MAX_ANSWER_CHARS
 
 
-@pytest.mark.parametrize("sentence", [brain_module.CANT_REACH, brain_module.KEY_REFUSED, brain_module.BUSY,
-                                      brain_module.UNUSABLE])
+@pytest.mark.parametrize("sentence", [vision.CANT_REACH, vision.KEY_REFUSED, vision.BUSY, vision.UNUSABLE])
 def test_a_failed_request_is_spoken_naming_the_vision_model(sentence, caplog):
-    brain = FakeVisionBrain(error=BrainError("details for the log", sentence))
+    brain = FakeVisionBrain(error=VisionError("details for the log", sentence))
 
     with caplog.at_level(logging.WARNING), pytest.raises(SkillError) as caught:
         vision.ask(brain, b"x", "q")
 
     spoken = str(caught.value)
-    assert "vision model" in spoken and "language model" not in spoken
-    assert spoken == sentence.replace("language model", "vision model")
+    assert spoken == sentence and "vision model" in spoken
     assert "details for the log" in caplog.text  # the log keeps the detail, the speech does not
 
 
@@ -222,7 +220,7 @@ class FakeResponse:
 
 
 class Posted:
-    """Replaces requests.post in brain.py; `.sent` holds the (url, body, headers) of each request."""
+    """Replaces requests.post in vision.py; `.sent` holds the (url, body, headers) of each request."""
 
     def __init__(self):
         self.status = 200
@@ -237,12 +235,12 @@ class Posted:
 @pytest.fixture
 def post(monkeypatch):
     fake = Posted()
-    monkeypatch.setattr(brain_module.requests, "post", fake)
+    monkeypatch.setattr(vision.requests, "post", fake)
     return fake
 
 
 def test_the_helper_endpoint_gets_the_key_only_in_the_header_and_the_image_in_the_body(post, commands):
-    skill = vision.vision_skill(ChatBrain.helper("https://vision.example/v1", 30, "omni", KEY), "vision.example")
+    skill = vision.vision_skill(VisionClient("https://vision.example/v1", 30, "omni", KEY), "vision.example")
 
     result = Skills([skill]).run("look_at_screen", '{"question": "How much battery is left?"}')
 
@@ -258,7 +256,7 @@ def test_the_helper_endpoint_gets_the_key_only_in_the_header_and_the_image_in_th
 def test_a_refused_key_never_reaches_the_result_the_error_the_chain_or_the_log(post, commands, caplog, status):
     post.status = status
     post.text = f'{{"error": "Incorrect API key provided: {KEY}"}}'
-    skill = vision.vision_skill(ChatBrain.helper("https://vision.example/v1", 30, "omni", KEY), "vision.example")
+    skill = vision.vision_skill(VisionClient("https://vision.example/v1", 30, "omni", KEY), "vision.example")
 
     with caplog.at_level(logging.DEBUG):
         result = Skills([skill]).run("look_at_screen", '{"question": "What is open?"}')
@@ -272,16 +270,16 @@ def test_a_refused_key_never_reaches_the_result_the_error_the_chain_or_the_log(p
 
 
 def skill_brain(key):
-    return ChatBrain.helper("https://vision.example/v1", 30, "omni", key)
+    return VisionClient("https://vision.example/v1", 30, "omni", key)
 
 
 def test_a_connection_error_that_quotes_the_header_never_reaches_the_log(monkeypatch, commands, caplog):
-    error = brain_module.requests.exceptions.InvalidHeader(f"Invalid header value: 'Bearer {KEY}'")
+    error = vision.requests.exceptions.InvalidHeader(f"Invalid header value: 'Bearer {KEY}'")
 
     def broken(*_args, **_kwargs):
         raise error
 
-    monkeypatch.setattr(brain_module.requests, "post", broken)
+    monkeypatch.setattr(vision.requests, "post", broken)
     skill = vision.vision_skill(skill_brain(KEY), "vision.example")
 
     with caplog.at_level(logging.DEBUG):
@@ -314,11 +312,10 @@ def test_the_skill_captures_asks_and_answers_with_what_was_sent_where(monkeypatc
     result = skill.run({"question": "  What does the dialog say?  "})
 
     assert seen == [4]
-    assert brain.calls[0][0][1]["content"][1] == {"type": "text", "text": "What does the dialog say?"}
+    assert brain.calls[0][1]["content"][1] == {"type": "text", "text": "What does the dialog say?"}
     assert result.speech == "the screen shows: A dialog says Disk full."
     assert "What does the dialog say?" in result.detail and "4 bytes" in result.detail
     assert "127.0.0.1:8002, model omni" in result.detail and "not kept" in result.detail
-    assert result.answer == ""
 
 
 @pytest.mark.parametrize("arguments", ['{}', '{"question": ""}', '{"question": "   "}', '{"question": 5}'])
@@ -331,17 +328,16 @@ def test_a_missing_or_empty_question_takes_no_screenshot(monkeypatch, arguments)
     assert result.speech.startswith("the look at screen skill failed:")
 
 
-def test_a_missing_permission_is_spoken_word_for_word_not_paraphrased_by_the_brain(commands):
+def test_a_missing_permission_names_the_setting_in_the_result_the_model_reads(commands):
     commands.screencapture = (1, "could not create image from display", False)
     skills = Skills([vision.vision_skill(FakeVisionBrain(), "h")])
 
     result = skills.run("look_at_screen", '{"question": "What is open?"}')
 
     assert result.speech == f"the look at screen skill failed: {vision.PERMISSION}"
-    assert result.answer == vision.PERMISSION  # the reply ends with the exact steps (see decide())
 
 
-def test_other_capture_failures_are_left_to_the_brain(commands):
+def test_other_capture_failures_are_a_failed_call_too(commands):
     commands.screencapture = (0, "", True)
     commands.sips = (1, "bad file", False)
     skills = Skills([vision.vision_skill(FakeVisionBrain(), "h")])
@@ -349,7 +345,58 @@ def test_other_capture_failures_are_left_to_the_brain(commands):
     result = skills.run("look_at_screen", '{"question": "What is open?"}')
 
     assert "could not be resized" in result.speech
-    assert result.answer == ""
+
+
+# -- the client's request and its failures
+
+
+def test_the_request_holds_messages_the_model_and_the_cap_only_and_no_header_without_a_key(post):
+    client = VisionClient("https://vision.example/v1/", 30, "omni", max_tokens=200)
+
+    assert client.complete([{"role": "user", "content": "hi"}]) == "Battery: 42%"
+
+    ((url, body, headers),) = post.sent
+    assert url == "https://vision.example/v1/chat/completions"
+    assert body == {"messages": [{"role": "user", "content": "hi"}], "max_tokens": 200, "model": "omni"}
+    assert headers == {}
+
+
+def test_a_client_without_a_model_or_cap_sends_neither(post):
+    VisionClient("https://vision.example/v1", 30).complete([])
+
+    assert post.sent[0][1] == {"messages": []}
+
+
+@pytest.mark.parametrize(("status", "sentence"), [(401, vision.KEY_REFUSED), (403, vision.KEY_REFUSED),
+                                                  (429, vision.BUSY), (500, vision.CANT_REACH)])
+def test_a_failed_status_is_a_vision_error_with_its_own_sentence(post, status, sentence):
+    post.status = status
+    post.text = "nope"
+
+    with pytest.raises(VisionError) as caught:
+        VisionClient("https://vision.example/v1", 30, "omni", KEY).complete([])
+
+    assert caught.value.spoken == sentence
+
+
+@pytest.mark.parametrize("text", ["not json", "{}", '{"choices": []}', '{"choices": [{"message": {"content": 5}}]}'])
+def test_an_unusable_reply_is_a_vision_error(post, text):
+    post.text = text
+
+    with pytest.raises(VisionError) as caught:
+        VisionClient("https://vision.example/v1", 30).complete([])
+
+    assert caught.value.spoken == vision.UNUSABLE
+
+
+def test_a_timeout_is_a_vision_error(monkeypatch):
+    def slow(*_args, **_kwargs):
+        raise vision.requests.Timeout("slow")
+
+    monkeypatch.setattr(vision.requests, "post", slow)
+
+    with pytest.raises(VisionError, match="did not answer within 30 s"):
+        VisionClient("https://vision.example/v1", 30).complete([])
 
 
 # -- offered only when configured

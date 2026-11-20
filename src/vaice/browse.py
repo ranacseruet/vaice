@@ -1,4 +1,4 @@
-"""A browsing agent for assistant mode: `PiAgent` hands a goal ("open python.org and tell me its title") to the Pi
+"""A browsing agent: `PiAgent` hands a goal ("open python.org and tell me its title") to the Pi
 coding agent (`pi`) running in its RPC mode, which drives Chrome through the chrome-devtools MCP server, and returns
 the answer text. The `browse` skill and its settings live in `browse_task.py`, `responders/assistant.py` and `app.py`.
 

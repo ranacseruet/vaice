@@ -1,14 +1,15 @@
 """Speech that no reply is carrying: audio and markers queued by a worker thread, served by the handler's idle emit().
 
-A click on *Run* runs a call outside any reply, so there is no reply generator to hand
-the outcome's audio to fastrtc. The worker puts it here instead and `InterruptSafeReplyOnPause.emit()` drains it
-while nobody is talking (fastrtc plays whatever an idle `emit()` returns). Two kinds of item, in one FIFO:
+A click on *Run* runs a call outside any reply (and a browser task ends long after its reply), so there is no reply
+generator to hand the outcome's audio to fastrtc. The worker puts it here instead and
+`InterruptSafeReplyOnPause.emit()` drains it while nobody is talking (fastrtc plays whatever an idle
+`emit()` returns). Two kinds of item, in one FIFO:
 
 - an audio frame, `(sample_rate, float32 samples)`, exactly what a reply yields;
 - a `Marker`: a callback the handler runs, on its own thread, once everything queued before it was served (and so
   nearly played, the handler paces what it serves), with an optional `on_drop` that `clear()` runs instead when the
-  marker is discarded without having run. "The text was spoken" and "a question can now be answered" are markers; a
-  question that was never heard drops with its `on_drop`.
+  marker is discarded without having run. "The text was spoken" is a marker: if the speech never
+  played, nothing is recorded.
 
 Staleness is not the age of an item (a long outcome legitimately waits behind its own playback) but whether a
 connection is draining at all: the handler calls `poll()` / `touch()` on every `emit()`, and a gap of more than
@@ -17,8 +18,8 @@ is cleared before the next poll serves anything.
 
 Each `clear()` (a barge-in, a new reply, "New conversation", staleness) starts a new `generation`. A producer that
 captured the generation when it began and passes it to `put` / `put_marker` has what it queues after a clear refused
-(a marker's `on_drop` runs at once), so a task that was cancelled and cleared cannot slip one more sentence, or the
-marker that arms its question, in behind the clear.
+(a marker's `on_drop` runs at once), so speech that was cancelled and cleared cannot slip one more frame, or its
+record marker, in behind the clear.
 
 Callbacks and hooks run outside the lock, and a failing one is logged, never raised.
 """

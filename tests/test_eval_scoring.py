@@ -338,28 +338,6 @@ def load(name):
     return json.loads((EVALS / name).read_text())
 
 
-def test_case_and_tool_files_are_consistent():
-    cases, tools = load("cases.json"), load("tools.json")
-    names = [t["definition"]["name"] for t in tools]
-    assert len(names) == len(set(names)) == 6
-    for tool in tools:
-        assert tool["definition"]["type"] == "function"
-        assert tool["definition"]["parameters"]["type"] == "object"
-        assert isinstance(tool["result"], str)
-
-    ids = [c["id"] for c in cases]
-    assert len(ids) == len(set(ids))
-    for c in cases:
-        assert c["say"].strip()
-        expected = c["expect"].get("tools", c["expect"].get("any_of"))
-        assert isinstance(expected, list), c["id"]
-        assert set(expected) <= set(names), c["id"]
-        assert set(c["expect"].get("args", {})) <= set(expected), c["id"]
-        scoring.score(c["expect"], [])  # the expectation is well formed
-
-    assert sum(1 for c in cases if c["expect"].get("tools") == []) >= 8
-
-
 def test_the_required_sentences_are_cases():
     said = {c["say"] for c in load("cases.json")}
     assert {
@@ -367,18 +345,16 @@ def test_the_required_sentences_are_cases():
         "How much free disk space do I have?",
         "Turn the volume down to twenty percent.",
         "Remind me to call mom tomorrow at nine.",
-        "What's the latest news about SpaceX?",
         "Thanks, that's all for now.",
         "Why is the sky blue?",
-        "Open the terminal and then set the volume to fifty.",
     } <= said
 
 
-def test_the_assistant_cases_are_consistent_with_the_skills():
+def test_the_cases_are_consistent_with_the_skills():
     from vaice.memory import Memory
     from vaice.skills import default_skills
 
-    cases = load("assistant_cases.json")
+    cases = load("cases.json")
     skills = default_skills(memory=Memory(None))
     ids = [c["id"] for c in cases]
     assert len(ids) == len(set(ids))
@@ -404,7 +380,7 @@ def test_the_answer_and_command_expectations_are_well_formed_and_where_the_stub_
 
     from run import SKILL_STUBS
 
-    cases = {c["id"]: c["expect"] for name in ("assistant_cases.json", "assistant_shell_cases.json")
+    cases = {c["id"]: c["expect"] for name in ("cases.json", "shell_cases.json")
              for c in load(name)}
     for case_id, expect in cases.items():
         if "answer_has" in expect:
@@ -436,7 +412,7 @@ def test_the_answer_and_command_expectations_are_well_formed_and_where_the_stub_
 def test_the_shell_cases_are_consistent_with_the_skills_when_run_shell_is_on():
     from vaice.skills import default_skills
 
-    cases = load("assistant_shell_cases.json")
+    cases = load("shell_cases.json")
     skills = default_skills(shell=True)
     ids = [c["id"] for c in cases]
     assert len(ids) == len(set(ids))
@@ -461,7 +437,7 @@ def test_the_vision_cases_are_consistent_with_the_skills_when_look_at_screen_is_
     from vaice.skills import default_skills
     from vaice.vision import vision_skill
 
-    cases = load("assistant_vision_cases.json")
+    cases = load("vision_cases.json")
     skills = default_skills(vision=vision_skill(object(), "h"))
     ids = [c["id"] for c in cases]
     assert len(ids) == len(set(ids))
@@ -488,7 +464,7 @@ def test_the_browse_cases_are_consistent_with_the_skills_when_browse_is_on():
     from vaice import browse_task
     from vaice.skills import SkillResult, default_skills
 
-    cases = load("assistant_browse_cases.json")
+    cases = load("browse_cases.json")
     skills = default_skills(browse_skills=browse_task.browse_skills(
         busy=None, status=lambda: SkillResult("s"), stop=lambda: SkillResult("t")))
     ids = [c["id"] for c in cases]

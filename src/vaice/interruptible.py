@@ -43,7 +43,7 @@ PREROLL_SECONDS = 0.3
 # Proactive speech is paced: fastrtc's playback queue is unbounded and emit() runs ~37 times a second, so serving
 # the outbox as fast as it is polled would queue a whole outcome at once, and its markers would fire long before the
 # audio played. The next item is served only while the audio served so far is estimated to finish less than this far
-# ahead, which keeps markers (recorded text, arming a question) within this of the real playback.
+# ahead, which keeps markers (the recorded text) within this of the real playback.
 LEAD_SECONDS = 0.4
 
 

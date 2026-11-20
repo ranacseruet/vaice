@@ -1,11 +1,9 @@
 """The pure parts of the browse skill: the definition, the goal, what is said, how a step is asked, the result."""
-import re
 import threading
 
 import pytest
 
 from vaice import browse, browse_task
-from vaice.confirm import NO, YES, spoken_answer
 from vaice.skills import SkillError, SkillResult, Skills, Started, default_skills
 
 
@@ -14,7 +12,7 @@ def test_the_skill_is_a_background_skill_the_brain_can_call_with_a_goal():
 
     assert skill.name == "browse" and skill.kind == "background"
     assert skill.parameters["required"] == ["goal"]
-    assert Skills([skill]).definitions()[0]["function"]["name"] == "browse"
+    assert Skills([skill]).definitions()[0]["name"] == "browse"
 
 
 def test_it_is_offered_only_when_asked_for():
@@ -22,13 +20,13 @@ def test_it_is_offered_only_when_asked_for():
     assert "browse" in default_skills(browse=True).names
 
 
-def test_prepare_returns_the_fixed_line_to_say_now_and_validates_the_goal():
+def test_prepare_returns_the_line_to_say_now_and_validates_the_goal():
     skills = Skills([browse_task.browse_skill()])
 
     assert skills.prepare("browse", '{"goal": "open python.org"}') == Started(browse_task.WORKING)
     for arguments in ("{}", '{"goal": ""}', '{"goal": "  "}', '{"goal": 3}', "not json", "[]"):
         prepared = skills.prepare("browse", arguments)
-        assert not isinstance(prepared, Started), arguments  # a failed call, answered to the brain like any other
+        assert not isinstance(prepared, Started), arguments  # a failed call, a result for the model like any other
 
 
 def test_the_goal_is_one_line_of_bounded_length():
@@ -37,41 +35,17 @@ def test_the_goal_is_one_line_of_bounded_length():
     assert browse_task.goal_of({"goal": None}) == "" and browse_task.goal_of("[]") == ""
 
 
-def test_every_gated_tool_has_a_spoken_name_and_none_holds_an_answer_word():
+def test_every_gated_tool_has_a_spoken_name():
     assert set(browse._MUTATING_TOOLS) == set(browse_task.STEP_ACTIONS)  # every tool the gate asks about is named
-    for action in (*browse_task.STEP_ACTIONS.values(), browse_task.OTHER_STEP):
-        sentence = browse_task.step_question("mcp__chrome__click", None).replace("click something", action)
-        words = set(re.findall(r"[a-z0-9]+", sentence.casefold()))
-        assert not words & browse_task._ANSWER_WORDS, sentence
-
-
-def test_the_question_never_says_an_answer_word_and_is_no_answer_itself():
-    for host in (None, "python.org", "news.ycombinator.com", "stop.example.com", "yes.test", "go-ahead.dev"):
-        for tool in ("mcp__chrome__click", "mcp__chrome__fill", "mcp__chrome__something_new"):
-            text = browse_task.step_question(tool, host)
-            words = set(re.findall(r"[a-z0-9]+", text.casefold()))
-            assert not words & browse_task._ANSWER_WORDS, text
-            assert spoken_answer(text) is None
-
-
-def test_the_answer_words_cover_every_word_of_every_yes_and_no_phrase():
-    assert {"yes", "no", "stop", "cancel", "go", "ahead"} <= browse_task._ANSWER_WORDS
-    for phrase in YES | NO:
-        assert set(re.sub(r"[^\w\s]", "", phrase.casefold()).split()) <= browse_task._ANSWER_WORDS
 
 
 def test_the_question_names_the_action_and_the_host_but_never_the_arguments():
     text = browse_task.step_question("mcp__chrome__fill", "python.org")
 
-    assert text == "Shall I fill in a field on python.org? The details are on the screen."
-    assert browse_task.step_question("mcp__chrome__fill", None) == "Shall I fill in a field? " \
-                                                                   "The details are on the screen."
-    assert browse_task.step_question("mcp__chrome__unknown", None).startswith("Shall I take a step?")
-
-
-def test_a_host_that_holds_an_answer_word_is_left_out_because_a_page_could_pick_it():
-    assert browse_task.step_question("mcp__chrome__click", "stop.example.com") == \
-        browse_task.step_question("mcp__chrome__click", None)
+    assert text == "The browser task wants to fill in a field on python.org. The details are on the screen."
+    assert browse_task.step_question("mcp__chrome__fill", None) == \
+        "The browser task wants to fill in a field. The details are on the screen."
+    assert browse_task.step_question("mcp__chrome__unknown", None).startswith("The browser task wants to take a step")
 
 
 def test_the_result_is_one_clean_line_for_the_brain_and_keeps_the_whole_answer_as_detail():
@@ -86,11 +60,6 @@ def test_a_long_answer_is_cut_for_the_brain_but_not_in_the_detail():
 
     assert result.speech.endswith(browse_task.CUT) and len(result.speech) < browse_task.RESULT_CHARS + 100
     assert len(result.detail) == 5000
-
-
-def test_the_fixed_sentences_hold_no_answer_word():
-    for text in (browse_task.WORKING, browse_task.FAILED, browse_task.LIMIT, browse_task.BUSY):
-        assert not set(re.findall(r"[a-z0-9]+", text.casefold())) & browse_task._ANSWER_WORDS, text
 
 
 def test_a_background_call_without_a_goal_fails_as_a_skill_error():
@@ -120,12 +89,12 @@ def test_browse_comes_with_a_status_and_a_stop_skill_the_brain_can_tell_apart():
     assert default_skills(browse=True, browse_skills=skills).names[-3:] == ["browse", "browser_status", "stop_browsing"]
 
 
-def test_a_second_browse_call_while_one_runs_is_refused_with_the_fixed_sentence_that_ends_the_reply():
+def test_a_second_browse_call_while_one_runs_is_refused_with_the_busy_text_as_its_result():
     running = [True]
     skills = Skills([browse_task.browse_skill(lambda: running[0])])
 
     refused = skills.prepare("browse", '{"goal": "open python.org"}')
-    assert not isinstance(refused, Started) and refused.answer == browse_task.BUSY
+    assert isinstance(refused, SkillResult) and browse_task.BUSY in refused.speech
     running[0] = False
     assert skills.prepare("browse", '{"goal": "open python.org"}') == Started(browse_task.WORKING)
 

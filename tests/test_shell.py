@@ -1,4 +1,4 @@
-"""The `run_shell` skill: how a command is classified (no process), and the runner against real, harmless
+"""The `run_shell` skill: which commands are refused (no process), and the runner against real, harmless
 subprocesses (`/bin/echo`, `/bin/sleep`, `/bin/zsh -c`) run in a scratch home."""
 import itertools
 import json
@@ -10,10 +10,7 @@ from pathlib import Path
 import pytest
 
 from vaice import shell
-from vaice.confirm import NO, YES
 from vaice.skills import Question, SkillError, SkillResult, default_skills
-
-HOME = str(Path.home())
 
 
 def never():
@@ -27,91 +24,43 @@ def home(tmp_path, monkeypatch):
     return tmp_path
 
 
-# --- classify: harmless by form, so a spoken yes may approve
-
-
-@pytest.mark.parametrize(("command", "argv"), [
-    ("ls", ["ls"]),
-    ("ls -la", ["ls", "-la"]),
-    ("ls -la /tmp", ["ls", "-la", "/tmp"]),
-    ("df -h", ["df", "-h"]),
-    ("du -sh ~/Downloads", ["du", "-sh", f"{HOME}/Downloads"]),
-    ("ls ~/", ["ls", f"{HOME}/"]),
-    ("date", ["date"]),
-    ("date +%Y-%m-%d", ["date", "+%Y-%m-%d"]),
-    ("date -u", ["date", "-u"]),
-    ("uptime", ["uptime"]),
-    ("whoami", ["whoami"]),
-    ("pwd", ["pwd"]),
-    ("sw_vers", ["sw_vers"]),
-    ("sw_vers -productVersion", ["sw_vers", "-productVersion"]),
-    ("hostname", ["hostname"]),
-    ("uname -a", ["uname", "-a"]),
-    ("ls 'my folder'", ["ls", "my folder"]),
-    ('ls "my folder"', ["ls", "my folder"]),
-    ("  ls   -l  ", ["ls", "-l"]),
-])
-def test_a_harmless_command_runs_as_an_argv_list_and_a_spoken_yes_may_approve_it(command, argv):
-    plan = shell.classify(command)
-
-    assert plan.argv == argv and plan.voice and plan.program == argv[0]
-    assert plan.command == command  # the stored string is untouched
-
-
-# --- classify: everything else needs the button
-
-
-@pytest.mark.parametrize("command", [
-    "ls | wc -l", "ls > out.txt", "ls < in", "ls; ls", "ls && ls", "ls &", "echo $(ls)", "ls $(x)", "ls `x`",
-    "ls $HOME", "ls (a)", "ls {a,b}", "ls *", "ls ?", "ls [a]", "ls !!", "ls # comment", "ls a\\ b", "ls\nls",
-    "ls\r", "ls\ta",
-    "rm -rf x", "cat notes.txt", "find . -name x", "head x", "echo hi", "open -a Safari", "git status",
-    "/bin/ls", "./ls", "~/ls", "ls/", "LS",
-    "date 010100002027", "date -f x y", "date 12", "hostname foo", "whoami x", "pwd -P", "uptime -x",
-    "ls ~", "ls ~root", "ls ~/a ~b", "ls a~b", "ls '~/a'", 'du "~/a"',
-    "ls 'unclosed", 'ls "unclosed',
-])
-def test_any_other_command_needs_the_button_and_runs_through_zsh(command):
-    plan = shell.classify(command)
-
-    assert plan.argv is None and not plan.voice and plan.program == ""
-    assert plan.command == command
+# --- check: what is refused before any question
 
 
 @pytest.mark.parametrize("command", ["sudo ls", "ls; sudo ls", "ls | sudo tee x", "  SUDO ls", "echo 'sudo'",
                                      "/usr/bin/sudo ls", "ls && Sudo rm x", "ls\nsudo x"])
 def test_sudo_is_refused_before_any_question(command):
     with pytest.raises(SkillError, match="administrator password"):
-        shell.classify(command)
+        shell.check(command)
     assert default_skills(shell=True).prepare("run_shell", json.dumps({"command": command})).speech.startswith(
         "the run shell skill failed: sudo needs an administrator password")
 
 
 def test_a_word_that_only_contains_sudo_is_not_refused():
-    assert shell.classify("ls pseudo").voice  # no word boundary inside "pseudo"
+    assert shell.check("ls pseudo") == "ls pseudo"  # no word boundary inside "pseudo"
 
 
 @pytest.mark.parametrize("command", ["", "   ", "\n"])
 def test_an_empty_command_is_refused(command):
     with pytest.raises(SkillError, match="no command was given"):
-        shell.classify(command)
+        shell.check(command)
 
 
 def test_a_command_over_the_limit_is_refused_and_one_at_the_limit_is_not():
-    assert shell.classify("ls " + "a" * (shell.MAX_COMMAND - 3)).voice
+    assert shell.check("ls " + "a" * (shell.MAX_COMMAND - 3))
     with pytest.raises(SkillError, match="longer than 500 characters"):
-        shell.classify("ls " + "a" * (shell.MAX_COMMAND - 2))
+        shell.check("ls " + "a" * (shell.MAX_COMMAND - 2))
 
 
 @pytest.mark.parametrize("command", [None, 5, ["ls"]])
 def test_a_command_that_is_not_text_is_refused(command):
     with pytest.raises(SkillError, match="must be text"):
-        shell.classify(command)
+        shell.check(command)
 
 
 def test_a_null_character_is_refused():
     with pytest.raises(SkillError, match="null character"):
-        shell.classify("echo a\0b")
+        shell.check("echo a\0b")
 
 
 # --- the skill: the question and the arguments
@@ -121,28 +70,12 @@ def prepared(command):
     return default_skills(shell=True).prepare("run_shell", json.dumps({"command": command}))
 
 
-def test_a_harmless_command_is_asked_by_its_program_name_only_and_by_voice():
-    question = prepared("du -sh ~/Secret/folder")
-
-    assert question == Question("Shall I run the command du? The full command is on the screen.")
-    assert "Secret" not in question.text  # the arguments are never read aloud
-
-
-def test_any_other_command_is_asked_without_naming_it_and_needs_the_button():
+def test_every_command_is_asked_with_the_fixed_sentence_and_never_names_the_command():
     question = prepared("cat ~/.ssh/config")
 
-    assert question == Question(shell.ASK_CLICK, voice=False)
+    assert question == Question(shell.ASK)
     assert "cat" not in question.text.split() and ".ssh" not in question.text
-
-
-def test_no_fixed_sentence_holds_a_word_the_user_answers_with():
-    answers = {word for phrase in YES | NO for word in phrase.replace("'", "").split()}
-    sentences = [prepared(f"{program}").text for program in sorted(shell.SAFE_PROGRAMS)]
-    sentences += [shell.ASK_CLICK, shell.NEEDS_BUTTON]
-
-    for sentence in sentences:
-        words = set(sentence.lower().replace("?", "").replace(".", "").replace(";", "").replace("'", "").split())
-        assert not words & answers, sentence
+    assert prepared("ls") == question  # even a harmless one: the button is the only approval
 
 
 @pytest.mark.parametrize("arguments", ["{}", '{"command": 5}', '{"command": ""}', '{"command": null}'])
@@ -169,7 +102,7 @@ def test_the_skill_exists_only_with_the_flag():
 # --- run: real subprocesses
 
 
-def test_a_harmless_command_runs_without_a_shell_in_the_home_directory(home, monkeypatch):
+def test_a_command_runs_through_zsh_in_the_home_directory(home, monkeypatch):
     started = []
     real_popen = subprocess.Popen
 
@@ -181,23 +114,12 @@ def test_a_harmless_command_runs_without_a_shell_in_the_home_directory(home, mon
 
     result = shell.run("pwd", never)
 
-    assert started[0][0] == ["pwd"]  # an argv list: no shell
+    assert started[0][0] == ["/bin/zsh", "-c", "pwd"]
     kwargs = started[0][1]
     assert kwargs["start_new_session"] is True and kwargs["stdin"] == subprocess.DEVNULL
     assert kwargs["stderr"] == subprocess.STDOUT and Path(kwargs["cwd"]) == home
     assert result.speech == f"the command finished. Output: {home.resolve()}"
     assert result.detail == f"$ pwd\n(the command finished)\n{home.resolve()}"
-
-
-def test_a_command_with_shell_syntax_runs_through_zsh(home, monkeypatch):
-    started = []
-    real_popen = subprocess.Popen
-    monkeypatch.setattr(shell.subprocess, "Popen", lambda argv, **kw: started.append(argv) or real_popen(argv, **kw))
-
-    result = shell.run("echo one | tr a-z A-Z", never)
-
-    assert started == [["/bin/zsh", "-c", "echo one | tr a-z A-Z"]]
-    assert result.speech == "the command finished. Output: ONE"
 
 
 def test_stdout_and_stderr_are_merged_and_the_output_is_collapsed_for_the_model(home):
@@ -221,13 +143,16 @@ def test_stdin_is_empty(home):
     assert shell.run("cat; echo done", never).speech == "the command finished. Output: done"
 
 
-def test_a_missing_program_is_a_spoken_failure_not_a_crash(home, monkeypatch):
-    monkeypatch.setattr(shell, "SAFE_PROGRAMS", frozenset({"no-such-program-xyz"}))
+def test_a_missing_shell_is_a_spoken_failure_not_a_crash(home, monkeypatch):
+    def missing(*_args, **_kwargs):
+        raise FileNotFoundError(2, "No such file")
 
-    with pytest.raises(SkillError, match="no-such-program-xyz is not available"):
-        shell.run("no-such-program-xyz", never)
-    assert default_skills(shell=True).run("run_shell", '{"command": "no-such-program-xyz"}').speech == (
-        "the run shell skill failed: no-such-program-xyz is not available")
+    monkeypatch.setattr(shell.subprocess, "Popen", missing)
+
+    with pytest.raises(SkillError, match="/bin/zsh is not available"):
+        shell.run("pwd", never)
+    assert default_skills(shell=True).run("run_shell", '{"command": "pwd"}').speech == (
+        "the run shell skill failed: /bin/zsh is not available")
 
 
 def test_a_command_that_cannot_be_started_for_another_reason_is_a_spoken_failure(home, monkeypatch):
@@ -240,7 +165,7 @@ def test_a_command_that_cannot_be_started_for_another_reason_is_a_spoken_failure
         shell.run("pwd", never)
 
 
-def test_run_classifies_again_so_a_refused_command_never_starts(monkeypatch):
+def test_run_checks_again_so_a_refused_command_never_starts(monkeypatch):
     def boom(*_args, **_kwargs):
         raise AssertionError("a refused command was started")
 

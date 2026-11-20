@@ -1,8 +1,8 @@
-"""Long-term memory for assistant mode: short notes the user asked the assistant to keep, across conversations.
+"""Long-term memory: short notes the user asked the assistant to keep, across conversations.
 
 Explicit only: a note is stored when the user asks to remember something (the `remember` skill) and nothing is
-extracted from what is said. The notes are read at the start of every reply and put into the system prompt (see
-`responders/assistant.build_messages`), so a note is model-written text that every later prompt carries: an
+extracted from what is said. The notes are read at the start of every reply and put into its instructions (see
+`responders/assistant.AssistantResponder`), so a note is model-written text that every later prompt carries: an
 injection path that outlives the conversation. Hence `clean_note` (one line, no control characters or chat
 markers, a length cap), the cap on how many there are, and the skill being `direct_only` (see `skills.Skill`).
 
@@ -25,9 +25,6 @@ MAX_NOTE_CHARS = 200
 MAX_NOTES = 30
 MIN_NOTE_WORDS = 3  # a fact about the user is a sentence, not a word
 MIN_FORGET_CHARS = 3  # `forget("a")` would otherwise erase nearly everything with no confirmation
-# Spoken as is after a refused reminder: told the refusal, the 24B helper still said "I've noted your dentist
-# appointment" (2 of 3 runs, then 1 of 3 with the refusal starting "nothing was saved")
-REMINDER_ANSWER = "I can't set reminders or timers, so I haven't saved that."
 _VERSION = 1
 
 # `<|im_start|>`, `<|anything|>`; and role/thinking tags a chat template or the markup stripper would act on
@@ -82,8 +79,7 @@ def clean_note(text) -> str:
         raise SkillError("nothing was saved: that is the user's question, not a fact about them; answer it")
     # "Call Mom tomorrow at 9": saved as a note, then announced as a reminder (live eval)
     if _REMINDER.search(note) or (_CLOCK_TIME.search(note) and not _HABIT.search(note)):
-        raise SkillError("nothing was saved: I can't set reminders or timers, I only keep lasting facts about you",
-                         answer=REMINDER_ANSWER)
+        raise SkillError("nothing was saved: I can't set reminders or timers, I only keep lasting facts about you")
     if len(note) > MAX_NOTE_CHARS:
         raise SkillError(f"that is too long to remember: keep a note under {MAX_NOTE_CHARS} characters")
     return note
@@ -233,7 +229,6 @@ def _ask_forget_everything(memory: Memory):
         count = len(memory)
         if not count:
             raise SkillError("there are no notes to erase")
-        # No word the user answers with (confirm.YES / NO): speaker echo can reach the mic
         return Question(f"Shall I erase all {count} notes I keep?" if count > 1
                         else "Shall I erase the one note I keep?")
 

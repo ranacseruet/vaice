@@ -22,26 +22,9 @@ class Responder(Protocol):
       never waits for it in vain. Transcribing alongside or after the reply keeps it off the path
       to the first audio; transcribing first is fine when the reply needs the text.
     `history` holds the earlier turns as text. `turn.closed` is set when the next turn starts;
-    a responder may poll it to stop generating.
-
-    Optional attribute `tool_history: bool` (False when absent): a responder that sets it True also gets
-    the earlier turns' tool results in `history`, as `("tool", "<name>: <output>")` entries between a
-    turn's user and assistant messages (output capped); a call that had arguments is a `("tool", ...)` entry
-    from `conversation.tool_entry`, which carries them (`conversation.parse_tool_entry` reads either).
-    The others never see them.
-
-    Optional methods for a responder that asks the user to confirm an action (the UI reads them with
-    `getattr`; absent means no confirmation panel): `pending()` returns the request waiting for the user
-    (a `confirm.Pending`) or None; `approve(pending_id)` runs it and returns the result text, or None when
-    `pending_id` is no longer the current request; `cancel(pending_id)` drops it; `clear_pending()` drops
-    any (a new conversation). A click happens with no reply in flight, so its follow-up
-    cannot go through a reply generator.
-
-    Optional method `attach_outbox(outbox)` (`outbox.Outbox`; `app.build_stream` calls it with `getattr`, a responder
-    without it gets no outbox): where that follow-up is spoken. After `approve` ran a call, the responder may continue
-    the task on a thread of its own and put the outcome's audio frames, and callbacks to run once they were served
-    (recording the spoken text with `Turn.append_assistant_text`, arming a question), on the outbox, which the audio
-    handler's idle emit() drains. A new utterance (`respond`) and `clear_pending` cancel it and drop what it queued.
+    a responder may poll it to stop generating. The assistant (`responders/assistant.py`) is the one responder; it
+    also has the methods the UI and the audio handler call (`attach_outbox`, `pending`, `approve`, `cancel`,
+    `clear_pending`, `browsing`, `stop_task`).
     """
 
     name: str  # short label shown in logs, e.g. "llamacpp"
@@ -52,7 +35,7 @@ class Responder(Protocol):
 def spoken_part(text: str, total: int, handed_out: int) -> str:
     """The words of `text` that the first `handed_out` of `total` units of audio cover (approximate).
 
-    Interleaved generation writes its text about twice as fast as speaking speed, so the text is
+    The model writes its text about twice as fast as speaking speed, so the text is
     often complete after the first second of audio. Taking the text generated so far would record a
     whole reply that was cut off early; split it by the share of audio handed out instead. The units
     (frames, samples) are the caller's; `total` is the audio generated so far, not the final length.

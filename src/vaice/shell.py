@@ -1,18 +1,8 @@
-"""Shell commands for assistant mode (`VAICE_ASSISTANT_SHELL`): the `run_shell` skill.
+"""Shell commands for the assistant (`VAICE_SHELL`): the `run_shell` skill.
 
-Every command is a `confirm` skill: nothing runs when the model asks. `classify` decides how it may be
-approved, from the command string alone (it is called again when the command runs, so nothing else is trusted):
-
-- by voice or click: a command vaice can show to be harmless. The string holds no shell syntax at all, parses
-  with `shlex` into one program and its arguments, and the program is a bare name from `SAFE_PROGRAMS`, which
-  only list or report. It runs as an argv list, with no shell. A leading `~/` in an argument is the only
-  expansion, done by vaice (and only in a command without quotes, so the shell would have agreed).
-- by click only: everything else, through `/bin/zsh -c`. A spoken yes does not approve it.
-
-The set is an allowlist, not a denylist: a list of read-only program names is not read-only (`find -delete`,
-`sed -i`, `sort -o`, `awk` with `system()`, `xargs`, `env`, `tee`), so the voice set is tiny and its arguments
-are checked. Programs that print file contents (`cat`, `head`) are click-only on purpose: their output goes to
-the model.
+Every command is a `confirm` skill: nothing runs when the model asks. The request is on the screen with the exact
+command line, and only the Run button runs it, through `/bin/zsh -c`. `check` is called again when the command runs,
+so nothing but the stored string is trusted.
 
 `sudo` is refused before any question: it needs an administrator password, which vaice cannot give. The check
 is a courtesy, not a boundary (`su"do"` gets past it); the boundary is that a person reads the command and clicks.
@@ -24,13 +14,11 @@ import logging
 import os
 import re
 import select
-import shlex
 import signal
 import subprocess
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
 from pathlib import Path
 
 from vaice.skills import Question, Skill, SkillError, SkillResult
@@ -47,59 +35,14 @@ KILL_WAIT = 1.0  # seconds between SIGTERM and SIGKILL
 LEFTOVER_WAIT = 0.5  # seconds a finished command's background process may keep its output open
 DRAIN_WAIT = 2.0  # seconds to read what is left after a command was killed
 
-SAFE_PROGRAMS = frozenset({"ls", "df", "du", "date", "uptime", "whoami", "pwd", "sw_vers", "hostname", "uname"})
-NO_ARGUMENTS = frozenset({"hostname", "whoami", "pwd", "uptime"})  # `hostname NAME` renames the Mac
-_SYNTAX = frozenset("|&;<>()$`{}*?[]!#\\")  # with any control character (a newline too): shell syntax
 _SUDO = re.compile(r"\bsudo\b", re.IGNORECASE)  # anywhere, quoted or not: a false refusal beats a missed sudo
 
-ASK_VOICE = "Shall I run the command {program}? The full command is on the screen."
-ASK_CLICK = "I would run a command for this request. The command is on the screen; click Run to allow the run."
-NEEDS_BUTTON = "This one needs the Run button on the screen."  # a spoken yes to a click-only request
+ASK = "I would run a command for this request. The command is on the screen; click Run to allow the run."
 
 
-@dataclass(frozen=True)
-class Plan:
-    """How a command runs: `argv` for a harmless one (no shell), None for one that needs `/bin/zsh -c`."""
-
-    command: str
-    argv: list[str] | None
-    program: str  # of an argv plan; empty for a shell one
-
-    @property
-    def voice(self) -> bool:
-        """Whether a spoken yes may approve it (a click always may)."""
-        return self.argv is not None
-
-
-def _harmless_argv(command: str) -> list[str] | None:
-    """The argv of a command that is harmless by its form, else None."""
-    if any(c in _SYNTAX or not c.isprintable() for c in command):
-        return None
-    if "~" in command and ("'" in command or '"' in command):  # quoted, a shell would not expand it
-        return None
-    try:
-        words = shlex.split(command)
-    except ValueError:  # an unclosed quote: let the shell say so
-        return None
-    if not words or words[0] not in SAFE_PROGRAMS:  # a path (`/bin/ls`) is never in the set
-        return None
-    program, args = words[0], words[1:]
-    if program in NO_ARGUMENTS and args:
-        return None
-    if program == "date" and not all(arg.startswith(("+", "-")) for arg in args):  # a bare one sets the clock
-        return None
-    argv = [program]
-    for arg in args:
-        if arg.startswith("~/"):
-            arg = str(Path.home()) + arg[1:]
-        elif "~" in arg:  # `~`, `~user`: a shell would expand them, argv would not
-            return None
-        argv.append(arg)
-    return argv
-
-
-def classify(command: str) -> Plan:
-    """How `command` may run. Raises `SkillError` (spoken) for one that is refused outright."""
+def check(command: str) -> str:
+    """`command` if it may be asked about and run. Raises `SkillError` (the message is the result the model reads) for
+    one that is refused outright."""
     if not isinstance(command, str):
         raise SkillError("the command must be text")
     if not command.strip():
@@ -110,8 +53,7 @@ def classify(command: str) -> Plan:
         raise SkillError("a command cannot hold a null character")
     if _SUDO.search(command):
         raise SkillError("sudo needs an administrator password, which vaice cannot give")
-    argv = _harmless_argv(command)
-    return Plan(command, argv, argv[0] if argv else "")
+    return command
 
 
 # --- running
@@ -188,14 +130,14 @@ def _status(proc: subprocess.Popen, ended: str | None) -> str:
 
 
 def run(command: str, stop: Callable[[], bool]) -> SkillResult:
-    """Run `command` (classified afresh), however it was approved. Polls `stop()` and the deadline every
+    """Run `command` (checked afresh) through `/bin/zsh -c`. Polls `stop()` and the deadline every
     `POLL_SECONDS`; on a stop or a timeout the command's whole process group is ended. Raises `SkillError`
     for a refused or unstartable command."""
-    plan = classify(command)
-    argv = plan.argv or ["/bin/zsh", "-c", plan.command]
-    if stop():  # stopped between the approval and here (New conversation, a barge-in): nothing is started
+    check(command)
+    argv = ["/bin/zsh", "-c", command]
+    if stop():  # stopped between the approval and here (New conversation, the app ending): nothing is started
         status = "the command was stopped"
-        return SkillResult(status, f"$ {plan.command}\n({status})")
+        return SkillResult(status, f"$ {command}\n({status})")
     try:
         proc = subprocess.Popen(argv, cwd=Path.home(), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                 stderr=subprocess.STDOUT, start_new_session=True)
@@ -255,7 +197,7 @@ def run(command: str, stop: Callable[[], bool]) -> SkillResult:
         speech += f". Output: {flat[:SPEECH_OUTPUT_CHARS]}"
         if len(flat) > SPEECH_OUTPUT_CHARS or output.cut:
             speech += " (more on screen)"
-    return SkillResult(speech, f"$ {plan.command}\n({status})\n{output.text}".rstrip())
+    return SkillResult(speech, f"$ {command}\n({status})\n{output.text}".rstrip())
 
 
 # --- the skill
@@ -269,11 +211,9 @@ def _command_of(args: dict) -> str:
 
 
 def _ask(args: dict) -> Question:
-    """The question, built here and never from the model's text; the command's arguments are not read aloud."""
-    plan = classify(_command_of(args))
-    if plan.voice:
-        return Question(ASK_VOICE.format(program=plan.program))
-    return Question(ASK_CLICK, voice=False)
+    """The question, built here and never from the model's text; the panel shows the command itself."""
+    check(_command_of(args))
+    return Question(ASK)
 
 
 def _run(args: dict, stop: Callable[[], bool]) -> SkillResult:

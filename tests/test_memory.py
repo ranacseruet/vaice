@@ -8,7 +8,6 @@ import threading
 import pytest
 
 from vaice import memory as memory_module
-from vaice.confirm import NO, YES
 from vaice.memory import MAX_NOTE_CHARS, MAX_NOTES, Memory, clean_note, memory_skills
 from vaice.skills import Question, SkillError, default_skills
 
@@ -364,16 +363,6 @@ def test_forget_everything_asks_with_the_count_before_anything_is_erased(skills,
     assert skills.prepare("forget_everything", "{}") == Question("Shall I erase the one note I keep?")
 
 
-def test_the_forget_everything_question_holds_no_word_the_user_answers_with(skills, kept):
-    answers = {word for phrase in YES | NO for word in phrase.replace("'", "").split()}
-
-    for count in (1, 2, 5, 30):
-        kept._notes = [f"User note {n}" for n in range(count)]
-        question = skills.prepare("forget_everything", "{}").text
-        words = set(question.lower().replace("?", "").replace("'", "").split())
-        assert not words & answers, question
-
-
 def test_forget_everything_with_no_notes_is_a_spoken_failure_and_asks_nothing(skills):
     asked = skills.prepare("forget_everything", "{}")
 
@@ -461,14 +450,12 @@ def test_a_habit_does_not_excuse_a_reminder_word():
             clean_note(raw)
 
 
-def test_the_remember_skill_speaks_the_refusals_and_stores_nothing(skills, kept):
+def test_the_remember_skill_reports_the_refusals_and_stores_nothing(skills, kept):
     one_word = skills.run("remember", json.dumps({"note": "Goodbye"}))
     reminder = skills.run("remember", json.dumps({"note": "Call mom tomorrow at nine"}))
 
     assert one_word.speech == "the remember skill failed: there was nothing to remember"
-    assert one_word.answer == ""  # the model answers this one
     assert reminder.speech == f"the remember skill failed: {REMINDER_SENTENCE}"
-    assert reminder.answer == memory_module.REMINDER_ANSWER  # this one is spoken as is
     assert kept.notes() == []
 
 

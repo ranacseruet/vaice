@@ -16,8 +16,9 @@ from websockets.exceptions import ConnectionClosedOK
 
 from vaice import config, lifecycle
 from vaice.conversation import Turn
+from vaice.outbox import Marker, Outbox
 from vaice.responders import llamacpp
-from vaice.responders.llamacpp import MODE_INSTRUCTION, LlamaCppResponder, check_server
+from vaice.responders.llamacpp import MODE_INSTRUCTION, SPEAK_PROMPT, LlamaCppResponder, check_server
 
 TONE = (8000 * np.sin(2 * np.pi * 440 * np.arange(4800) / 48000)).astype(np.int16)
 AUDIO = (48000, np.stack([TONE, np.zeros_like(TONE)]))  # 0.1 s of stereo browser audio
@@ -154,7 +155,7 @@ def test_the_clock_line_states_the_local_date_and_time(fixed_clock):
 def test_the_instructions_carry_the_clock_line(realtime, fixed_clock):
     server = realtime()
     history = [("user", "Hi there"), ("assistant", "Hello.")]
-    drive(LlamaCppResponder(server.url, "", tools=[TIME_TOOL], executor=lambda name, args: "ok"), history=history)
+    drive(tool_responder(server, lambda name, args: "ok"), history=history)
 
     instructions = server.conversation().session["instructions"]
     assert llamacpp._clock_line() in instructions
@@ -266,7 +267,16 @@ TIME_TOOL = {"type": "function", "name": "get_info", "description": "Runtime inf
 
 
 def tool_responder(server, executor):
-    return LlamaCppResponder(server.url, "", tools=[TIME_TOOL], executor=executor)
+    """A responder whose executor records each call on the turn first, as the assistant's own does."""
+
+    def executor_for(turn, stop):
+        def run(name, arguments):
+            output = executor(name, arguments)
+            turn.add_tool_event(name, arguments, output)
+            return output
+        return run
+
+    return LlamaCppResponder(server.url, "", tools=[TIME_TOOL], executor_for=executor_for)
 
 
 def tool_choices(conn):
@@ -303,7 +313,7 @@ def test_a_tool_call_is_executed_and_its_result_spoken(realtime):
     assert tool_choices(conn) == [None, {"tool_choice": "auto"}]
     assert turn.assistant_text == "It is noon."  # the preamble before the tool result is not the answer
     assert [len(samples) for _, samples in frames] == [2]  # only the spoken answer has audio
-    assert turn.tool_events == [{"name": "get_info", "arguments": "{}", "output": "os: Darwin"}]
+    assert turn.tool_events == [{"name": "get_info", "arguments": "{}", "output": '{"os": "Darwin"}'}]
 
 
 def test_what_is_said_before_a_tool_result_is_not_recorded_as_the_answer(realtime):
@@ -321,7 +331,7 @@ def test_what_is_said_before_a_tool_result_is_not_recorded_as_the_answer(realtim
 
     assert [len(samples) for _, samples in frames] == [1, 2]  # the preamble was spoken all the same
     assert turn.assistant_text == "It is noon."
-    assert turn.tool_events == [{"name": "get_info", "arguments": "{}", "output": "os: Darwin"}]
+    assert turn.tool_events == [{"name": "get_info", "arguments": "{}", "output": '{"os": "Darwin"}'}]
 
 
 def test_a_second_tool_round_drops_the_text_that_preceded_it_too(realtime):
@@ -492,28 +502,6 @@ def test_a_tool_round_stopped_mid_way_skips_the_rest_and_hangs_up(realtime):
     wait_for_threads_to_end()
 
 
-def test_a_call_for_an_unadvertised_tool_reaches_the_server_which_refuses_it(realtime, monkeypatch):
-    """The server's --tools is the gate: vaice passes every call through, and the server refuses
-    what it did not advertise (404, live-verified)."""
-    server = realtime(
-        reply=[
-            [("call", "item_1", "read_file", "call_9", '{"path": "secrets"}'), ("done",)],
-            [("text", "I could not read that."), ("audio", pcm(1)), ("done",)],
-        ],
-    )
-    monkeypatch.setattr(llamacpp.requests, "post", lambda *a, **k: Reply(status=404, body="not found"))
-    turn = Turn()
-    frames = drive(tool_responder(server, llamacpp.execute_tool("http://h:1", 7.0)), turn=turn)
-
-    conn = server.conversation()
-    (output,) = [e["item"]["output"] for e in conn.events
-                 if e["type"] == "conversation.item.create" and e.get("item", {}).get("type") == "function_call_output"]
-    assert "HTTP 404" in output
-    assert turn.assistant_text == "I could not read that."
-    assert turn.tool_events[0]["name"] == "read_file"  # the attempt is shown in the tool panel too
-    assert len(frames) == 1
-
-
 def test_a_tool_result_is_compacted_to_what_the_model_can_speak():
     long_uname = "Darwin mac.lan 25.6.0 " + "x" * 200
     assert llamacpp._speech_friendly('{"os": "' + long_uname + '", "cwd": "/Users/me/vaice"}') == (
@@ -542,7 +530,7 @@ def test_a_tool_call_is_reported_even_when_the_reply_fails_after_it(realtime):
 
 
 def test_a_tool_call_finishing_after_a_barge_in_is_still_reported(realtime):
-    """The session thread reports the call itself: a turn closed mid-execution cannot lose it."""
+    """The executor reports the call itself, on the session thread: a turn closed mid-execution cannot lose it."""
     server = realtime(reply=[[("call", "item_1", "get_info", "call_1", "{}"), ("done",)],
                              [("text", "spoken"), ("audio", pcm(1)), ("done",)]])
     release = threading.Event()
@@ -565,133 +553,6 @@ def test_a_tool_call_finishing_after_a_barge_in_is_still_reported(realtime):
 
     assert [event["name"] for event in turn.tool_events] == ["get_info"]
     assert turn.assistant_text == ""  # the interrupted reply kept none of the next round's text
-
-
-def test_the_default_executor_posts_the_tool_to_the_server(monkeypatch):
-    posted = []
-
-    def post(url, json=None, timeout=None):
-        posted.append((url, json, timeout))
-        return Reply(body='{"os": "Darwin"}')
-
-    monkeypatch.setattr(llamacpp.requests, "post", post)
-    execute = llamacpp.execute_tool("http://h:1", 7.0)
-    assert execute("get_info", "{}") == '{"os": "Darwin"}'
-    assert posted == [("http://h:1/tools", {"tool": "get_info", "params": {}}, 7.0)]
-
-    posted.clear()
-    assert execute("read_file", '{"path": "/tmp/secret.txt", "start_line": 1}') == '{"os": "Darwin"}'
-    assert posted == [("http://h:1/tools",
-                       {"tool": "read_file", "params": {"path": "/tmp/secret.txt", "start_line": 1}}, 7.0)]
-
-    assert "arguments are not JSON" in execute("read_file", "{not json")
-    assert "arguments are not a JSON object" in execute("read_file", '["path"]')
-    assert len(posted) == 1  # neither malformed call reached the server
-
-    monkeypatch.setattr(llamacpp.requests, "post", lambda *a, **k: (_ for _ in ()).throw(requests.ConnectionError("x")))
-    assert llamacpp.execute_tool("http://h:1", 7.0)("get_info", "{}") == "tool get_info failed: x"
-
-    def bad(url, json=None, timeout=None):
-        return Reply(status=500, body="boom")
-
-    monkeypatch.setattr(llamacpp.requests, "post", bad)
-    assert "HTTP 500" in llamacpp.execute_tool("http://h:1", 7.0)("get_info", "{}")
-
-
-def test_a_tool_call_does_not_start_when_the_reply_was_already_stopped(monkeypatch):
-    def unexpected(*a, **k):
-        raise AssertionError("a stopped reply must not reach the server")
-
-    monkeypatch.setattr(llamacpp.requests, "post", unexpected)
-    assert "aborted" in llamacpp.execute_tool("http://h:1", 7.0, stop=lambda: True)("get_info", "{}")
-
-
-def test_a_tool_call_that_outlives_a_stop_gives_up_promptly(monkeypatch):
-    """The tool call outlives stop(): the simulated server never answers, the stop fires mid-call,
-    and the executor must return within seconds instead of the whole open timeout."""
-    stop = threading.Event()
-    block = threading.Event()
-
-    def blocking_post(*a, **k):
-        block.wait(30)  # a tool whose POST hangs forever
-        return Reply(body='{"os": "Darwin"}')
-
-    monkeypatch.setattr(llamacpp.requests, "post", blocking_post)
-    timer = threading.Timer(0.2, stop.set)
-    timer.start()
-    start = time.monotonic()
-    result = llamacpp.execute_tool("http://h:1", 120.0, stop=stop.is_set)("get_info", "{}")
-    elapsed = time.monotonic() - start
-    timer.cancel()
-    block.set()  # let the abandoned worker thread finish
-    assert elapsed < 5
-    assert "aborted" in result
-
-
-def test_a_tool_that_is_slow_but_alive_is_not_killed(monkeypatch):
-    """A tool whose answer takes longer than the poll interval but within the deadline completes
-    normally: cancellation polling must not destroy a healthy request."""
-
-    def slow_post(url, json=None, timeout=None):
-        time.sleep(1.2)
-        return Reply(body='{"os": "Darwin"}')
-
-    monkeypatch.setattr(llamacpp.requests, "post", slow_post)
-    result = llamacpp.execute_tool("http://h:1", 10.0, stop=lambda: False)("get_info", "{}")
-    assert result == '{"os": "Darwin"}'
-
-
-def test_a_tool_call_that_never_gets_an_answer_times_out(monkeypatch):
-    block = threading.Event()
-
-    def blocking_post(*a, **k):
-        block.wait(30)  # a tool whose POST hangs forever
-        return Reply(body='{"os": "Darwin"}')
-
-    monkeypatch.setattr(llamacpp.requests, "post", blocking_post)
-    start = time.monotonic()
-    result = llamacpp.execute_tool("http://h:1", 0.3)("get_info", "{}")  # no stop signal at all
-    elapsed = time.monotonic() - start
-    block.set()  # let the abandoned worker thread finish
-    assert elapsed < 5
-    assert "timed out" in result
-
-
-def test_fetch_tools_flattens_every_advertised_tool(monkeypatch):
-    listing = [
-        {"tool": "read_file", "definition": {"type": "function", "function": {
-            "name": "read_file", "description": "Reads.", "parameters": {"type": "object"}}}},
-        {"tool": "get_info", "definition": {"type": "function", "function": {
-            "name": "get_info", "description": "Info.", "parameters": {"type": "object"}}}},
-    ]
-    monkeypatch.setattr(llamacpp.requests, "get", lambda url, timeout: Reply(body=listing))
-
-    assert llamacpp.fetch_tools("http://h:1") == [
-        {"type": "function", "name": "read_file", "description": "Reads.", "parameters": {"type": "object"}},
-        {"type": "function", "name": "get_info", "description": "Info.", "parameters": {"type": "object"}},
-    ]
-
-    monkeypatch.setattr(llamacpp.requests, "get", lambda url, timeout: (_ for _ in ()).throw(
-        requests.ConnectionError("refused")))
-    with pytest.raises(requests.ConnectionError):
-        llamacpp.fetch_tools("http://h:1")
-
-
-def test_write_capable_tools_names_only_the_tools_the_server_marks_write(monkeypatch):
-    listing = [
-        {"tool": "read_file", "permissions": {"write": False}},
-        {"tool": "exec_shell_command", "permissions": {"write": True}},
-        {"tool": "get_info"},  # no permissions block = not marked write
-        {"tool": "edit_file", "permissions": {"write": True}},
-    ]
-    monkeypatch.setattr(llamacpp.requests, "get", lambda url, timeout: Reply(body=listing))
-
-    assert llamacpp.write_capable_tools("http://h:1") == ["exec_shell_command", "edit_file"]
-
-    monkeypatch.setattr(llamacpp.requests, "get", lambda url, timeout: (_ for _ in ()).throw(
-        requests.ConnectionError("refused")))
-    with pytest.raises(requests.ConnectionError):
-        llamacpp.write_capable_tools("http://h:1")
 
 
 def test_a_normal_reply_logs_no_truncation_warning(realtime, caplog):
@@ -879,19 +740,113 @@ def test_a_stop_after_the_tool_call_does_not_ask_the_model_to_continue(realtime)
                           "conversation.item.create"]  # the call was recorded; no follow-up response.create
 
 
-def test_the_default_executor_is_built_per_reply_with_the_reply_s_stop_signal(monkeypatch, realtime):
-    captured = {}
+def test_the_executor_is_built_per_reply_with_that_replys_turn_and_stop_signal(realtime):
+    built = []
 
-    def fake_execute_tool(url, timeout, stop=None):
-        captured.update(url=url, timeout=timeout, stop=stop)
+    def executor_for(turn, stop):
+        built.append((turn, stop))
         return lambda name, arguments: "ok"
 
-    monkeypatch.setattr(llamacpp, "execute_tool", fake_execute_tool)
     server = realtime(reply=[[("audio", pcm(1)), ("done",)]])
-    drive(LlamaCppResponder(server.url, "", tools=[TIME_TOOL]), turn=Turn())
+    turn = Turn()
+    drive(LlamaCppResponder(server.url, "", tools=[TIME_TOOL], executor_for=executor_for), turn=turn)
 
-    assert captured["stop"] is not None  # a hanging tool call can now be interrupted by this reply's stop
-    assert captured["stop"]() is True  # respond()'s cancelled event is set once the reply ends
+    ((given_turn, stop),) = built
+    assert given_turn is turn
+    assert stop() is True  # respond()'s cancelled event is set once the reply ends: a call in flight gives up
+
+
+def test_tools_without_an_executor_are_declared_but_a_call_is_not_run(realtime):
+    server = realtime(reply=[[("call", "item_1", "get_info", "call_1", "{}"), ("done",)]])
+
+    assert drive(LlamaCppResponder(server.url, "", tools=[TIME_TOOL])) == []
+    assert "conversation.item.create" not in server.conversation().types
+
+
+# -- speech with no reply in flight (`speak`): a session whose input is text
+
+
+def say_through_outbox(server, request="Say: the browser finished.", **kwargs):
+    outbox, turn = Outbox(), Turn()
+    outbox.touch()  # a connection is draining (the first poll of an outbox clears it as stale)
+    llamacpp.speak(server.url, 5.0, 1024, outbox, turn, request, lambda: False, **kwargs)
+    return outbox, turn
+
+
+def drain(outbox):
+    items = []
+    while (item := outbox.poll(True)) is not None:
+        items.append(item)
+    return items
+
+
+def test_a_text_session_sends_the_request_as_a_user_message_offers_no_tools_and_needs_no_audio(realtime):
+    server = realtime(reply=[("text", "The browser finished."), ("audio", pcm(1, 2)), ("done",)])
+
+    say_through_outbox(server)
+
+    conn = server.conversation()
+    assert conn.types == ["session.update", "conversation.item.create", "response.create"]
+    assert conn.events[1]["item"] == {"type": "message", "role": "user",
+                                      "content": [{"type": "input_text", "text": "Say: the browser finished."}]}
+    assert "tools" not in conn.session and "tool_choice" not in conn.session
+    assert SPEAK_PROMPT in conn.session["instructions"]
+    assert conn.audio == b""
+    assert len(server.connections) == 1  # no transcription session: nobody spoke
+
+
+def test_the_spoken_frames_go_to_the_outbox_and_the_text_is_recorded_by_a_marker_behind_them(realtime):
+    server = realtime(reply=[("text", "The browser finished."), ("audio", pcm(1, 2)), ("audio", pcm(3)),
+                             ("done",)])
+
+    outbox, turn = say_through_outbox(server)
+    items = drain(outbox)
+
+    assert [len(i[1]) for i in items[:-1]] == [2, 1]
+    assert isinstance(items[-1], Marker)
+    assert turn.assistant_text == ""  # not recorded before its audio was served
+    items[-1].callback()
+    assert turn.assistant_text == "The browser finished."
+
+
+def test_a_clear_while_it_speaks_drops_the_frames_and_records_nothing(realtime):
+    release = threading.Event()
+    server = realtime(reply=[("audio", pcm(1)), ("wait", release), ("text", "Done."), ("audio", pcm(2)),
+                             ("done",)])
+    outbox, turn = Outbox(), Turn()
+    generation = outbox.generation
+    thread = threading.Thread(target=llamacpp.speak, name="speak", daemon=True,
+                              args=(server.url, 5.0, 1024, outbox, turn, "Say hi", lambda: False, generation))
+    thread.start()
+    deadline = time.monotonic() + 3
+    while not len(outbox) and time.monotonic() < deadline:
+        time.sleep(0.01)
+    outbox.clear()  # the user spoke, or New conversation
+    release.set()
+    thread.join(5)
+
+    assert not thread.is_alive()
+    assert drain(outbox) == []
+    assert turn.assistant_text == ""
+
+
+def test_a_stop_before_it_starts_opens_no_session(realtime):
+    server = realtime()
+    outbox, turn = Outbox(), Turn()
+
+    llamacpp.speak(server.url, 5.0, 1024, outbox, turn, "Say hi", lambda: True)
+
+    assert server.connections == [] and len(outbox) == 0
+
+
+def test_a_failed_session_is_a_warning_and_queues_no_marker(realtime, caplog):
+    server = realtime(reply=[("error", "boom")])
+
+    with caplog.at_level(logging.WARNING, logger="vaice.responders.llamacpp"):
+        outbox, turn = say_through_outbox(server)
+
+    assert "could not speak" in caplog.text and "boom" in caplog.text
+    assert drain(outbox) == [] and turn.assistant_text == ""
 
 
 # -- failures

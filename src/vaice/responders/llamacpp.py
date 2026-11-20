@@ -1,4 +1,8 @@
-"""llama.cpp backend: llama-server's own speech, streamed from its /v1/realtime WebSocket."""
+"""llama.cpp backend: llama-server's own speech, streamed from its /v1/realtime WebSocket.
+
+Every reply is one realtime session: the user's audio in, text and speech out, and the assistant's skills declared as
+tools that vaice runs (`_converse`). Speech with no reply in flight (what a Run click or a browser task has to say) is
+a session whose input is a text message (`speak`)."""
 import base64
 import json
 import logging
@@ -9,6 +13,7 @@ import time
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from datetime import datetime
+from functools import partial
 
 import requests
 from websockets.exceptions import ConnectionClosed, InvalidStatus, WebSocketException
@@ -17,12 +22,14 @@ from websockets.sync.client import ClientConnection, connect
 from vaice import config, lifecycle
 from vaice.audio import from_pcm16, to_pcm16
 from vaice.conversation import Message, Turn
+from vaice.outbox import Outbox
 from vaice.responders.base import AudioFrame, spoken_part
 
 log = logging.getLogger(__name__)
 
-# Tells an interleaved-mode model (LFM3-Audio) to write its text alongside the speech; a fixed constant, so
-# VAICE_LLAMACPP_PROMPT only has to say how to answer
+# Tells the model (LFM3-Audio and Omni's voice mode) to write its text alongside the speech; a fixed constant, so
+# VAICE_PROMPT only has to say how to answer. The word is the model's own name for the mode: do not reword it
+# without a live A/B.
 MODE_INSTRUCTION = "Respond with interleaved text and audio."
 # How often a waiting thread checks whether the reply was abandoned or the app is stopping
 POLL_SECONDS = 0.25
@@ -388,16 +395,20 @@ def _converse(
     url: str,
     timeout: float,
     instructions: str,
-    audio: AudioFrame,
-    out: queue.Queue,
+    heard: AudioFrame | str,
+    out: "queue.Queue | _OutboxSink",
     cancelled: threading.Event,
     max_output_tokens: int,
     tools: list[dict] | None = None,
     executor: Callable[[str, str], str] | None = None,
-    turn: Turn | None = None,
+    external_stop: Callable[[], bool] | None = None,
 ) -> None:
     """Daemon thread: one realtime session for one reply. Puts frames, `_ROUND` at each tool-round
-    boundary, exceptions, and finally `(_DONE, (reply text, samples received))` on `out`.
+    boundary, exceptions, and finally `(_DONE, (reply text, samples received))` on `out` (a queue, or anything else
+    with `put`: `speak` hands it a sink). `heard` is the user's audio, or text to speak (`speak`: a message of the
+    user's, which the model answers). `executor(name, arguments)` runs a tool call and returns what the model reads;
+    it runs here on the session thread and never raises. `external_stop` is a stop of the caller's besides
+    `cancelled` and the app's.
 
     Every frame carries a reference to its round's `acc = [text, samples]`, so the consumer never reads
     shared state the session thread keeps changing: a preamble frame dequeued after the thread has
@@ -411,7 +422,7 @@ def _converse(
     """
 
     def stop() -> bool:
-        return cancelled.is_set() or lifecycle.stopping.is_set()
+        return cancelled.is_set() or lifecycle.stopping.is_set() or (external_stop is not None and external_stop())
 
     acc = ["", 0]  # the current round's text and samples; a fresh one per round (frames keep the old)
     stripper = _MarkupStripper()  # fresh with each round, like acc: block state must not leak across rounds
@@ -430,7 +441,12 @@ def _converse(
                 update["tools"] = tools
                 update["tool_choice"] = "required"
             session.update(update)
-            session.send({"type": "input_audio_buffer.append", "audio": _b64(to_pcm16(audio, rate_in))})
+            if isinstance(heard, str):
+                # `response.create` with instructions alone fails (`conversation_empty`): there must be an item
+                session.send({"type": "conversation.item.create", "item": {
+                    "type": "message", "role": "user", "content": [{"type": "input_text", "text": heard}]}})
+            else:
+                session.send({"type": "input_audio_buffer.append", "audio": _b64(to_pcm16(heard, rate_in))})
             _create_response(session)
             calls: list[_ToolCall] = []
             rounds = 0
@@ -491,8 +507,6 @@ def _converse(
                         if stop():
                             raise _Stopped
                         output = _speech_friendly(executor(call.name, call.arguments))
-                        if turn is not None:  # the UI's tool panel; reported by the thread that ran the call,
-                            turn.add_tool_event(call.name, call.arguments, output)  # so barge-in cannot lose it
                         session.send({"type": "conversation.item.create", "item": {
                             "type": "function_call_output", "call_id": call.call_id, "output": output}})
                     calls = []
@@ -520,90 +534,6 @@ def _check_done(event: dict, samples: int, max_output_tokens: int, had_calls: bo
     if not samples and not had_calls:
         # a tool-call response has no audio by design; the answer comes after the tool result
         log.warning("llama-server's reply had no audio (is the model one with audio output?)")
-
-
-def fetch_tools(url: str, timeout: float = CHECK_TIMEOUT) -> list[dict]:
-    """Every tool `llama-server` advertises, in the Responses API format `session.update` expects.
-
-    `GET {url}/tools` returns the chat-completions nesting (`definition.function.name`,
-    `.description`, `.parameters`), and the realtime endpoint needs the flat form
-    `{"type": "function", **definition["function"]}`. The set is the server operator's decision
-    (`--tools`): what is advertised here is also what `POST /tools` executes, so vaice does not
-    filter it. Connection problems raise `requests.RequestException` — the caller decides what to
-    do about an unavailable server.
-    """
-    r = requests.get(f"{url}/tools", timeout=timeout)
-    r.raise_for_status()
-    return [{"type": "function", **entry["definition"]["function"]} for entry in r.json()]
-
-
-def write_capable_tools(url: str, timeout: float = CHECK_TIMEOUT) -> list[str]:
-    """Names of the advertised tools llama-server marks as able to change this machine.
-
-    `GET {url}/tools` reports `permissions.write` (true for exec_shell_command, write_file,
-    edit_file in llama-server's built-ins). vaice does not filter the tool set — the server's
-    `--tools` is the gate — so this only feeds a startup warning. A request or shape problem
-    raises, like `fetch_tools`; the caller decides whether a failed check is worth a warning.
-    """
-    r = requests.get(f"{url}/tools", timeout=timeout)
-    r.raise_for_status()
-    return [str(entry.get("tool")) for entry in r.json() if (entry.get("permissions") or {}).get("write")]
-
-
-def execute_tool(url: str, timeout: float, stop: Callable[[], bool] | None = None) -> Callable[[str, str], str]:
-    """What a `function_call` is worth: `POST {url}/tools` with `{"tool": name, "params": {...}}`.
-
-    The server reads the tool's parameters from `params` (a JSON object), not from the model's
-    `arguments` JSON string; sending the string left `read_file` without its `path` (the server
-    answered "key 'path' not found") while parameterless tools such as `get_info` worked by
-    accident. The result goes back as the function_call_output, so the model can speak it. A failure
-    must be spoken too, not raised: this runs on the session thread, and the result (not the
-    traceback) is what the model sees and what `app.py` shows in the UI. A closure over `url` and
-    `timeout`, mirroring how `_open` builds the websocket.
-
-    The request itself is not cancelled (the HTTP library has no safe way to interrupt a synchronous
-    call), but the caller does not have to wait for it: the POST runs on a daemon thread and this
-    stops waiting when `stop` (when given) fires or `timeout` passes — the reply gives up promptly
-    and the result is discarded. The thread ends when the server answers or `timeout` expires; it
-    is a daemon, so it cannot keep the process alive.
-    """
-
-    def call(name: str, arguments: str) -> str:
-        try:
-            params = json.loads(arguments) if arguments.strip() else {}
-        except ValueError:
-            return f"tool {name} failed: arguments are not JSON: {arguments!r}"
-        if not isinstance(params, dict):
-            return f"tool {name} failed: arguments are not a JSON object: {arguments!r}"
-        if stop is not None and stop():
-            return f"tool {name} aborted: the reply was stopped"
-        # requests' timeout applies per socket operation and does not help here; instead, the call
-        # runs on a daemon thread and this polls it — a healthy slow tool is never destroyed, and
-        # the timeout bounds the caller either way
-        result: dict[str, str] = {}
-
-        def work() -> None:
-            try:
-                r = requests.post(f"{url}/tools", json={"tool": name, "params": params}, timeout=timeout)
-                if not r.ok:
-                    result["out"] = f"tool {name} failed: HTTP {r.status_code}: {str(r.text)[:200]}"
-                    return
-                result["out"] = str(r.text)
-            except Exception as exc:  # noqa: BLE001 - a tool failure must be spoken, not raised; the thread must never die silently
-                result["out"] = f"tool {name} failed: {exc}"
-
-        worker = threading.Thread(target=work, name=f"vaice-tool-{name}", daemon=True)
-        worker.start()
-        deadline = time.monotonic() + timeout
-        while worker.is_alive():
-            if stop is not None and stop():
-                return f"tool {name} aborted: the reply was stopped"
-            if time.monotonic() > deadline:
-                return f"tool {name} failed: timed out after {timeout:g}s"
-            worker.join(POLL_SECONDS)
-        return result.get("out", f"tool {name} failed: the request thread died")
-
-    return call
 
 
 def _b64(pcm: bytes) -> str:
@@ -695,13 +625,16 @@ def _instructions(prompt: str, history: Sequence[Message], context: str = "") ->
 
 
 class LlamaCppResponder:
-    """Streams the reply of an audio-output model on llama-server (LFM3-Audio) over /v1/realtime.
+    """Streams the reply of an audio-output model on llama-server (LFM3-Omni, LFM3-Audio) over /v1/realtime.
 
     Each reply is a fresh realtime session on a daemon thread of its own, which hands the audio to the
-    generator through a queue; a second session transcribes the same audio in parallel. The
-    instructions carry the current local time (`_context_lines`) — switchable, so the live A/B can
-    isolate the line's effect. Nothing here is bound to the thread that resumes the generator, so
+    generator through a queue; a second session transcribes the same audio in parallel. The instructions carry the
+    current local time (`_context_lines`). Nothing here is bound to the thread that resumes the generator, so
     fastrtc may resume it from any.
+
+    `tools` are declared in the session (the Responses API's flat format); `executor_for(turn, stop)` builds each
+    reply's executor, which runs the calls on the session thread and carries that reply's stop signal. `prompt_extra()`
+    is text appended to the prompt at the start of every reply (the user's notes).
     """
 
     name = "llamacpp"
@@ -709,11 +642,12 @@ class LlamaCppResponder:
     def __init__(
         self,
         url: str = config.LLAMACPP_URL,
-        prompt: str = config.LLAMACPP_PROMPT,
+        prompt: str = config.PROMPT,
         timeout: float = config.LLAMACPP_TIMEOUT,
         max_output_tokens: int = config.LLAMACPP_MAX_OUTPUT_TOKENS,
         tools: list[dict] | None = None,
-        executor: Callable[[str, str], str] | None = None,
+        executor_for: Callable[[Turn, Callable[[], bool]], Callable[[str, str], str]] | None = None,
+        prompt_extra: Callable[[], str] | None = None,
         clock: bool = True,
     ):
         self._url = url
@@ -721,14 +655,10 @@ class LlamaCppResponder:
         self._timeout = timeout
         # Text tokens and audio frames count together; the model card's own voice-chat example uses 1024
         self._max_output_tokens = max_output_tokens
-        # The server's built-in tools (fetch_tools), declared in session.update and executed through
-        # the server's /tools endpoint; None = no tools, the session.update of before. The server
-        # decides which tools those are (--tools) and refuses to execute anything it did not
-        # advertise, so the executor passes every call through. The default executor is built per
-        # reply (respond()), because it carries that reply's stop signal.
         self._tools = tools or None
-        self._executor = executor
-        # Switchable so the live A/B can isolate the clock line's effect
+        self._executor_for = executor_for
+        self._prompt_extra = prompt_extra
+        # Switchable so a live A/B can isolate the clock line's effect
         self._clock = clock
 
     def respond(self, audio: AudioFrame, history: Sequence[Message], turn: Turn) -> Iterator[AudioFrame]:
@@ -741,17 +671,19 @@ class LlamaCppResponder:
         ).start()
         chunks: queue.Queue = queue.Queue()
         cancelled = threading.Event()
-        # The default executor is per reply: it carries this reply's stop signal, so an in-flight
-        # tool call gives up when the user barges in or the app stops
-        executor = self._executor
-        if executor is None and self._tools:
-            executor = execute_tool(self._url, self._timeout,
-                                    stop=lambda: cancelled.is_set() or lifecycle.stopping.is_set())
+
+        def stop() -> bool:
+            return cancelled.is_set() or lifecycle.stopping.is_set()
+
+        # The executor is per reply: it carries this reply's stop signal, so a call in flight gives up when the
+        # user barges in or the app stops
+        executor = self._executor_for(turn, stop) if self._executor_for is not None and self._tools else None
+        prompt = self._prompt + (self._prompt_extra() if self._prompt_extra is not None else "")
         context = _context_lines(clock=self._clock)
         threading.Thread(
             target=_converse,
-            args=(self._url, self._timeout, _instructions(self._prompt, history, context), audio, chunks, cancelled,
-                  self._max_output_tokens, self._tools, executor, turn),
+            args=(self._url, self._timeout, _instructions(prompt, history, context), audio, chunks, cancelled,
+                  self._max_output_tokens, self._tools, executor),
             name="vaice-llamacpp",
             daemon=True,
         ).start()
@@ -790,6 +722,60 @@ class LlamaCppResponder:
             turn.set_assistant_text(spoken_part(final[0], final[1], handed_out))  # all of it, now that it's all out
         finally:
             cancelled.set()  # the session thread closes the socket, which cancels the reply on the server
+
+
+# What a text-input session is told: it speaks what it is given. Not measured live like the assistant's prompt: it
+# only has to say the text, so there is no tool to call and nothing to decide.
+SPEAK_PROMPT = ("You are a voice assistant. What the user's message tells you to say or report, you say, as "
+                "spoken words: one or two short plain sentences, with no lists, symbols or file paths.")
+
+
+class _OutboxSink:
+    """Where `speak` puts a session's frames (it stands in for `_converse`'s queue): they go to the `Outbox`, and the
+    text is recorded on the asking turn by a marker behind the last frame, so it is recorded only once its audio was
+    served (a barge-in that clears the outbox leaves it unrecorded). A frame the outbox refuses (it was cleared since
+    `generation`: speech start, a new conversation, Stop) or a stop ends the speech: `cancelled` is set, which
+    `_converse` notices at its next event."""
+
+    def __init__(self, outbox: Outbox, turn: Turn, generation: int, cancelled: threading.Event):
+        self._outbox, self._turn, self.generation, self._cancelled = outbox, turn, generation, cancelled
+        self.final: list = ["", 0]  # the session's last round: (text, samples)
+        self.error: BaseException | None = None
+        self.frames = 0
+
+    def put(self, item: object) -> None:
+        if isinstance(item, BaseException):
+            self.error = item
+        elif item is _ROUND:
+            pass  # no tools are offered here, so there is no second round
+        elif isinstance(item, tuple) and item[0] is _DONE:
+            self.final = item[1]
+        elif not self._cancelled.is_set():
+            rate, frame, _acc = item  # type: ignore[misc]
+            if self._outbox.put((rate, frame), self.generation):
+                self.frames += 1
+            else:
+                self._cancelled.set()
+
+
+def speak(url: str, timeout: float, max_output_tokens: int, outbox: Outbox, turn: Turn, request: str,
+          stop: Callable[[], bool], generation: int | None = None) -> None:
+    """Say `request` through the outbox, in a realtime session whose input is that text (no tools: it can never start
+    more work), and record what was said on `turn` once it was served. Blocks until the session is over, on the
+    caller's own daemon thread; best effort: a failure is a warning. `generation`: the outbox's, as the caller saw it
+    when it began (default: now), so that a clear since then (the user spoke, "New conversation", Stop) drops this."""
+    if stop():
+        return
+    cancelled = threading.Event()
+    sink = _OutboxSink(outbox, turn, outbox.generation if generation is None else generation, cancelled)
+    _converse(url, timeout, _instructions(SPEAK_PROMPT, []), request, sink, cancelled, max_output_tokens,
+              external_stop=stop)
+    if sink.error is not None:
+        log.warning("could not speak: %s: %s", type(sink.error).__name__, sink.error)
+    if sink.frames == 0 or cancelled.is_set() or stop():
+        return
+    text = spoken_part(sink.final[0], sink.final[1], sink.final[1])
+    outbox.put_marker(partial(turn.append_assistant_text, text), generation=sink.generation)
 
 
 def _warn_text_temperature(url: str) -> None:

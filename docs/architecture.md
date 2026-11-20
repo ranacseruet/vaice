@@ -6,131 +6,113 @@ individual decisions and the bugs that shaped them, see [AGENTS.md](../AGENTS.md
 ## The shape of it
 
 `vaice` is one Python process that sits between a browser and a few model servers. It owns the conversation, the
-skills and every safety decision; the models only produce speech and text.
+skills and every safety decision; the model only listens and speaks, and asks for a skill when it needs one.
 
 ```
  Browser                         vaice process (Python 3.12)                        Model servers
 ┌──────────┐  WebRTC audio  ┌────────────────────────────────────────┐        ┌──────────────────────────┐
 │ mic      │───────────────▶│ fastrtc: VAD finds the end of your     │        │ llama-server  (required) │
 │ speaker  │◀───────────────│ utterance, plays the reply, barge-in   │        │  /v1/realtime  speech    │
-│ Gradio UI│◀──── HTTP ────▶│ Responder: turns audio into a reply    │──────▶ │  /v1/chat/completions    │
-└──────────┘                │ Conversation: history, saved to disk   │        │  /tts                    │
-                            │ Skills + confirmation + memory         │        └──────────────────────────┘
-                            └───────────┬────────────────────────────┘        ┌──────────────────────────┐
-                                        │  optional, each its own endpoint    │ vision model  (optional) │
-                                        ├────────────────────────────────────▶│ browser agent (optional) │
-                                        │                                     └──────────────────────────┘
+│ Gradio UI│◀──── HTTP ────▶│ AssistantResponder: one session per    │──────▶ │  and transcription       │
+└──────────┘                │  reply, skills as its tools            │        └──────────────────────────┘
+                            │ Conversation: history, saved to disk   │        ┌──────────────────────────┐
+                            │ Skills + confirmation + memory         │        │ vision model  (optional) │
+                            └───────────┬────────────────────────────┘        │ browser agent (optional) │
+                                        │  optional, each its own endpoint    └──────────────────────────┘
+                                        ├────────────────────────────────────▶
                                         ▼  stdio
                                  MCP servers (optional, started by vaice)
 ```
 
 Principles that decide most design questions (the long form is in the [vision](vision.md)):
 
-- **The models propose; vaice decides.** Skills, confirmation, timeouts and cancellation are vaice's code, not
+- **The model proposes; vaice decides.** Skills, confirmation, timeouts and cancellation are vaice's code, not
   something a 2B model is trusted with.
-- **Text boundaries between roles.** Ears, brain, hands and mouth exchange text, so each can be replaced (a bigger
-  brain, another voice) without touching the others.
+- **One path.** Every reply is one speech-to-speech session. There is no second text model and no separate voice step to
+  keep in sync, and everything that is not a reply (the outcome of a Run click, a browser task) is spoken by a session of
+  the same kind.
 - **Opt-in for anything that widens reach.** Shell, memory, screen vision, a remote model and MCP tools are off
   until you turn them on, and each says what it can see or do.
 - **A reply never takes the app down.** Errors are caught inside the reply, spoken or shown, and the connection
   carries on.
 
-## The front end (both modes)
+## The front end
 
 | Piece | Job |
 |---|---|
-| `app.py` | The CLI (`vaice`, `vaice up`) and the Gradio page: the microphone, the transcript, the *Tool activity*, confirmation and *Memory* panels, the **New conversation** button. Wraps a `Responder` and logs time to first audio |
+| `app.py` | The CLI (`vaice`, `vaice up`) and the Gradio page: the microphone, the transcript, the *Tool activity*, confirmation and *Memory* panels, the **New conversation** button. Wraps the responder and logs time to first audio |
 | `interruptible.py` | `InterruptSafeReplyOnPause`, a fastrtc `ReplyOnPause` subclass. Tunes the VAD, keeps 0.3 s of pre-roll so opening words are not clipped, fixes the races that made barge-in drop the interrupting question, and serves the outbox when no reply is playing |
-| `outbox.py` | `Outbox`: audio frames and callback markers that a worker thread queues for speech no reply carries (the outcome of a click-approved call); the handler's idle `emit()` serves it |
+| `outbox.py` | `Outbox`: audio frames and callback markers that a worker thread queues for speech no reply carries (the outcome of a Run click, a browser task); the handler's idle `emit()` serves it |
 | `audio.py` | Browser frames to mono PCM16 at the model's rate, and replies back to float32 |
 | `responders/base.py` | The `Responder` contract: `respond(audio, history, turn)` yields `(sample_rate, float32 samples)` chunks and reports the transcript and the spoken text on the `turn` |
 | `conversation.py` | `Conversation` and `Turn`: the windowed history that goes into each prompt, barge-in trimming, atomic JSON persistence |
 | `server.py` | `vaice up`: reuse a running `llama-server` or start one, wait for `/health`, stop it at exit |
 | `lifecycle.py` | The one stop signal: Ctrl+C asks the app and every in-flight call to give up |
 
-The user speaks, fastrtc's VAD decides the utterance ended, and the `Responder` produces a reply as a stream of
-audio chunks. If the user speaks again while a reply plays, fastrtc interrupts it ("barge-in"); the `Turn` then
-keeps only the part of the reply that could have been heard.
+The user speaks, fastrtc's VAD decides the utterance ended, and the responder produces a reply as a stream of audio
+chunks. If the user speaks again while a reply plays, fastrtc interrupts it ("barge-in"); the `Turn` then keeps only the
+part of the reply that could have been heard.
 
-## Chat mode: one model does it all
+## A reply: one session, skills as its tools
 
 `LlamaCppResponder` (`responders/llamacpp.py`) opens a fresh `/v1/realtime` WebSocket session per reply. It sends the
 whole utterance as audio and receives the spoken reply as streamed frames with the model's own text alongside. History
-travels as ChatML turns inside the session `instructions`. A second `transcription` session reports what the user
-said. Everything about the model's speech and wording is the model's; vaice only streams it and records it. See
-[Chat mode](chat-mode.md).
-
-## Assistant mode: ears, brain, hands, mouth
-
-`AssistantResponder` (`responders/assistant.py`) splits the work into steps so that vaice controls what is said and
-done:
+travels as ChatML turns inside the session `instructions`. A second `transcription` session reports what the user said.
+`AssistantResponder` (`responders/assistant.py`) is that responder with vaice's skills attached:
 
 ```
-audio ─▶ transcribe ─▶ decide(brain ⇄ skills) ─▶ speakable()+sentences() ─▶ /tts per sentence ─▶ audio frames
-         (realtime     │  ▲                                                                    ▲
-          transcription│  └─ result of each skill goes back to the brain                       │
-          session)     └─ a confirm skill stops here and asks ──▶ question spoken, request armed
+audio ─▶ realtime session ─▶ speech frames ─▶ fastrtc
+          │  ▲   instructions = prompt + history + clock + memory notes
+          │  └── result of each skill goes back as a function_call_output
+          └─ function_call ─▶ executor ─▶ read/action: run now
+                                          confirm: a pending request, nothing runs (button only)
+                                          browse: start the browser task in the background
 ```
 
-1. **Transcribe.** The realtime `transcription` session turns the audio into text (about 0.15 s).
-2. **Decide.** `brain.ChatBrain` makes a `/v1/chat/completions` call with the transcript, the history and the skills as
-   tools. If the brain asks for skills, vaice runs them and calls the brain again, within a task budget of
-   `VAICE_ASSISTANT_MAX_STEPS` brain calls (10) and `VAICE_ASSISTANT_TASK_SECONDS` seconds (120, checked between calls);
-   the last call has no tools, so it must answer. A spoken yes to a question continues the same task (the budget keeps
-   counting, and a skill having run taints it for the rest of the task). The brain is the local `llama-server` at temperature 0.
-3. **Speak.** The answer is cleaned for speech (`voice.speakable`: no markdown, no paths), split into sentences, and
-   each sentence is streamed from `/tts`. Text is recorded sentence by sentence as its audio is queued, so a barge-in
-   keeps what was actually spoken.
-
-Details that matter:
-
-- **Skills** (`skills.py`) have a `kind`: `read` and `action` run at once, `confirm` asks first. A skill runs an argv list
-  with a timeout and no shell, validates its arguments, and never raises; a failure becomes a spoken sentence. Results
-  that must not be paraphrased (a refusal, a missing permission) carry a fixed `answer` that ends the reply.
-- **History carries tool results.** Each answered turn's skill results are replayed as a real tool exchange, so a
-  follow-up ("and how much memory?") is answered from the result, not from the model's head. The call's own arguments
-  are replayed too (compact JSON, at most 300 characters, else `{}`), so the model is not shown calls that succeeded
-  without a required argument and does not imitate them. A call that asked for confirmation is stored as two events (the wait, then its result); the replay leaves the wait out once a later event of the turn has the same name and arguments, so the model sees the call once (stored events and the *Tool activity* panel are unchanged).
-- **Spoken progress.** If the decision takes longer than 2.5 s, a second thread says "One moment." and then "Still
-  working." through the same `/tts` path, never recording the filler in history.
-- **One worker thread per reply.** The generator that fastrtc drives only polls a queue; the slow work happens on a daemon
-  thread. See [Threading and cancellation](#threading-and-cancellation).
+1. **The skills are the session's tools,** declared in the flat Responses format. The first response is requested with
+   `tool_choice: "required"`, later ones with `auto`, and after `MAX_TOOL_ROUNDS` (2) with `none`, which forces an answer.
+2. **A per-reply executor** (`_Executor`) handles each call on the session thread. A `read` or `action` skill runs at
+   once through `Skills.run`, which never raises: a failure is the result the model reads. A `confirm` skill goes through
+   `Skills.prepare`, which checks the arguments and builds the question; the executor creates the pending request and the
+   result tells the model that only the Run button runs it. A `background` skill (`browse`) starts the task. `remember` is
+   refused once any other skill was called in the same reply, so a file name or a command's output cannot become a note.
+3. **Results are compacted** (`_speech_friendly`) before they go back, because the model reads a fed-back result aloud.
+   Only the answer after the last tool round is recorded as the reply's text; the words before a result are spoken but
+   dropped from the record.
+4. **One worker thread per reply.** The generator that fastrtc drives only polls a queue; the slow work happens on a
+   daemon thread. See [Threading and cancellation](#threading-and-cancellation).
 
 ### Confirmation
 
-A `confirm` skill does not run when the brain asks for it. `decide()` returns a `Question` (a fixed sentence that
-names the skill but never reads the arguments), and `confirm.py` holds one pending request: it is shown in the UI at
-once and **armed only after the question's audio was actually handed out**, so an interrupted question cannot be
-answered by accident. It expires 60 s after arming. The next utterance approves only when the *whole* transcript is a yes
-phrase, or the **Run** button is clicked; anything else drops the request and is handled as a new question. A pending
-request is taken atomically, so a click and a spoken yes cannot both run it. A request that only a click may approve (shell
-commands outside a tiny allowlist, `click`-policy MCP tools) never accepts a spoken yes at all. Question texts contain
-none of the words a user answers with, because speaker echo can reach the microphone.
+A `confirm` skill (`quit_app`, `run_shell`, `forget_everything`, an MCP tool with the `click` policy) does not run when
+the model asks for it. `confirm.py` holds one pending request, shown in the UI at once with the skill and its exact
+arguments; **only the Run button settles it**, and nothing a user says does. It expires 60 s after it was made; a
+newer request replaces it, and a stale panel's buttons carry the old id and settle nothing. A pending request is taken
+atomically, so two clicks cannot both run it.
 
-**After a click** there is no reply generator to carry audio, so `approve` starts the continuation on
-a daemon thread (`vaice-assistant-task`, `_continue`): the same `Task` (tainted by the approved result), `decide()` over
-the stored chat plus the tool message, events recorded on the asking turn. A brain failure after the call ran is not
-reported as one: the call's own result is spoken. The outcome goes to an `Outbox` (`app.build_stream` creates it, passes
-it to the handler and calls the responder's optional `attach_outbox`): frames, a marker after each sentence that appends
-that sentence to the asking turn (`Turn.append_assistant_text`, the one write a closed turn accepts), and, when the
-continuation ends in another question, an arming marker whose `on_drop` takes the request back. The handler's idle
-`emit()` (no pause, no reply generator, the user not talking) serves it **paced**: fastrtc's playback queue is unbounded,
-so the next item is served only while the audio served so far (a reply's included) is estimated to end less than `LEAD_SECONDS` (0.4 s) ahead,
-which keeps the markers close to real playback. Starting to talk with no reply running clears the outbox (the drop
-hooks run) and, when proactive audio is estimated still playing, fastrtc's playback queue; with `VAICE_CAN_INTERRUPT=0`
-it does neither. A new reply, a second approval and *New conversation* cancel the continuation (one task at a time) and
-clear the outbox; speech queued while no connection polled for 30 s is dropped. Narration and a whole-task Stop are not built: the question a continuation asks waits for you.
+**Run** executes the stored call (never what the model says afterwards), records the result on the asking turn and then
+has a fresh realtime session speak the outcome: a session with no tools whose input is a text message
+(`The approved action is finished. Result: ... In one short sentence, tell the user what happened.`), so the model phrases it in its own voice. Its frames go to the
+`Outbox` (`app.build_stream` creates it, passes it to the handler and calls the responder's `attach_outbox`), followed by
+one marker that appends the spoken text to the asking turn (`Turn.append_assistant_text`, the one write a closed turn
+accepts), so a barge-in that clears the outbox leaves the text unrecorded too. The handler's idle `emit()` (no pause, no
+reply generator, the user not talking) serves the outbox **paced**: fastrtc's playback queue is unbounded, so the next
+item is served only while the audio served so far (a reply's included) is estimated to end less than `LEAD_SECONDS`
+(0.4 s) ahead, which keeps the markers close to real playback. Starting to talk with no reply running clears the outbox
+and, when its audio is estimated still playing, fastrtc's playback queue; with `VAICE_CAN_INTERRUPT=0` it does neither.
+*New conversation* drops the request and clears the outbox; speech queued while no connection polled for 30 s is dropped.
+**Cancel** records `cancelled` and speaks nothing.
 
 ### The skills and their extensions
 
 | Skill group | Module | Notes |
 |---|---|---|
 | Read-only checks (disk, battery, system, processes, find files) | `skills.py` | Run at once; output spoken as clean names |
-| Actions (open app, volume, mute) and `quit_app` (confirm) | `skills.py` | Results name their object, because arguments over the cap (or stored before they were replayed) replay as `{}` and the spoken result is what a follow-up reads |
-| `run_shell` (opt-in) | `shell.py` | A small allowlist of harmless commands may be approved by voice or click; everything else is click-only, through `zsh -c`, with a 30 s timeout, an output cap and a process group that barge-in kills |
-| `remember`, `forget`, `forget_everything` (opt-in) | `memory.py` | Explicit notes only, saved to `memory.json` and appended to the system prompt. A note is text that outlives its conversation, so it is cleaned, capped, and refused if a tool ran earlier in the same reply |
+| Actions (open app, volume, mute) and `quit_app` (confirm) | `skills.py` | Results name their object (`opened Safari`), so the model's answer and the *Tool activity* record agree |
+| `run_shell` (opt-in) | `shell.py` | Always a confirm skill: through `zsh -c` after Run, with a 30 s timeout, an output cap and a process group that stopping kills; `sudo` is refused |
+| `remember`, `forget`, `forget_everything` (opt-in) | `memory.py` | Explicit notes only, saved to `memory.json` and appended to the instructions. A note is text that outlives its conversation, so it is cleaned, capped, and refused if a tool ran earlier in the same reply |
 | `look_at_screen` (opt-in) | `vision.py` | One `screencapture` + `sips` shrink, asked of a vision model, never kept or logged. See [Screen vision](screen-vision.md) |
-| `browse` (opt-in) | `browse_task.py`, `browse.py` | A `background` skill: the reply says one fixed line and ends, then a task thread runs the Pi agent quietly (it speaks only a step question and the outcome, through the outbox); a step that changes a page asks, answered by a spoken yes or a click; a new utterance does not stop the task, and `browser_status` (what vaice already got from Pi: goal, tools and pages, a waiting step, Pi's latest words) and `stop_browsing` let the brain report on and end it; the task's answer (or a click-approved skill's outcome) may make the brain start another browser task, up to 3 per request. See [Browser tasks](browser-tasks.md) |
+| `browse` (opt-in) | `browse_task.py`, `browse.py` | A `background` skill: the reply says one line and ends, then a task thread runs the Pi agent quietly. A step that changes a page is a button-only pending request with a spoken heads-up; the outcome is spoken by a text-input session through the outbox and recorded on the asking turn. A new utterance does not stop the task; the Stop button, `stop_browsing`, *New conversation* and exit do, and `browser_status` reports on it. One task at a time. See [Browser tasks](browser-tasks.md) |
 | MCP tools (opt-in) | `mcp_skills.py` | Each listed tool of each stdio server becomes `<server>__<tool>` with a `run` or `click` policy. See [MCP tools](mcp-tools.md) |
 
 ## Safety model
@@ -138,24 +120,25 @@ clear the outbox; speech queued while no connection polled for 30 s is dropped. 
 Layers, from the outside in:
 
 1. **Off by default.** Anything that reaches further than the audio loop is an opt-in setting.
-2. **No shell unless approved.** Skills are argv lists. The one shell path is behind confirmation, shows the exact
-   command, and is click-only unless the command is provably harmless.
-3. **Confirmation is vaice's, not the model's.** The approval gate, its timing and its words are code; a model cannot
-   approve its own request, and a replayed or stale request cannot run.
-4. **Untrusted text stays in the `tool` role.** What a file name, a command, a web page on screen or an MCP server returns
-   goes to the brain only as tool output. `remember` refuses once any skill has run in the reply, so tool output cannot be
+2. **No shell unless approved.** Skills are argv lists. The one shell path is behind confirmation: it shows the exact
+   command and runs only after you press Run.
+3. **Confirmation is vaice's, not the model's.** The approval gate and its words are code, and the only approval is a
+   button press; a model cannot approve its own request, and nothing said aloud can, so speaker echo cannot either. A
+   replayed or stale request cannot run.
+4. **Untrusted text stays in the tool result.** What a file name, a command, a web page on screen or an MCP server returns
+   goes to the model only as a skill's result. `remember` refuses once any skill has run in the reply, so tool output cannot be
    turned into a persistent note.
 5. **Everything is cancellable.** Barge-in, **New conversation** and Ctrl+C stop skills mid-run and end child processes.
 6. **Secrets are opaque.** API keys and MCP `env` values live in configuration and in one header; no log line, error or
    result holds them.
 
-Honest limits: the confirmation words are matched on a transcript, a 2B model still misjudges when to call a skill, and
-speaker echo is a known risk (use headphones). See [Privacy](privacy.md) and the "Not verified" notes in AGENTS.md.
+Honest limits: a 2B model still misjudges when to call a skill (and can say it did something it did not), and speaker
+echo can still cut a reply short (use headphones). See [Privacy](privacy.md) and the "Not verified" notes in AGENTS.md.
 
 ## Threading and cancellation
 
 fastrtc resumes a reply generator on a different worker thread for each chunk, and blocking network calls must never hold
-one. So each reply's slow work (`connect()`, the realtime sessions, brain calls, `/tts`, skills) runs on **daemon
+one. So each reply's slow work (`connect()`, the realtime sessions, skills) runs on **daemon
 threads of its own**, and the generator only polls a queue every `POLL_SECONDS` while checking `lifecycle.stopping` and
 whether the turn was closed. When the generator is dropped (barge-in), its `finally` sets a cancel event and the worker
 closes its sockets and stops its skills. Because the threads are daemons and the generator never blocks, a server that
@@ -169,7 +152,7 @@ All under `VAICE_DATA_DIR` (default `~/.vaice`, files `0600`; empty means nothin
 | File | Holds |
 |---|---|
 | `conversation.json` | The conversation: turns, tool events, written atomically after every update |
-| `memory.json` | The notes (assistant mode, memory on) |
+| `memory.json` | The notes (memory on) |
 | `llama-server.log` | Output of a `llama-server` that `vaice up` started |
 | `mcp-<name>.log` | Stderr of an MCP server vaice started |
 
@@ -178,50 +161,47 @@ All under `VAICE_DATA_DIR` (default `~/.vaice`, files `0600`; empty means nothin
 Unit tests use fakes for the server and the model; a fake `/v1/realtime` server (`tests/fake_realtime.py`) exercises
 the responder end to end, and `tests/threads.py` reproduces fastrtc's real threading. Nothing automated hears a real
 model or the browser microphone. Claims about model behavior come from the **live eval** in `evals/`, run by hand with
-repeats per build and quantization, on the chat and assistant paths; only its scoring is unit-tested. See
+repeats per build and quantization; only its scoring is unit-tested. See
 [Development](development.md).
 
 ## Code map
 
 ```
 src/vaice/
-  app.py            CLI + Gradio/WebRTC UI; wraps a Responder, logs time to first audio, transcript + reset
+  app.py            CLI + Gradio/WebRTC UI; wraps the responder, logs time to first audio, transcript + reset, the panels
   interruptible.py  ReplyOnPause subclass fixing fastrtc 0.0.34 barge-in races, VAD tuning, pre-roll buffer, reset silencing, idle CPU polling, and serving the outbox
-  outbox.py         Outbox: audio + markers for speech with no reply in flight (a click's outcome), drained by the idle emit()
+  outbox.py         Outbox: audio + markers for speech with no reply in flight (a Run click's or a browser task's outcome), drained by the idle emit()
   server.py         `vaice up`: reuse a running llama-server or start one (log in the data dir), wait for /health, stop it at exit
   lifecycle.py      Stop signal handler: Ctrl+C asks the app and its responders to abandon in-flight calls
-  config.py         Environment-driven settings (.env.example lists them with defaults)
+  config.py         Environment-driven settings (.env.example lists them with defaults) and the removed/renamed names it warns about
   conversation.py   Turn / Conversation: history windowing, barge-in trimming, atomic JSON persistence, error notes
-  brain.py          Assistant mode: ChatBrain, one chat-completions call with tools (the local llama-server), BrainError
-  skills.py         Assistant mode: the skills (read-only answers, plus open/quit app, volume, mute) and the Skills registry
-  vision.py         Assistant mode, opt-in: the look_at_screen skill (one screenshot via screencapture + sips, asked of a vision model)
-  memory.py         Assistant mode: long-term notes (Memory, kept in memory.json) and the remember / forget / forget_everything skills
-  mcp_skills.py     Assistant mode, opt-in (the `mcp` extra): MCP servers over stdio as skills, with a per-tool approval policy
-  confirm.py        Assistant mode: the one pending request of a confirm skill, the spoken yes/no test and its 60 s expiry
-  shell.py          Assistant mode, opt-in: the run_shell skill: how a command may be approved, and the runner (timeout, output cap, process group)
-  browse.py         Assistant mode, opt-in: PiAgent drives the Pi coding agent (`pi --mode rpc`) with a goal, through chrome-devtools-mcp; its config directory, child process, abort/kill handling and the cleanup of Chrome processes on its profile
-  browse_task.py    Assistant mode, opt-in: the `browse`, `browser_status` and `stop_browsing` skill definitions and the pure pieces (fixed lines, step questions, result text, the status record)
+  skills.py         The skills (read-only answers, plus open/quit app, volume, mute), the Skills registry and the flat tool definitions
+  confirm.py        The one pending request of a confirm skill (or a browser step), button-only, with its 60 s expiry
+  vision.py         Opt-in: the look_at_screen skill (one screenshot via screencapture + sips, asked of a vision model)
+  memory.py         Opt-in: long-term notes (Memory, kept in memory.json) and the remember / forget / forget_everything skills
+  mcp_skills.py     Opt-in (the `mcp` extra): MCP servers over stdio as skills, with a per-tool run/click policy
+  shell.py          Opt-in: the run_shell skill and the runner (timeout, output cap, process group)
+  browse.py         Opt-in: PiAgent drives the Pi coding agent (`pi --mode rpc`) with a goal, through chrome-devtools-mcp; its config directory, child process, abort/kill handling and the cleanup of Chrome processes on its profile
+  browse_task.py    Opt-in: the `browse`, `browser_status` and `stop_browsing` skill definitions and the pure pieces (fixed lines, step questions, result text, the status record)
   browse_gate.ts    The Pi extension browse.py loads: the approval policy for the browser's tools (read-only run, page-changing ask, the rest ask); shipped in the package
-  voice.py          Assistant mode: speakable() cleans text for speech, sentences() splits it for /tts
   audio.py          Mic frame → mono PCM16 at the model's rate (resampled via scipy) and back to float32
   responders/
     base.py         Responder protocol (audio + history in → audio chunks out; reports transcript and spoken text)
-    __init__.py     Responder package
-    llamacpp.py     llama-server /v1/realtime: parallel reply and transcription sessions on daemon threads, startup check
-    assistant.py    Assistant mode: transcribe, brain + skills loop, streamed /tts per sentence, on one daemon thread
+    llamacpp.py     llama-server /v1/realtime: the reply session (tool rounds, repetition breaker), the parallel transcription session, text-input speech (`speak`), startup check
+    assistant.py    AssistantResponder: the llama-server responder with the skills as tools, the per-reply executor, Run/Cancel, and the browser task thread
 tests/
-  fake_realtime.py  Fake /v1/realtime WebSocket + HTTP server for testing LlamaCppResponder end to end
+  fake_realtime.py  Fake /v1/realtime WebSocket + HTTP server for testing the responders end to end
+  threads.py        fastrtc's real threading (a fresh thread per resume) for generator tests
   fixtures/fake_pi.py  A fake `pi --mode rpc` (scripted scenarios, records the commands it gets) for tests/test_browse.py
 evals/
   run.py            Live tool-calling eval against a real llama-server (run by hand; see evals/README.md)
   scoring.py        Pure scoring and aggregation for the eval (unit-tested)
-  cases.json        Spoken commands and expected tool calls; tools.json holds the stub tool set
-  assistant_cases.json  Spoken questions and expected skills (memory ones carry `notes`) for the assistant path (`--paths assistant`)
-  assistant_vision_cases.json  The same for `look_at_screen` (run with `--vision`; the screen is a stub)
+  cases.json        Spoken questions and expected skills (memory ones carry `notes`)
+  shell_cases.json, vision_cases.json, browse_cases.json  The same for the opt-in skills (`--shell`, `--vision`, `--browse`)
   recordings/       Optional real-mic clips, <case id>.wav
 ```
 
 ## Where this is heading
 
-The architecture was built for a roadmap, not the other way round: separate roles behind text boundaries, skills in
-vaice's hands, a swappable brain. The [vision](vision.md) says what that is for and what is still missing.
+The architecture was built for a roadmap, not the other way round: skills and every safety decision in vaice's hands, one
+replaceable model. The [vision](vision.md) says what that is for and what is still missing.
