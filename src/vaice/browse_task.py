@@ -63,13 +63,13 @@ def browse_skill(busy: Callable[[], bool] | None = None) -> Skill:
 
     return Skill(
         "browse",
-        "Do a task on the web in a browser window, such as opening a website and reading something from it. It "
-        "works in the background and takes a while, one task at a time. Not for questions you can answer yourself or "
-        "about this computer.",
+        "Do a task on the web in a browser window: look something up, research a product, find recent news or "
+        "prices, or open a website and read something from it. It works in the background and takes a while, one "
+        "task at a time. Not for questions you can answer yourself or about this computer.",
         {"type": "object",
          "properties": {"goal": {"type": "string",
                                  "description": "What to do in the browser, in one sentence, naming the site or "
-                                                "address the user gave."}},
+                                                "address if the user gave one."}},
          "required": ["goal"]},
         lambda _args: SkillResult("the browser task runs in the background"),
         kind="background", ask=start)

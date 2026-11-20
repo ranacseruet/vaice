@@ -58,6 +58,7 @@ Each line was measured on the live eval or a live probe; the numbers and runs ar
 - Vision: 1024 px screenshots, `VAICE_VISION_MAX_TOKENS` 200 plus a "one or two short sentences" system line (without both: 4 to 9 s answers and timeouts); the prompt line "The computer changes all the time … use the tool again" and `look_at_screen`'s "never answer from an earlier look".
 - The clock line is imperative ("You know the current date and time: … Use it when asked …"); a declarative line was ignored. Prompt lines that forbid things ("do not read the result aloud") broke the audio (silent replies): don't add one without an A/B (#77).
 - `APPROVED` (the Run outcome's wording): `REPORT` turned "quit Calculator" into "Sure, here's your request: quit Calculator." (probe, one run per wording).
+- The `browse` description names research ("look something up, research a product, find recent news or prices, or open a website …"): the site-only wording got 13/30 research calls without vision and 0/30 with it, the new one 30/30 both ways; adding a prompt line about the browser on top lifted site requests further but cost `disk_space`/`battery_status` calls (2026-11-20, `evals/browse_cases.json` x 5).
 - `browse.PROMPT` says Bing or DuckDuckGo, never Google (bot checks); don't configure a browser MCP server next to `browse` (the model mixed the two).
 
 ## Gotchas (each has bitten this repo)

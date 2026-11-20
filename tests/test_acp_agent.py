@@ -7,6 +7,7 @@ import stat
 import sys
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -127,6 +128,12 @@ def test_the_answer_is_the_text_after_the_last_tool_call_and_progress_and_text_a
     assert h.texts == ["I'll open the page.", "The title is Python."]  # a message per tool call, then the final one
     prompt = h.fact("prompt")[0]
     assert GOAL in prompt and "Bing or DuckDuckGo" in prompt
+    assert f"Today is {datetime.now().astimezone():%A}" in prompt  # the agent resolves "this month" from it
+
+
+def test_the_task_prompt_carries_the_date_and_the_goal():
+    prompt = browse.task_prompt("find the news", datetime(2026, 11, 20, 15, 0))
+    assert "Today is Friday, November 20, 2026." in prompt and prompt.endswith("Task: find the news")
 
 
 def test_the_client_offers_no_file_system_or_terminal_and_new_session_carries_the_cwd_and_mcp_servers(harness):

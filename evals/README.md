@@ -59,6 +59,27 @@ Runs whose transcript differs from the spoken sentence (case and punctuation ign
 
 The results file holds the config, server info, label, and every run's raw record (calls, texts, timings, error) with its score, so a surprising number can be traced to the run that produced it.
 
+## Live browser-agent check
+
+`run.py --browse` scores only whether the voice model decides to call `browse`; it never starts a browser task. `browse_live.py` is the agent's side: it opens the browser agent exactly as the app does (`VAICE_BROWSE`, `VAICE_BROWSE_URL`, `_MODEL`, `_API_KEY`, `VAICE_BROWSE_AGENT`, `VAICE_BROWSE_CONFIRM`, `VAICE_DATA_DIR`, from the environment and a `.env` in the working directory), gives it research goals with no named site, and records what it did. It does not involve the voice model, the audio path or `llama-server`.
+
+```bash
+.venv/bin/python evals/browse_live.py                                   # the three built-in goals, once each
+.venv/bin/python evals/browse_live.py --repeats 3 --label qwen3-32b     # k/N over repeats
+.venv/bin/python evals/browse_live.py --goal "Find the latest stable Python release." --visible
+```
+
+Options: `--goal TEXT` (repeatable; replaces the built-in goals), `--repeats N` (default 1), `--seconds S` (per task; default `VAICE_BROWSE_SECONDS`), `--visible` (show Chrome's window), `--out FILE` (default `evals/results/browse-live-<UTC timestamp>.json`, gitignored) and `--label TEXT`.
+
+- It contacts real sites and the configured browse model, so it needs `VAICE_BROWSE` set (and `VAICE_BROWSE_URL` for Pi, or `VAICE_BROWSE_AGENT` for `acp`), the `browse` extra (`uv sync --extra dev --extra browse`) and Node.js. When the agent cannot be started it exits with the app's start-up warnings above the error. CI never runs it.
+- Chrome is headless and always muted (`--mute-audio`, `--audio-muffling`), unless `--visible` (still muted).
+- It uses the browser profile under `VAICE_DATA_DIR` (your logins included), and ends whatever holds that profile before the agent starts: while vaice itself is running, point it elsewhere, e.g. `VAICE_DATA_DIR=/tmp/vaice-live .venv/bin/python evals/browse_live.py` (the environment wins over `.env`).
+- It approves every step the agent asks about, whatever `VAICE_BROWSE_CONFIRM` says, so do not point it at a profile or goals you would not want clicked through.
+- Goals run one after another on the same agent, as in the app. Per run it records the outcome (`answer`, or the exception class: `BrowseError`, `BrowseDeclined`, ...), the answer or the error and its spoken sentence, the seconds, the tool calls in order, the steps it was asked about and the pages visited. After the last run it closes the agent and counts the processes still holding the Chrome profile a second later.
+- Exit status is 0 when every run produced an answer and nothing was left holding the profile, 1 otherwise. Ctrl+C stops the running task, closes the agent and reports what finished.
+
+It measures whether the agent finishes a research task and how (tools, pages, time); it does not grade whether the answer is right, read that yourself. Results are per agent, model and build and vary run to run: quote `k/N` answered over repeats with the label, never a single run.
+
 ## Cases
 
 A case file is a list of `{"id", "say", "expect"}`, plus an optional `"history"`: a list of `["user" | "assistant", text]` earlier turns that replaces the default history for that case (also under `--no-history`), for a follow-up that only makes sense after an earlier answer (`vision-look-again`: "what do you see now?" after a screen answer). History carries the spoken words only: the app does not replay tool results. `expect` is one of:

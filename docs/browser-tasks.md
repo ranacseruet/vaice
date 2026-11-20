@@ -1,7 +1,7 @@
 # Browser tasks
 
 `VAICE_BROWSE=pi` or `VAICE_BROWSE=acp` (off by default) adds one skill, `browse(goal)`: when you ask for something to
-be done on the web ("Open python.org and tell me the page title"), the assistant says it is working in the browser and
+be done or looked up on the web ("Open python.org and tell me the page title", "Research some coffee makers online"), the assistant says it is working in the browser and
 vaice hands the goal to a browser agent, which drives a Chrome window through chrome-devtools-mcp. The task runs
 **in the background and quietly**: you can keep talking (a new question is answered as usual and does not stop the
 task), vaice says nothing about progress, asks before any step that changes a page, and when the task ends a fresh
@@ -90,6 +90,14 @@ a version it cannot parse only warns), and for `acp` that the agent's program is
   open: that is up to the agent.
 - **No Google.** The agent is told to search with Bing or DuckDuckGo: Google shows an automated browser a bot check instead
   of results.
+- **Today's date.** Each task's prompt carries the date, so "this week" or "the latest" means now: without it the
+  agent's model researched a month of its own.
+- **Research, not only sites.** The `browse` description names looking something up, researching a product and
+  recent news or prices, as well as opening a website. With the earlier site-only wording the voice model answered
+  "I can't browse the web" to most research requests: 13 of 30 calls without the screen skill, 0 of 30 with it, on
+  `evals/browse_cases.json` (5 repeats, LFM3-Omni-2B Q8_0); 30 of 30 both ways with the new one, and no `browse` call on
+  a question it should answer itself. `evals/browse_live.py` checks the agent's side: with the model named above, 3 of
+  3 research goals answered (94 to 222 s), nothing left holding the profile.
 
 Not verified: speaker echo (the microphone hearing the heads-up and the VAD cutting a reply, #36; headphones assumed),
 any model other than the one named above driving Pi, ACP agents other than Pi (the protocol is generic, vaice's tests
