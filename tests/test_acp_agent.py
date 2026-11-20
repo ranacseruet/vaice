@@ -205,6 +205,17 @@ def test_a_question_without_a_message_carries_the_raw_arguments(harness):
     assert json.loads(h.asked[0][1]) == {"method": "confirm", "title": "x", "n": 1}
 
 
+def test_a_long_question_reaches_the_panel_whole(harness):
+    script = "() => " + "x" * 5000 + "; submitTheForm()"  # what is approved must be all of what runs
+    message = json.dumps({"function": script})
+    h = harness({"steps": [{"permission": {"title": "mcp__chrome__evaluate_script", "message": message}},
+                           {"permission": {"title": "y", "raw": {"function": script}}},
+                           {"text": "ok"}]})
+    h.run()
+    assert h.asked[0][1] == message
+    assert json.loads(h.asked[1][1]) == {"function": script}
+
+
 def test_a_no_answers_with_the_reject_option_then_cancels_and_ends_as_declined(harness):
     h = harness(ASK)
     h.answer = False
@@ -479,6 +490,7 @@ def test_session_close_is_sent_only_when_the_agent_advertises_it(tmp_path):
 def test_secrets_the_goal_and_the_pages_text_never_reach_a_log_an_error_or_a_repr(harness, caplog):
     goal = "find the secret recipe at private.example.test"
     h = harness({"steps": [{"text": "thinking about the recipe"},
+                           {"tool": f"Run curl -H 'Authorization: {KEY}'", "args": {}},  # a free-text title
                            {"tool": "mcp__chrome__fill", "args": {"value": "typed-by-the-agent"}},
                            {"permission": {"title": "mcp__chrome__fill",
                                            "message": "{\"value\":\"typed-by-the-agent\"}"}},

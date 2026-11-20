@@ -67,7 +67,6 @@ from vaice.browse import BrowseDeclined, BrowseError, BrowseStopped
 
 log = logging.getLogger(__name__)
 
-RAW_INPUT_CHARS = 2000  # of a permission request's arguments a question carries when the agent gave no `message`
 LOG_TOOL_CHARS = 60  # of a tool's title a log line carries (titles are free text across agents)
 STREAM_LIMIT = 16 * 1024 * 1024  # the longest line an agent may write (a screenshot is one)
 SESSION_CLOSE_WAIT = 5.0  # seconds `session/close` may take (the answer is in already: this is housekeeping)
@@ -101,10 +100,10 @@ class _Task:
 
     def __init__(self, budget: _Budget, on_progress: Callable[[str, dict], None],
                  on_text: Callable[[str], None] | None, on_ask: Callable[[str, str, Callable[[], bool]], bool],
-                 marker: str | None, started: float, gone: Callable[[], bool]):
+                 marker: str | None, started: float, gone: Callable[[], bool], scrub: Callable[[str], str]):
         self.budget = budget
         self.on_progress, self.on_text, self.on_ask = on_progress, on_text, on_ask
-        self.marker, self.started, self._gone = marker, started, gone
+        self.marker, self.started, self._gone, self.scrub = marker, started, gone, scrub
         self.interrupted = asyncio.Event()
         self.reason: str | None = None  # "abort" (the caller's stop or deadline), "declined" or "tripwire"
         self.active = False  # updates and permission requests count only from the prompt until the task's end
@@ -149,8 +148,9 @@ class _Task:
             self.chunks.clear()  # a message ends at a tool call: what it said is chatter, the answer comes later
             if said:
                 _call(self.on_text, said)
-            log.info("browse: tool %s (%.1fs in)", _one_line(update.name or update.title, LOG_TOOL_CHARS),
-                     time.monotonic() - self.started)
+            # a title is free text for other agents (a command, a URL): secrets go before it is cut to length
+            name = _one_line(self.scrub(update.name or update.title or ""), LOG_TOOL_CHARS)
+            log.info("browse: tool %s (%.1fs in)", name, time.monotonic() - self.started)
             _call(self.on_progress, update.title, update.raw_input if isinstance(update.raw_input, dict) else {})
 
 
@@ -261,7 +261,8 @@ class _Client:
         title = tool_call.title or ""
         raw = tool_call.raw_input if isinstance(tool_call.raw_input, dict) else {}
         message = raw["message"] if isinstance(raw.get("message"), str) else json.dumps(raw, default=str)
-        decision = await self._ask(state, title, message[:RAW_INPUT_CHARS])
+        # whole: the panel must show everything the agent will run with (Pi's gate message is the arguments' JSON)
+        decision = await self._ask(state, title, message)
         if decision is None:  # stopped, out of time or closed: not a no; the task ends for what ended it
             state.interrupt("abort")
             return CANCELLED
@@ -511,7 +512,7 @@ class AcpAgent:
             budget.check()
             loop, proc = self._ensure_process()
             state = _Task(budget, on_progress, on_text, on_ask, self._marker, started,
-                          lambda: proc.dead or self._closed)
+                          lambda: proc.dead or self._closed, self._scrub)
             future = asyncio.run_coroutine_threadsafe(self._task(proc, state, goal), loop)
             try:
                 return self._wait(loop, proc, state, future, budget)
