@@ -874,7 +874,7 @@ def test_a_silent_server_fails_the_reply_after_the_timeout(realtime):
     server = realtime(reply=[("audio", pcm(1)), ("stall",)])
     started = time.monotonic()
     # 1 s, not less: the timeout also bounds opening the websocket, which took over 0.3 s on a loaded CI runner
-    with pytest.raises(RuntimeError, match=r"sent nothing for 1\.0s"):
+    with pytest.raises(RuntimeError, match=r"sent nothing for 1s"):
         drive(RealtimeResponder(server.url, "", timeout=1.0))
     assert time.monotonic() - started < 4
     assert server.conversation().closed.wait(3)  # and the socket is not left open
