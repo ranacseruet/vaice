@@ -1,4 +1,4 @@
-# Vision
+# Screen vision
 
 `VAICE_VISION_URL` (off by default) adds one skill, `look_at_screen(question)`: when you ask about
 your screen ("What's on my screen?", "Read the error message", "What app am I looking at?"), vaice takes **one
@@ -14,8 +14,8 @@ VAICE_VISION_URL=http://localhost:8001/v1 .venv/bin/vaice up
 
 It is off by default because it is not free: offering one more tool to the 2B model costs points on ordinary requests
 (measured on the earlier text-model path, LFM3-Omni-2B Q8_0, b12359, 5 repeats: 235 against 250 of 255; the "find my
-screenshot" and "turn the volume down" cases went from 5/5 to 0/5 with the extra tool on offer). The numbers for the
-current one-session path are in `evals/README.md` when measured. A separate vision model (a bigger local one or a
+screenshot" and "turn the volume down" cases went from 5/5 to 0/5 with the extra tool on offer). Not yet re-measured on the
+current one-session path. A separate vision model (a bigger local one or a
 hosted one) is just another `VAICE_VISION_URL`.
 
 - **Every question looks again.** A screenshot is taken each time the skill runs, never reused. The 2B model used to
@@ -40,5 +40,5 @@ hosted one) is just another `VAICE_VISION_URL`.
 - The answer is cut at 600 characters and its markdown emphasis is removed before it is spoken. A failing vision
   endpoint is a skill failure the assistant tells you about, naming the vision model (refused key, busy, unreachable, no answer).
   If you did not grant Screen Recording, the failure result says which permission to give.
-  Not verified: a hosted vision provider, and the real capture on a machine with the permission granted (the unit
-  tests fake `screencapture`, `sips` and the endpoint).
+  Checked on a real screen (2026-11-17, Screen Recording granted to the terminal): the capture took 0.18 s and the
+  answer 0.77 s; the unit tests fake `screencapture`, `sips` and the endpoint. Not verified: a hosted vision provider.

@@ -146,7 +146,7 @@ def test_capture_logs_a_size_and_never_the_image(commands, caplog):
 # -- ask
 
 
-class FakeVisionBrain:
+class FakeVisionClient:
     """A stand-in for `VisionClient`: `.calls` holds the messages of each request."""
 
     def __init__(self, reply="A Numbers window.", error=None):
@@ -161,12 +161,12 @@ class FakeVisionBrain:
 
 
 def test_ask_sends_the_image_and_the_question_with_a_system_line():
-    brain = FakeVisionBrain()
+    client = FakeVisionClient()
 
-    answer = vision.ask(brain, b"jpeg-bytes", "What is open?")
+    answer = vision.ask(client, b"jpeg-bytes", "What is open?")
 
     assert answer == "A Numbers window."
-    (messages,) = brain.calls
+    (messages,) = client.calls
     assert messages == [
         {"role": "system", "content": vision.SYSTEM},
         {"role": "user", "content": [
@@ -178,24 +178,24 @@ def test_ask_sends_the_image_and_the_question_with_a_system_line():
 
 
 def test_the_answer_loses_markdown_emphasis_and_extra_whitespace():
-    brain = FakeVisionBrain("The battery is at **42%**,\n  __charging__ with `pmset`.\n\nDone.")
+    client = FakeVisionClient("The battery is at **42%**,\n  __charging__ with `pmset`.\n\nDone.")
 
-    assert vision.ask(brain, b"x", "q") == "The battery is at 42%, charging with pmset. Done."
+    assert vision.ask(client, b"x", "q") == "The battery is at 42%, charging with pmset. Done."
 
 
 def test_a_long_answer_is_cut_with_a_marker():
-    answer = vision.ask(FakeVisionBrain("word " * 400), b"x", "q")
+    answer = vision.ask(FakeVisionClient("word " * 400), b"x", "q")
 
     assert len(answer) <= vision.MAX_ANSWER_CHARS + 3 and answer.endswith("word...")  # no space before the marker
-    assert vision.ask(FakeVisionBrain("a" * vision.MAX_ANSWER_CHARS), b"x", "q") == "a" * vision.MAX_ANSWER_CHARS
+    assert vision.ask(FakeVisionClient("a" * vision.MAX_ANSWER_CHARS), b"x", "q") == "a" * vision.MAX_ANSWER_CHARS
 
 
 @pytest.mark.parametrize("sentence", [vision.CANT_REACH, vision.KEY_REFUSED, vision.BUSY, vision.UNUSABLE])
 def test_a_failed_request_is_spoken_naming_the_vision_model(sentence, caplog):
-    brain = FakeVisionBrain(error=VisionError("details for the log", sentence))
+    client = FakeVisionClient(error=VisionError("details for the log", sentence))
 
     with caplog.at_level(logging.WARNING), pytest.raises(SkillError) as caught:
-        vision.ask(brain, b"x", "q")
+        vision.ask(client, b"x", "q")
 
     spoken = str(caught.value)
     assert spoken == sentence and "vision model" in spoken
@@ -205,7 +205,7 @@ def test_a_failed_request_is_spoken_naming_the_vision_model(sentence, caplog):
 @pytest.mark.parametrize("reply", ["", "  \n ", "** **"])
 def test_an_empty_answer_is_a_spoken_failure(reply):
     with pytest.raises(SkillError, match="vision model sent no answer"):
-        vision.ask(FakeVisionBrain(reply), b"x", "q")
+        vision.ask(FakeVisionClient(reply), b"x", "q")
 
 
 # -- the key never shows
@@ -261,7 +261,7 @@ def test_a_refused_key_never_reaches_the_result_the_error_the_chain_or_the_log(p
     with caplog.at_level(logging.DEBUG):
         result = Skills([skill]).run("look_at_screen", '{"question": "What is open?"}')
         with pytest.raises(SkillError) as caught:
-            vision.ask(skill_brain(KEY), b"x", "q")
+            vision.ask(skill_client(KEY), b"x", "q")
 
     shown = [result.speech, result.detail, caplog.text, str(caught.value), repr(caught.value),
              "".join(traceback.format_exception(caught.value))]
@@ -269,7 +269,7 @@ def test_a_refused_key_never_reaches_the_result_the_error_the_chain_or_the_log(p
     assert result.speech == "the look at screen skill failed: I can't reach my vision model: the key was refused."
 
 
-def skill_brain(key):
+def skill_client(key):
     return VisionClient("https://vision.example/v1", 30, "omni", key)
 
 
@@ -280,7 +280,7 @@ def test_a_connection_error_that_quotes_the_header_never_reaches_the_log(monkeyp
         raise error
 
     monkeypatch.setattr(vision.requests, "post", broken)
-    skill = vision.vision_skill(skill_brain(KEY), "vision.example")
+    skill = vision.vision_skill(skill_client(KEY), "vision.example")
 
     with caplog.at_level(logging.DEBUG):
         result = Skills([skill]).run("look_at_screen", '{"question": "What is open?"}')
@@ -293,7 +293,7 @@ def test_a_connection_error_that_quotes_the_header_never_reaches_the_log(monkeyp
 
 
 def test_the_skill_is_a_read_skill_with_one_required_question():
-    skill = vision.vision_skill(FakeVisionBrain(), "host, model m")
+    skill = vision.vision_skill(FakeVisionClient(), "host, model m")
 
     assert (skill.name, skill.kind, skill.direct_only) == ("look_at_screen", "read", False)
     assert skill.parameters["required"] == ["question"]
@@ -306,13 +306,13 @@ def test_the_skill_is_a_read_skill_with_one_required_question():
 def test_the_skill_captures_asks_and_answers_with_what_was_sent_where(monkeypatch):
     seen = []
     monkeypatch.setattr(vision, "capture", lambda timeout: seen.append(timeout) or b"jpeg")
-    brain = FakeVisionBrain("A dialog says **Disk full**.")
-    skill = vision.vision_skill(brain, "127.0.0.1:8002, model omni", timeout=4)
+    client = FakeVisionClient("A dialog says **Disk full**.")
+    skill = vision.vision_skill(client, "127.0.0.1:8002, model omni", timeout=4)
 
     result = skill.run({"question": "  What does the dialog say?  "})
 
     assert seen == [4]
-    assert brain.calls[0][1]["content"][1] == {"type": "text", "text": "What does the dialog say?"}
+    assert client.calls[0][1]["content"][1] == {"type": "text", "text": "What does the dialog say?"}
     assert result.speech == "the screen shows: A dialog says Disk full."
     assert "What does the dialog say?" in result.detail and "4 bytes" in result.detail
     assert "127.0.0.1:8002, model omni" in result.detail and "not kept" in result.detail
@@ -321,7 +321,7 @@ def test_the_skill_captures_asks_and_answers_with_what_was_sent_where(monkeypatc
 @pytest.mark.parametrize("arguments", ['{}', '{"question": ""}', '{"question": "   "}', '{"question": 5}'])
 def test_a_missing_or_empty_question_takes_no_screenshot(monkeypatch, arguments):
     monkeypatch.setattr(vision, "capture", lambda timeout: pytest.fail("a screenshot was taken"))
-    skills = Skills([vision.vision_skill(FakeVisionBrain(), "h")])
+    skills = Skills([vision.vision_skill(FakeVisionClient(), "h")])
 
     result = skills.run("look_at_screen", arguments)
 
@@ -330,7 +330,7 @@ def test_a_missing_or_empty_question_takes_no_screenshot(monkeypatch, arguments)
 
 def test_a_missing_permission_names_the_setting_in_the_result_the_model_reads(commands):
     commands.screencapture = (1, "could not create image from display", False)
-    skills = Skills([vision.vision_skill(FakeVisionBrain(), "h")])
+    skills = Skills([vision.vision_skill(FakeVisionClient(), "h")])
 
     result = skills.run("look_at_screen", '{"question": "What is open?"}')
 
@@ -340,7 +340,7 @@ def test_a_missing_permission_names_the_setting_in_the_result_the_model_reads(co
 def test_other_capture_failures_are_a_failed_call_too(commands):
     commands.screencapture = (0, "", True)
     commands.sips = (1, "bad file", False)
-    skills = Skills([vision.vision_skill(FakeVisionBrain(), "h")])
+    skills = Skills([vision.vision_skill(FakeVisionClient(), "h")])
 
     result = skills.run("look_at_screen", '{"question": "What is open?"}')
 
@@ -403,7 +403,7 @@ def test_a_timeout_is_a_vision_error(monkeypatch):
 
 
 def test_the_skill_is_not_offered_by_default_and_comes_after_the_read_only_checks_when_given():
-    skill = vision.vision_skill(FakeVisionBrain(), "h")
+    skill = vision.vision_skill(FakeVisionClient(), "h")
     without = default_skills().names
 
     with_vision = default_skills(vision=skill).names

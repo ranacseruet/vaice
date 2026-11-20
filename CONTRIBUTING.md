@@ -42,7 +42,7 @@ To run a single test file or filter by keyword:
 Unit tests run completely offline without a real `llama-server` or microphone by using fakes (`tests/fake_realtime.py` and fake assistants). When writing or modifying tests, keep these project-specific invariants in mind:
 
 1. **Reproduce `fastrtc`'s thread-per-resume execution:**
-   `fastrtc` resumes the reply generator (`next(gen)`) on whichever worker thread is free for each audio chunk. Tests that exercise generator state or sockets across chunks use a fresh thread per `next()` call (`resume()` in `tests/test_app.py` and `tests/test_realtime.py`).
+   `fastrtc` resumes the reply generator (`next(gen)`) on whichever worker thread is free for each audio chunk. Tests that exercise generator state or sockets across chunks use a fresh thread per `next()` call: use the one shared harness, `next_on_fresh_thread` in `tests/threads.py`, not a copy of your own.
 2. **Never let an exception escape the reply generator:**
    `fastrtc` wraps per-connection `emit()` calls in `webrtc_error_handler`; an uncaught exception kills the connection's audio task until the page is reloaded. `app.py` catches reply errors inside the generator, records them on the `Turn`, and surfaces them in the UI.
 3. **Daemon threads for `llama-server` WebSockets:**
@@ -50,9 +50,9 @@ Unit tests run completely offline without a real `llama-server` or microphone by
 4. **`InterruptSafeReplyOnPause` and `fastrtc` internals:**
    `src/vaice/interruptible.py` works around `fastrtc` 0.0.34 races and idle CPU polling. `tests/test_interruptible.py` tests against the real `ReplyOnPause` class and checks `ReplyOnPause.__init__`'s signature so any upstream `fastrtc` change fails loudly in tests.
 5. **Manual audio verification:**
-   When changing audio resampling (`audio.py`), WebSocket session handling (`realtime.py`), or WebRTC stream setup (`app.py`, `interruptible.py`), verify the real audio path by running `vaice` against a live `llama-server` (`LiquidAI/LFM3-Audio-2B-GGUF`), speaking into the browser mic in Chrome (with headphones), and checking the `[assistant] time to first audio` log line.
+   When changing audio resampling (`audio.py`), WebSocket session handling (`realtime.py`), or WebRTC stream setup (`app.py`, `interruptible.py`), verify the real audio path by running `vaice` against a live `llama-server` (the default `LiquidAI/LFM3-Omni-2B-GGUF:Q8_0`), speaking into the browser mic in Chrome (with headphones), and checking the `[assistant] time to first audio` log line.
 6. **Live evals for model behavior:**
-   `evals/` is a hand-run harness that measures how reliably spoken commands become the right tool call against a real `llama-server` (`.venv/bin/python evals/run.py`, with repeats). Use it before claiming anything about the model's behavior, a prompt change or a tool-set change, and quote the results with the build, model and quantization. CI does not run it; `tests/test_eval_scoring.py` covers its scoring logic and checks that `evals/cases.json` and `evals/tools.json` are consistent, so run it when you add a case. See [evals/README.md](evals/README.md).
+   `evals/` is a hand-run harness that measures how reliably spoken commands become the right tool call against a real `llama-server` (`.venv/bin/python evals/run.py`, with repeats). Use it before claiming anything about the model's behavior, a prompt change or a tool-set change, and quote the results with the build, model and quantization. CI does not run it; `tests/test_eval_scoring.py` covers its scoring logic and checks that every case file (`evals/cases.json`, `shell_cases.json`, `vision_cases.json`, `browse_cases.json`) names real skills, so run it when you add a case. See [evals/README.md](evals/README.md).
 
 ## Keeping Documentation in Sync
 
@@ -64,7 +64,7 @@ Unit tests run completely offline without a real `llama-server` or microphone by
 
 1. Fork the repository and create a descriptive branch (`feat/...`, `fix/...`, `docs/...`, `chore/...`).
 2. Make your changes and add or update tests covering the behavior.
-3. Confirm `.venv/bin/ruff check src tests` and `.venv/bin/pytest` pass on Python 3.12.
+3. Confirm `.venv/bin/ruff check src tests evals` and `.venv/bin/pytest` pass on Python 3.12.
 4. Open a pull request and fill out the pull request template.
 
 ## Reporting Issues

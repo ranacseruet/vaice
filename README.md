@@ -63,7 +63,7 @@ Start at the [documentation index](docs/README.md). The main pages:
 | [Vision](docs/vision.md) | Where this is going, and the principles it is built on |
 | [Architecture](docs/architecture.md) | How the pieces fit, and the code layout |
 | [Installation](docs/installation.md) · [Configuration](docs/configuration.md) | Setup, requirements, every `VAICE_*` setting |
-| [The assistant](docs/assistant-mode.md) | Skills, confirmation, shell commands, memory |
+| [The assistant](docs/assistant.md) | Skills, confirmation, shell commands, memory |
 | [Screen vision](docs/screen-vision.md) · [MCP tools](docs/mcp-tools.md) · [Browser tasks](docs/browser-tasks.md) | The opt-in extensions |
 | [Privacy](docs/privacy.md) · [Troubleshooting](docs/troubleshooting.md) | What leaves your machine; fixing common problems |
 

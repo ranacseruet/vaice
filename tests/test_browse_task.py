@@ -7,7 +7,7 @@ from vaice import browse, browse_task
 from vaice.skills import SkillError, SkillResult, Skills, Started, default_skills
 
 
-def test_the_skill_is_a_background_skill_the_brain_can_call_with_a_goal():
+def test_the_skill_is_a_background_skill_the_model_can_call_with_a_goal():
     skill = browse_task.browse_skill()
 
     assert skill.name == "browse" and skill.kind == "background"
@@ -48,14 +48,14 @@ def test_the_question_names_the_action_and_the_host_but_never_the_arguments():
     assert browse_task.step_question("mcp__chrome__unknown", None).startswith("The browser task wants to take a step")
 
 
-def test_the_result_is_one_clean_line_for_the_brain_and_keeps_the_whole_answer_as_detail():
+def test_the_result_is_one_clean_line_for_the_model_and_keeps_the_whole_answer_as_detail():
     result = browse_task.result_of("**Welcome to Python.org**\n\nThe `title` is __this__.")
 
     assert result.speech == "the browser task finished: Welcome to Python.org The title is this."
     assert result.detail == "**Welcome to Python.org**\n\nThe `title` is __this__."
 
 
-def test_a_long_answer_is_cut_for_the_brain_but_not_in_the_detail():
+def test_a_long_answer_is_cut_for_the_model_but_not_in_the_detail():
     result = browse_task.result_of("word " * 1000)
 
     assert result.speech.endswith(browse_task.CUT) and len(result.speech) < browse_task.RESULT_CHARS + 100
@@ -73,7 +73,7 @@ def test_pi_is_told_to_search_with_bing_or_duckduckgo_and_never_google():
     assert "Bing or DuckDuckGo" in prompt and "never Google" in prompt and prompt.endswith("Task: find a recipe")
 
 
-def test_browse_comes_with_a_status_and_a_stop_skill_the_brain_can_tell_apart():
+def test_browse_comes_with_a_status_and_a_stop_skill_the_model_can_tell_apart():
     skills = browse_task.browse_skills(busy=None, status=lambda: SkillResult("s"), stop=lambda: SkillResult("t"))
     by_name = {skill.name: skill for skill in skills}
 
