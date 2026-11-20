@@ -128,7 +128,6 @@ def test_a_screen_question_is_counted_as_the_call_and_the_stub_answer_reaches_th
 
 
 def test_the_vision_cases_run_with_the_flag_and_record_it_in_the_results(monkeypatch, tmp_path, capsys):
-    monkeypatch.setattr(eval_run.config, "BRAIN_URL", "")
     monkeypatch.setattr(eval_run, "server_info", lambda url: {"url": url})
     monkeypatch.setattr(eval_run, "audio_for", lambda case, scratch: (16000, None))
     offered = []
@@ -152,7 +151,6 @@ def test_the_vision_cases_run_with_the_flag_and_record_it_in_the_results(monkeyp
 
 
 def test_a_case_with_its_own_history_runs_with_it_even_without_the_history_flag(monkeypatch, tmp_path):
-    monkeypatch.setattr(eval_run.config, "BRAIN_URL", "")
     monkeypatch.setattr(eval_run, "server_info", lambda url: {"url": url})
     monkeypatch.setattr(eval_run, "audio_for", lambda case, scratch: (16000, None))
     seen = {}
@@ -268,103 +266,26 @@ def test_the_system_info_stub_has_a_neutral_hostname():
         "macOS 15.6 on Example-MacBook, up 3 days and 4 hours, 48 gigabytes of memory")
 
 
-def test_the_brain_options_default_to_the_configuration_and_the_url_is_validated(monkeypatch, capsys):
-    monkeypatch.setattr(eval_run.config, "BRAIN_URL", "")
-    monkeypatch.setattr(eval_run.config, "BRAIN_MODEL", "")
-    args = eval_run.parse_args(["--paths", "assistant"])
-    assert (args.brain_url, args.brain_model) == ("", "")
-    assert eval_run.make_brain(args) is None  # the local llama-server
-
-    args = eval_run.parse_args(["--paths", "assistant", "--brain-url", "http://localhost:1234/v1/",
-                                "--brain-model", "lfm2.5-24b-a2b"])
-    assert (args.brain_url, args.brain_model) == ("http://localhost:1234/v1", "lfm2.5-24b-a2b")
-    assert eval_run.make_brain(args) is not None
-
-    with pytest.raises(SystemExit):
-        eval_run.parse_args(["--paths", "assistant", "--brain-url", "http://host/v1/chat/completions"])
-    assert "--brain-url" in capsys.readouterr().err
-
-    monkeypatch.setattr(eval_run.config, "BRAIN_URL", "https://example.test/v1")
-    monkeypatch.setattr(eval_run.config, "BRAIN_MODEL", "m")
-    assert eval_run.parse_args(["--paths", "assistant"]).brain_url == "https://example.test/v1"  # from the config
-
-
-def test_there_is_no_flag_for_the_key():
-    with pytest.raises(SystemExit):
-        eval_run.parse_args(["--paths", "assistant", "--brain-api-key", "fake-key-123"])
-
-
 def run_main(monkeypatch, tmp_path, *argv, answer="About 160 gigabytes.", calls=(("disk_space", "{}"),)):
     """eval_run.main with no server, `say` or model: every assistant run is the canned record below."""
     monkeypatch.setattr(eval_run, "server_info", lambda url: {"url": url})
     monkeypatch.setattr(eval_run, "audio_for", lambda case, scratch: (16000, None))
 
     def fake_run(url, prompt, skills, audio, history, brain=None, notes=()):
-        fake_run.brains.append(brain)
         return {"error": None, "calls": [list(c) for c in calls], "transcript": "x", "answer": answer,
                 "pending": False, "latency_s": 0.5}
 
-    fake_run.brains = []
     monkeypatch.setattr(eval_run, "run_assistant", fake_run)
     out = tmp_path / "out.json"
     eval_run.main(["--paths", "assistant", "--repeats", "2", "--cases", "disk-free,chat-goodbye", "--out", str(out),
                    *argv])
-    return fake_run.brains, json.loads(out.read_text()), out.read_text()
-
-
-def test_a_helper_run_says_which_brain_in_the_report_and_records_only_host_and_model(monkeypatch, tmp_path, capsys):
-    key = "fake-key-do-not-write-1a2b"
-    monkeypatch.setattr(eval_run.config, "BRAIN_API_KEY", key)
-
-    brains, document, raw = run_main(monkeypatch, tmp_path, "--brain-url", "https://openrouter.ai/api/v1",
-                                     "--brain-model", "some/model")
-
-    shown = capsys.readouterr()
-    assert all(brain is not None for brain in brains)  # the helper is passed to every run
-    assert "assistant brain: openrouter.ai, model some/model" in shown.out
-    assert "== assistant: 4 runs, brain: openrouter.ai, model some/model ==" in shown.out
-    assert "sent to that endpoint" in shown.out
-    assert document["config"]["brain"] == {"host": "openrouter.ai", "model": "some/model"}
-    for text in (raw, shown.out, shown.err):
-        assert key not in text
-    assert "/api/v1" not in raw  # not even the URL's path
-
-
-def test_a_helper_on_this_machine_gets_no_privacy_note(monkeypatch, tmp_path, capsys):
-    run_main(monkeypatch, tmp_path, "--brain-url", "http://localhost:1234/v1", "--brain-model", "m")
-
-    out = capsys.readouterr().out
-    assert "assistant brain: localhost:1234, model m" in out
-    assert "sent to that endpoint" not in out
-
-
-def test_a_local_run_says_so_and_passes_no_brain(monkeypatch, tmp_path, capsys):
-    monkeypatch.setattr(eval_run.config, "BRAIN_URL", "")
-
-    brains, document, _ = run_main(monkeypatch, tmp_path)
-
-    assert brains == [None] * 4
-    assert "assistant brain: the local llama-server" in capsys.readouterr().out
-    assert document["config"]["brain"] == {"host": None, "model": None}
-
-
-def test_a_run_without_the_assistant_path_records_no_brain(monkeypatch, tmp_path):
-    monkeypatch.setattr(eval_run, "server_info", lambda url: {"url": url})
-    monkeypatch.setattr(eval_run, "audio_for", lambda case, scratch: (16000, None))
-    monkeypatch.setattr(eval_run, "run_text", lambda *args: {"error": None, "calls": [], "transcript": "x",
-                                                            "latency_s": 0.1})
-    out = tmp_path / "out.json"
-
-    eval_run.main(["--paths", "text", "--repeats", "1", "--cases", "know-sky", "--out", str(out)])
-
-    assert "brain" not in json.loads(out.read_text())["config"]
+    return json.loads(out.read_text()), out.read_text()
 
 
 def test_the_summary_and_the_table_report_answer_and_command_checks_apart_from_the_verdict(
         monkeypatch, tmp_path, capsys):
-    monkeypatch.setattr(eval_run.config, "BRAIN_URL", "")
 
-    _, document, _ = run_main(monkeypatch, tmp_path, answer="Plenty of room.")  # right call, 160 not in the answer
+    document, _ = run_main(monkeypatch, tmp_path, answer="Plenty of room.")  # right call, 160 not in the answer
 
     out = capsys.readouterr().out
     assert "  correct" in out and "answer faithful 0/2" in out  # two disk-free runs, neither says 160
@@ -381,7 +302,6 @@ def test_the_summary_and_the_table_report_answer_and_command_checks_apart_from_t
 
 
 def test_the_command_check_is_reported_for_the_shell_cases(monkeypatch, tmp_path, capsys):
-    monkeypatch.setattr(eval_run.config, "BRAIN_URL", "")
     monkeypatch.setattr(eval_run, "server_info", lambda url: {"url": url})
     monkeypatch.setattr(eval_run, "audio_for", lambda case, scratch: (16000, None))
     commands = iter(["ls ~/Downloads", "ls /Users/me/Downloads"])

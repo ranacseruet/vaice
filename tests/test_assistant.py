@@ -12,7 +12,7 @@ import pytest
 from fastrtc import AdditionalOutputs
 from threads import next_on_fresh_thread, start_thread
 
-from vaice import browse_task, lifecycle, mcp_skills, shell, vision
+from vaice import browse_task, lifecycle, shell, vision
 from vaice import memory as memory_module
 from vaice.app import make_handler
 from vaice.audio import from_pcm16
@@ -25,7 +25,7 @@ from vaice.outbox import Marker, Outbox
 from vaice.responders import assistant
 from vaice.responders.assistant import AssistantResponder, decide
 from vaice.responders.llamacpp import _Stopped
-from vaice.skills import Question, Skill, SkillError, SkillResult, Skills
+from vaice.skills import Skill, SkillError, SkillResult, Skills
 
 AUDIO = (48000, np.zeros((1, 480), dtype=np.int16))
 CONTENT_TYPE = "audio/pcm;rate=24000;encoding=signed-int;bits=16"
@@ -492,8 +492,7 @@ def fake_brain_post(monkeypatch):
     return sent
 
 
-def test_without_a_helper_the_local_llama_server_is_the_brain(monkeypatch):
-    monkeypatch.setattr(assistant.config, "BRAIN_URL", "")
+def test_the_local_llama_server_is_the_brain(monkeypatch):
     sent = fake_brain_post(monkeypatch)
 
     AssistantResponder("http://server:8001", 5.0, skills=disk_skills())._brain.complete([], None)
@@ -504,23 +503,7 @@ def test_without_a_helper_the_local_llama_server_is_the_brain(monkeypatch):
     assert headers == {} and timeout == 5.0
 
 
-def test_a_configured_helper_is_the_brain_with_its_own_model_key_and_timeout(monkeypatch):
-    monkeypatch.setattr(assistant.config, "BRAIN_URL", "http://localhost:1234/v1")
-    monkeypatch.setattr(assistant.config, "BRAIN_MODEL", "lfm2.5-24b-a2b")
-    monkeypatch.setattr(assistant.config, "BRAIN_API_KEY", "fake-key-123")
-    monkeypatch.setattr(assistant.config, "BRAIN_TIMEOUT", 33.0)
-    sent = fake_brain_post(monkeypatch)
-
-    AssistantResponder("http://server:8001", 5.0, skills=disk_skills())._brain.complete([], None)
-
-    url, body, headers, timeout = sent[0]
-    assert url == "http://localhost:1234/v1/chat/completions"
-    assert body == {"messages": [], "model": "lfm2.5-24b-a2b"}  # no temperature, no token cap
-    assert headers == {"Authorization": "Bearer fake-key-123"} and timeout == 33.0
-
-
-def test_an_injected_brain_wins_over_the_configuration(monkeypatch):
-    monkeypatch.setattr(assistant.config, "BRAIN_URL", "http://localhost:1234/v1")
+def test_an_injected_brain_is_used():
     brain = FakeBrain()
     assert AssistantResponder(skills=disk_skills(), brain=brain)._brain is brain
 
@@ -2191,390 +2174,6 @@ def test_an_approved_skills_follow_up_that_is_only_a_pseudo_call_speaks_the_skil
     assert "carried model markup" in caplog.text
 
 
-# --- an `auto` request: it runs by itself after its announcement, unless the user settles it first
-
-AUTO = ("chrome__navigate_page", '{"url": "https://example.com"}')
-AUTO_SECONDS = 5.0
-ANNOUNCEMENT = mcp_skills.auto_question("chrome", "navigate_page", AUTO_SECONDS).text
-CLICK_ONLY = mcp_skills.question("chrome", "navigate_page", voice=False).text
-
-
-class FakeMonotonic:
-    """The responder's `time` module with a `monotonic` that plays `values` (then repeats the last one)."""
-
-    def __init__(self, *values):
-        self._values = list(values)
-
-    def monotonic(self):
-        return self._values.pop(0) if len(self._values) > 1 else self._values[0]
-
-    perf_counter = staticmethod(time.perf_counter)
-
-
-def auto_confirming(*replies, seconds=AUTO_SECONDS, clock=None):
-    """disk_space (read) and an `auto` MCP-style skill; `ran` collects what the auto skill ran with."""
-    ran, disk_ran, brain, clock = [], [], FakeBrain(*replies), clock or Clock()
-
-    def run(args):
-        ran.append(args)
-        return SkillResult("opened the page")
-
-    page = {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}
-    skills = Skills([
-        Skill("disk_space", "Report free disk space.", {"type": "object", "properties": {}},
-              lambda _args: disk_ran.append(1) or SkillResult("160 gigabytes free of 926 gigabytes")),
-        Skill(AUTO[0], "Open a page.", page, run, kind="confirm",
-              ask=lambda _args: mcp_skills.auto_question("chrome", "navigate_page", seconds))])
-    confirmations = Confirmations(clock)
-    resp = AssistantResponder("http://server", 5.0, "Be brief.", "female", skills, brain, confirmations,
-                              progress_seconds=0)  # no filler thread: it would call the (faked) monotonic clock too
-    return SimpleNamespace(resp=resp, brain=brain, confirmations=confirmations, clock=clock, ran=ran,
-                           disk_ran=disk_ran)
-
-
-def auto_asked(*more, first=None):
-    s = auto_confirming(first or ask(AUTO), *more)
-    s.turn = Turn()
-    drive(s.resp, turn=s.turn)
-    return s
-
-
-def spoken(tts):
-    return " ".join(body["input"] for body in tts.bodies)
-
-
-def timer_gone():
-    return not threads_named("vaice-assistant-auto")
-
-
-def let_the_deadline_pass(s):
-    """Move the clock well past the countdown and wait until the timer thread has ended (ran or not)."""
-    s.clock.now += AUTO_SECONDS + 1
-    wait_until(timer_gone)
-
-
-def test_an_announced_auto_request_runs_by_itself_after_its_time_and_not_before(tts, monkeypatch):
-    monkeypatch.setattr(assistant, "time", FakeMonotonic(1000.0))  # the 0.2 s of announcement audio is still to play
-    s = auto_asked(answer("Done, the page is open."))
-
-    assert spoken(tts) == ANNOUNCEMENT
-    pending = s.resp.pending()
-    assert pending.auto_seconds == AUTO_SECONDS and pending.voice is True and pending.armed_at == 100.0
-    (timer,) = threads_named("vaice-assistant-auto")
-    assert timer.daemon
-
-    s.clock.now += AUTO_SECONDS + 0.1  # past the 5 s, but not past the 0.2 s of audio still to play
-    time.sleep(0.15)  # several polls
-    assert s.ran == [] and s.resp.pending() is pending
-
-    s.clock.now += 0.2
-    wait_until(lambda: s.ran)
-    wait_until(timer_gone)
-    assert s.ran == [{"url": "https://example.com"}]
-    assert s.resp.pending() is None
-    assert tool_events(s.turn) == [("chrome__navigate_page", "waiting for confirmation"),
-                                   ("chrome__navigate_page", "opened the page")]
-    wait_for_continuation()
-    assert len(s.brain.calls) == 2  # like a click: the task goes on and the brain reports it (#110)
-
-
-def test_the_countdown_runs_in_real_time_too(tts):
-    s = auto_confirming(ask(AUTO), seconds=0.2, clock=time.monotonic)
-    drive(s.resp, turn=Turn())
-    assert s.ran == []  # armed just now: not yet
-
-    wait_until(lambda: s.ran)
-    wait_until(timer_gone)
-    assert s.ran == [{"url": "https://example.com"}]
-
-
-def test_the_countdown_starts_only_when_the_whole_announcement_was_handed_out(monkeypatch):
-    gate = threading.Event()
-    monkeypatch.setattr(assistant.requests, "post",
-                        FakeTTS(lambda text: FakeResponse([pcm_bytes(50), pcm_bytes(50)], gate=gate)))
-    s = auto_confirming(ask(AUTO))
-    gen = s.resp.respond(AUDIO, [], Turn())
-
-    next_on_fresh_thread(gen)  # the first chunk of the announcement is out; the worker waits at the gate
-    s.clock.now += 10 * AUTO_SECONDS
-    time.sleep(0.15)
-
-    pending = s.resp.pending()
-    assert pending is not None and pending.armed_at is None and timer_gone() and s.ran == []
-    gen.close()  # the user talked over it
-    gate.set()
-    wait_until(lambda: s.resp.pending() is None)
-    time.sleep(0.1)  # the worker finishes its question's frames; nothing may arm the request now
-    s.clock.now += 10 * AUTO_SECONDS
-    time.sleep(0.15)
-    assert s.ran == [] and timer_gone()
-
-
-def test_an_announcement_that_produced_no_audio_never_runs(tts):
-    tts._make = lambda text: FakeResponse([])
-    s = auto_asked()
-
-    assert s.resp.pending() is None and timer_gone()
-    s.clock.now += 10 * AUTO_SECONDS
-    time.sleep(0.15)
-    assert s.ran == []
-
-
-def test_an_announcement_whose_audio_failed_never_runs(monkeypatch):
-    monkeypatch.setattr(assistant.requests, "post", FakeTTS(lambda text: FakeResponse([], status=503)))
-    s = auto_confirming(ask(AUTO))
-
-    with pytest.raises(RuntimeError, match="HTTP 503"):
-        drive(s.resp)
-
-    assert s.resp.pending() is None and timer_gone()
-    s.clock.now += 10 * AUTO_SECONDS
-    time.sleep(0.15)
-    assert s.ran == []
-
-
-def test_cancel_in_the_panel_stops_it_for_good(tts):
-    s = auto_asked()
-    pending = s.resp.pending()
-
-    s.resp.cancel(pending.id)
-    let_the_deadline_pass(s)
-
-    assert s.ran == [] and s.resp.pending() is None
-    assert tool_events(s.turn)[-1] == ("chrome__navigate_page", "cancelled")
-
-
-def test_the_run_button_runs_it_at_once_and_the_timer_does_not_run_it_again(tts):
-    s = auto_asked()
-    pending = s.resp.pending()
-
-    assert s.resp.approve(pending.id) == "opened the page"
-    let_the_deadline_pass(s)
-
-    assert s.ran == [{"url": "https://example.com"}]
-
-
-def test_a_spoken_yes_runs_it_at_once_and_the_timer_does_not_run_it_again(tts, heard):
-    s = auto_asked(answer("Done, the page is open."))
-    heard.text = "Yes."
-
-    drive(s.resp, turn=Turn())
-    let_the_deadline_pass(s)
-
-    assert s.ran == [{"url": "https://example.com"}]
-
-
-@pytest.mark.parametrize("said", ["Stop.", "Cancel", "No", "never mind"])
-def test_a_spoken_stop_cancels_it(tts, heard, said):
-    s = auto_asked()
-    heard.text = said
-    turn = Turn()
-
-    drive(s.resp, turn=turn)
-    let_the_deadline_pass(s)
-
-    assert s.ran == [] and s.resp.pending() is None
-    assert tool_events(turn) == [("chrome__navigate_page", "cancelled")]
-    assert assistant.CANCELLED in [b["input"] for b in tts.bodies]
-
-
-def test_any_other_utterance_drops_it_and_is_an_ordinary_question(tts, heard):
-    s = auto_asked(answer("It is sunny."))
-    heard.text = "What is the weather like?"
-
-    drive(s.resp, turn=Turn())
-    let_the_deadline_pass(s)
-
-    assert s.ran == [] and s.resp.pending() is None
-    assert tool_events(s.turn)[-1] == ("chrome__navigate_page", "not confirmed")
-
-
-def test_new_conversation_drops_it(tts):
-    s = auto_asked()
-
-    s.resp.clear_pending()
-    let_the_deadline_pass(s)
-
-    assert s.ran == [] and s.resp.pending() is None
-
-
-def test_a_newer_request_replaces_it_and_the_old_timer_ends_without_running_it(tts):
-    s = auto_asked()
-    newer = Pending("quit_app", QUIT[1], QUESTION, "call_1", [], Turn())
-    s.confirmations.ask(newer)  # replaces the auto request
-
-    let_the_deadline_pass(s)
-
-    assert s.ran == [] and s.resp.pending() is newer
-
-
-def test_the_app_stopping_ends_the_countdown_without_running_it(tts):
-    s = auto_asked()
-    s.clock.now += 10 * AUTO_SECONDS  # the deadline is long past ...
-
-    lifecycle.stopping.set()  # ... but the app is stopping
-    wait_until(timer_gone)
-
-    assert s.ran == []
-
-
-def test_a_cancel_that_lands_between_the_timers_check_and_its_run_wins(tts, monkeypatch):
-    s = auto_asked()
-    approve = s.resp.approve
-
-    def cancel_first_then_approve(pending_id):  # the Cancel click gets there just before the timer's own run
-        s.resp.cancel(pending_id)
-        return approve(pending_id)
-
-    monkeypatch.setattr(s.resp, "approve", cancel_first_then_approve)
-    s.clock.now += AUTO_SECONDS + 1
-    wait_until(timer_gone)
-
-    assert s.ran == [] and s.resp.pending() is None
-    assert tool_events(s.turn)[-1] == ("chrome__navigate_page", "cancelled")
-
-
-def click_when(go, resp, pending_id):
-    go.wait()
-    resp.approve(pending_id)
-
-
-def test_a_click_and_the_deadline_at_the_same_moment_run_it_exactly_once(tts):
-    for _ in range(25):  # a race: repeat so a missing `take` would show
-        s = auto_asked()
-        pending = s.resp.pending()
-        go = threading.Barrier(2)
-
-        thread = threading.Thread(target=click_when, args=(go, s.resp, pending.id))
-        thread.start()
-        go.wait()
-        s.clock.now += AUTO_SECONDS + 1
-        thread.join(5)
-        wait_until(timer_gone)
-
-        assert len(s.ran) == 1 and s.resp.pending() is None
-
-
-def test_after_another_skill_ran_in_the_same_reply_the_call_is_asked_click_only_and_has_no_timer(tts, caplog):
-    s = auto_confirming(ask(("disk_space", "{}"), AUTO))
-    turn = Turn()
-
-    with caplog.at_level(logging.WARNING, logger="vaice.responders.assistant"):
-        drive(s.resp, turn=turn)
-
-    pending = s.resp.pending()
-    assert s.disk_ran == [1]
-    assert spoken(tts) == CLICK_ONLY
-    assert pending.question == CLICK_ONLY and pending.voice is False and pending.auto_seconds == 0
-    assert "will not run chrome__navigate_page by itself" in caplog.text
-    assert timer_gone()
-    s.clock.now += 10 * AUTO_SECONDS
-    time.sleep(0.15)
-    assert s.ran == [] and s.resp.pending() is pending  # waits for the Run button, no matter how long
-    assert s.resp.approve(pending.id) == "opened the page" and len(s.ran) == 1
-
-
-def test_a_failed_or_unknown_skill_before_it_counts_as_well(tts):
-    s = auto_confirming(ask(("no_such_skill", "{}"), AUTO))
-
-    drive(s.resp)
-
-    assert s.resp.pending().auto_seconds == 0 and s.resp.pending().voice is False
-
-
-def test_a_spoken_yes_cannot_approve_the_click_only_fallback(tts, heard):
-    s = auto_confirming(ask(("disk_space", "{}"), AUTO))
-    drive(s.resp)
-    heard.text = "Yes."
-
-    drive(s.resp)
-
-    assert assistant.NEEDS_BUTTON in [b["input"] for b in tts.bodies]
-    assert s.ran == [] and s.resp.pending() is not None
-
-
-def test_an_auto_call_that_comes_first_keeps_its_timer_and_the_later_calls_are_dropped(tts):
-    s = auto_confirming(ask(AUTO, ("disk_space", "{}")))
-
-    drive(s.resp)
-
-    pending = s.resp.pending()
-    assert pending.auto_seconds == AUTO_SECONDS and pending.question == ANNOUNCEMENT
-    assert s.disk_ran == []
-    assert len(pending.messages[-1]["tool_calls"]) == 1  # a valid chat: only the auto call is left in it
-    s.resp.cancel(pending.id)  # ends its timer thread
-    wait_until(timer_gone)
-
-
-def test_decide_hands_the_timer_to_the_pending_request():
-    s = auto_confirming()
-    brain = FakeBrain(ask(AUTO))
-
-    decision = decide(brain, s.resp.skills, [], lambda: False, turn=Turn())
-
-    assert decision.pending.auto_seconds == AUTO_SECONDS and decision.answer == ANNOUNCEMENT
-    assert decision.pending.armed_at is None  # the clock starts only once the announcement was spoken
-
-
-# --- the countdown runs from the estimated end of the announcement, not from when it was handed out
-
-
-def test_the_audio_still_to_play_is_what_is_queued_beyond_now():
-    assert assistant._still_playing(0.0, 50.0) == 0.0  # nothing was handed out
-    assert assistant._still_playing(104.0, 100.0) == 4.0
-    assert assistant._still_playing(104.0, 101.5) == 2.5
-    assert assistant._still_playing(104.0, 109.0) == 0.0  # long since played: never negative
-
-
-def test_a_gap_between_a_filler_and_the_announcement_is_not_playback_time():
-    # 1 s filler handed out at t=0 (plays 0-1), then the brain takes 10 s, then a 4 s announcement at t=10
-    end = assistant._playback_end(0.0, 0.0, 1.0)
-    assert end == 1.0
-    end = assistant._playback_end(end, 10.0, 4.0)
-    assert end == 14.0 and assistant._still_playing(end, 10.0) == 4.0  # all 4 s are still to play
-    # frames handed out back to back queue behind each other: 2 s then 2 s at t=100 end at 104
-    end = assistant._playback_end(assistant._playback_end(0.0, 100.0, 2.0), 100.0, 2.0)
-    assert end == 104.0
-
-
-def two_second_sentences(tts):
-    tts._make = lambda text: FakeResponse([np.zeros(48000, dtype="<i2").tobytes()])  # 2 s at 24 kHz each
-
-
-def test_the_timer_waits_for_the_announcement_to_play_out_as_estimated_from_the_audio_handed_out(tts, monkeypatch):
-    two_second_sentences(tts)
-    monkeypatch.setattr(assistant, "time", FakeMonotonic(1000.0))  # no time passes: all 2 s are still to play
-    s = auto_asked()  # the announcement is one sentence: 2 s of audio
-    pending = s.resp.pending()
-
-    assert pending.auto_delay == pytest.approx(2.0) and pending.armed_at == 100.0
-    s.clock.now += AUTO_SECONDS + 1.5  # the 5 s alone have passed, and 1.5 of the 2 s of audio
-    time.sleep(0.15)
-    assert s.ran == [] and s.confirmations.remaining(pending) == pytest.approx(0.5)
-
-    s.clock.now += 1
-    wait_until(lambda: s.ran)
-    wait_until(timer_gone)
-    assert s.ran == [{"url": "https://example.com"}]
-
-
-def test_time_that_passed_while_the_announcement_was_handed_out_is_not_waited_for_twice(tts, monkeypatch):
-    two_second_sentences(tts)
-    monkeypatch.setattr(assistant, "time", FakeMonotonic(1000.0, 1001.5))  # first frame, then the arming
-    s = auto_asked()
-
-    assert s.resp.pending().auto_delay == pytest.approx(0.5)  # 2 s handed out, 1.5 s since the first frame
-
-
-def test_a_request_without_a_timer_is_armed_with_no_delay(tts, monkeypatch):
-    two_second_sentences(tts)
-    monkeypatch.setattr(assistant, "time", FakeMonotonic(1000.0))
-    s = asked()
-
-    pending = s.resp.pending()
-    assert pending.armed_at == 100.0 and pending.auto_delay == 0.0 and pending.auto_seconds == 0
-
-
 # --- the task: a step budget instead of a fixed number of rounds, and taint that outlives one decide() call
 
 
@@ -2642,23 +2241,18 @@ def test_a_task_that_is_out_of_time_before_its_first_call_gets_one_tool_less_cal
     assert decision.calls == [] and decision.answer == assistant.NO_ANSWER
 
 
-NEXT_PAGE = {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}
-
-
 def tasked(*replies, max_steps=None):
-    """quit_app (voice confirm), disk_space (read), an `auto` MCP-style skill and `remember`, with one responder."""
-    ran, disk_ran, auto_ran, brain = [], [], [], FakeBrain(*replies)
+    """quit_app (voice confirm), disk_space (read) and `remember`, with one responder."""
+    ran, disk_ran, brain = [], [], FakeBrain(*replies)
     memory = Memory(None)
     base = skills_with_quit(ran, disk_ran)
-    auto = Skill(AUTO[0], "Open a page.", NEXT_PAGE, lambda args: auto_ran.append(args) or SkillResult("opened"),
-                 kind="confirm", ask=lambda _args: mcp_skills.auto_question("chrome", "navigate_page", AUTO_SECONDS))
-    skills = Skills([*base.skills, auto, *memory_skills(memory)])
+    skills = Skills([*base.skills, *memory_skills(memory)])
     confirmations = Confirmations(Clock())
     options = {} if max_steps is None else {"max_steps": max_steps}
     resp = AssistantResponder("http://server", 5.0, "Be brief.", "female", skills, brain, confirmations,
                               progress_seconds=0, **options)
     return SimpleNamespace(resp=resp, brain=brain, confirmations=confirmations, ran=ran, disk_ran=disk_ran,
-                           auto_ran=auto_ran, memory=memory)
+                           memory=memory)
 
 
 def tasked_and_asked(*more, request=QUIT, max_steps=None, first=()):
@@ -2668,16 +2262,6 @@ def tasked_and_asked(*more, request=QUIT, max_steps=None, first=()):
     drive(s.resp, turn=s.turn)
     return s
 
-
-def test_an_auto_call_after_a_read_in_an_earlier_step_of_the_task_is_asked_as_a_click(tts):
-    s = tasked(ask(DISK), ask(AUTO))
-
-    drive(s.resp)
-
-    pending = s.resp.pending()
-    assert pending.question == CLICK_ONLY and pending.voice is False and pending.auto_seconds == 0
-    assert pending.task.tainted and pending.task.steps == 2
-    assert s.auto_ran == []
 
 
 def test_the_pending_request_carries_the_task_that_asked_it(tts):
@@ -2737,16 +2321,6 @@ def test_the_task_and_its_step_count_go_on_across_a_yes(tts, heard):
     assert task.steps == 4
 
 
-def test_a_call_after_a_yes_is_tainted_so_an_auto_tool_is_asked_as_a_click(tts, heard):
-    s = tasked_and_asked(ask(AUTO))
-    heard.text = "yes"
-
-    drive(s.resp)
-
-    pending = s.resp.pending()
-    assert pending.question == CLICK_ONLY and pending.voice is False and pending.auto_seconds == 0
-    assert s.auto_ran == []
-
 
 def test_remember_after_a_yes_is_refused_because_the_approved_call_was_a_tool_result(tts, heard):
     s = tasked_and_asked(ask(REMEMBER), answer("Okay."))
@@ -2779,7 +2353,7 @@ def test_an_approval_with_no_task_on_the_request_starts_a_fresh_one():
     assert decision.answer == "Safari is closed." and s.brain.calls[0][1] is not None
 
 
-# --- a click or an auto run continues the task and speaks the outcome through the outbox (#110)
+# --- a click continues the task and speaks the outcome through the outbox (#110)
 
 def continuation_over():
     return not threads_named("vaice-assistant-task")
@@ -2907,22 +2481,6 @@ def test_the_continuation_may_call_more_skills_which_are_recorded_on_the_asking_
     assert s.turn.assistant_text == f"{QUESTION} Safari is closed and 160 gigabytes are free."
 
 
-def test_the_continuation_is_tainted_so_an_auto_tool_is_asked_as_a_click(tts):
-    s = tasked_and_asked(ask(AUTO))
-    outbox = with_outbox(s)
-
-    s.resp.approve(s.resp.pending().id)
-    wait_for_continuation()
-
-    pending = s.resp.pending()
-    assert pending.question == CLICK_ONLY and pending.voice is False and pending.auto_seconds == 0
-    assert s.auto_ran == [] and pending.task.tainted
-    assert pending.armed_at is None  # asked at once (the panel shows it), armed once the question was served
-    assert tool_events(s.turn)[-1] == ("chrome__navigate_page", "waiting for confirmation")
-    serve(outbox)
-    assert s.resp.pending().armed_at is not None
-    assert s.turn.assistant_text == f"{QUESTION} {CLICK_ONLY}"
-
 
 def test_remember_is_refused_in_the_continuation_because_the_approved_call_was_a_tool_result(tts):
     s = tasked_and_asked(ask(REMEMBER), answer("Okay."))
@@ -2934,29 +2492,6 @@ def test_remember_is_refused_in_the_continuation_because_the_approved_call_was_a
     assert s.memory.notes() == []
     assert s.brain.calls[2][0][-1] == {"role": "tool", "tool_call_id": "call_0", "content": REFUSED}
 
-
-def test_a_question_asked_in_the_continuation_has_its_countdown_forced_off(tts, caplog):
-    page = Skill("open_page", "Open a page.", {"type": "object", "properties": {}}, lambda _args: SkillResult("opened"),
-                 kind="confirm", ask=lambda _args: Question("Opening the page in five seconds.", auto_seconds=5.0))
-    ran, disk_ran = [], []
-    base = skills_with_quit(ran, disk_ran)
-    brain = FakeBrain(ask(QUIT), ask(("open_page", "{}")))
-    resp = AssistantResponder("http://server", 5.0, "Be brief.", "female", Skills([*base.skills, page]), brain,
-                              Confirmations(Clock()), progress_seconds=0)
-    turn = Turn()
-    drive(resp, turn=turn)
-    s = SimpleNamespace(resp=resp)
-    with_outbox(s)
-    timers_before = set(threads_named("vaice-assistant-auto"))  # other tests may have left one running
-
-    with caplog.at_level(logging.INFO, logger="vaice.responders.assistant"):
-        resp.approve(resp.pending().id)
-        wait_for_continuation()
-
-    pending = resp.pending()
-    assert pending.name == "open_page" and pending.auto_seconds == 0
-    assert set(threads_named("vaice-assistant-auto")) == timers_before  # no countdown is started in a continuation
-    assert "does not count down open_page" in caplog.text
 
 
 def test_the_question_is_armed_only_when_its_audio_was_served_and_dropped_when_it_never_was(tts):
@@ -3111,19 +2646,6 @@ def test_a_click_whose_run_was_stopped_does_not_continue(tts, home):
     assert running.join() == "the command was stopped"
     assert continuation_over() and len(s.brain.calls) == 1  # nobody asked the brain about a stopped command
 
-
-def test_an_auto_run_continues_the_task_and_speaks_the_outcome_too(tts):
-    s = auto_asked(answer("Done, the page is open."))
-    outbox = with_outbox(s)
-
-    s.clock.now += AUTO_SECONDS + 1  # the countdown ends (its thread is not waited for: other tests leave timers)
-    wait_until(lambda: s.ran)
-    wait_for_continuation()
-
-    assert s.ran == [{"url": "https://example.com"}]
-    assert spoken(tts) == f"{ANNOUNCEMENT} Done, the page is open."
-    serve(outbox)
-    assert s.turn.assistant_text == f"{ANNOUNCEMENT} Done, the page is open."
 
 
 def test_a_continuation_cancelled_before_it_starts_asks_no_one_and_records_nothing(tts):
@@ -3440,7 +2962,7 @@ def test_a_gated_step_is_asked_by_a_fixed_sentence_on_the_screen_and_armed_only_
 
     pending = question_pending(s)
 
-    assert pending.waiter is not None and pending.voice and pending.auto_seconds == 0
+    assert pending.waiter is not None and pending.voice
     assert (pending.name, pending.arguments) == CLICK_STEP  # the panel shows the tool and its arguments
     assert pending.question == STEP_QUESTION and "uid" not in pending.question
     assert pending.armed_at is None  # not answerable before its audio was served

@@ -4,8 +4,7 @@
 assistant can answer questions about your Mac from real data:
 
 1. the realtime `transcription` session turns your audio into text;
-2. a **brain** (`llama-server`'s `POST /v1/chat/completions`, temperature 0, unless you set a
-   [helper model](helper-model.md)) reads the transcript, the earlier turns and the current date and time,
+2. a **brain** (`llama-server`'s `POST /v1/chat/completions`, temperature 0) reads the transcript, the earlier turns and the current date and time,
    and either answers or asks for a skill;
 3. **skills** run inside vaice and their result goes back to the brain, which then answers or asks for
    more (a task has a budget of `VAICE_ASSISTANT_MAX_STEPS` brain calls, 10, and
@@ -16,8 +15,8 @@ assistant can answer questions about your Mac from real data:
 
 ## Spoken progress
 
-A slow decision (a helper model can take several seconds, a command you approved up
-to 30) would be silence. When the answer has not started `VAICE_ASSISTANT_PROGRESS_SECONDS` (default 2.5)
+A slow decision (a command you approved up
+to 30 seconds) would be silence. When the answer has not started `VAICE_ASSISTANT_PROGRESS_SECONDS` (default 2.5)
 after your question was transcribed, the assistant says "One moment." and, if it still goes on, "Still
 working." every 12 seconds until the answer starts. A fast answer gets no filler, an unheard question
 (`Sorry, I didn't catch that.`) none, and the filler is never part of the conversation history. Set the
@@ -48,8 +47,7 @@ calls come back into the prompt without their arguments, so a follow-up such as 
 those words.
 
 There is deliberately no web search skill: with one, the small model searched for questions it could answer
-itself ("why is the sky blue") and the eval fell from 170/175 to 185/245. It is planned to return with the
-helper model.
+itself ("why is the sky blue") and the eval fell from 170/175 to 185/245.
 
 ## Confirmation
 
@@ -62,25 +60,22 @@ name that is not running is refused, nothing is asked), and the request waits in
   not an approval. `no`, `cancel`, `stop`, `never mind` and similar cancel it ("Okay, I won't."). Anything
   else drops the request and is treated as a new question. After a yes the call runs and the brain goes on
   in the same task: it says how it went, may call more skills (the step budget keeps counting) or ask another
-  question. A click or an `auto` run goes on the same way (#110): the call runs, the brain continues the task and
+  question. A click goes on the same way (#110): the call runs, the brain continues the task and
   the outcome is spoken even though no reply is in flight (see "By click" below).
   The question contains none of the yes words
   and cannot be answered before all its audio has been handed out, so hearing itself through the
   speakers does not approve it (it can drop the request, though: use headphones, see #36).
 - **By click:** while a request waits, a panel above *Tool activity* shows the question, the skill and its
-  arguments exactly as they will run, with **Run** and **Cancel** buttons (an `auto` request counting down shows **Stop** and **Run now** instead, see below). The
-  click (or the countdown) runs the call, then the task continues: the brain sees the result, may call more skills or
+  arguments exactly as they will run, with **Run** and **Cancel** buttons The
+  click runs the call, then the task continues: the brain sees the result, may call more skills or
   ask another question, and what it ends with is **spoken** a moment later, with no new utterance from you. The spoken
-  text is added to the same chat bubble as the question ("Using navigate page from chrome in 5 seconds. The page is
+  text is added to the same chat bubble as the question ("I would use navigate page from chrome. The page is
   open.") when its audio plays, the calls show in *Tool activity*, and everything is in later prompts. If it ends in
   another question it is shown at once but can be answered (by voice, or armed for a click) only after it was spoken;
-  it has no countdown there, even for an `auto` tool. Starting to talk, a new reply, a second approval or *New
+  Starting to talk, a new reply, a second approval or *New
   conversation* cancels the continuation and what it had queued to say. A panel left on screen cannot approve a newer
   request: the buttons pass the id of the request they showed.
 - A request expires 60 seconds after its question was spoken, and *New conversation* drops it.
-- An MCP tool with the policy `auto` is announced instead of asked and runs by itself
-  `VAICE_ASSISTANT_AUTO_SECONDS` (5) after the announcement has played, unless one of the above settles it
-  first: **Stop** or a spoken `stop`/`no` cancels it (see [MCP tools](mcp-tools.md)).
 - An utterance that could not be understood at all (noise, a cough: "Sorry, I didn't catch that.") leaves
   the request waiting; the next understood utterance settles it.
 - A bare "yes" can be too short for the pause detection to notice as speech (seen with synthetic speech
@@ -124,8 +119,7 @@ model, and so into the conversation file: a command that prints a file (`cat`) h
 model, which is why such commands need the button.
 
 The local 2B model writes poor commands (a first live check misheard `whoami` as `HUMI`, and asked for a
-command to answer "What does the ls command do?"), so this skill becomes useful mainly with a
-[helper model](helper-model.md). Either way, read every command before you approve it, and keep the setting off if you do not
+command to answer "What does the ls command do?"), so read every command before you approve it, and keep the setting off if you do not
 need it. Starting vaice with it on logs a warning. `python evals/run.py --paths assistant --shell
 --cases-file assistant_shell_cases.json` measures how often spoken requests reach it (see `evals/README.md`).
 
@@ -146,7 +140,7 @@ spoken questions reach the right skill (see `evals/README.md`).
 Turned on with `VAICE_ASSISTANT_MEMORY=true` (off by default). The assistant keeps short notes you ask it to, and uses
 them in every later conversation. It is off by default because with the local 2B brain the three extra skills
 made other requests worse (the live eval's 51 older cases fell from 225 to 210 of 255: "Goodbye" was sent to
-`remember`, and "Who makes the calculator app?" opened Calculator); a 24B helper model was not affected. Nothing is saved on its own: only a request such as "remember that I park on
+`remember`, and "Who makes the calculator app?" opened Calculator). Nothing is saved on its own: only a request such as "remember that I park on
 level three" stores a note, and nothing is extracted from what you say. Three skills:
 
 - `remember(note)` saves a lasting fact, written in the third person ("The user parks on level three."). It runs

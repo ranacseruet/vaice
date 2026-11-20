@@ -2,7 +2,6 @@
 import argparse
 import json
 import logging
-import math
 import re
 import shutil
 import tempfile
@@ -51,7 +50,6 @@ ERROR_TEXT_LIMIT = 200  # characters of a failure shown in the UI; the traceback
 CHATBOT_HEIGHT = 500  # pixels; the default (400) leaves the transcript cramped next to the mic
 UI_TITLE = "vaice"  # the heading above the mic
 BUTTON_ONLY = "Only the Run button can approve this one; saying yes will not."
-AUTO_COUNTDOWN = "Runs by itself in {seconds} s; press Stop to cancel it."  # on screen only, not spoken
 NOTHING_REMEMBERED = "Nothing remembered."
 BROWSE_ASK_EXTRA_SECONDS = 30.0  # a browser question waits this much longer than the confirmation's own expiry
 _MARKDOWN_PUNCTUATION = re.compile(r"([!-/:-@\[-`{-~])")  # every ASCII punctuation character
@@ -70,10 +68,8 @@ def pending_view(pending: Pending | None) -> dict | None:
     """What the confirmation panel shows of a waiting request (None: nothing waits)."""
     if pending is None:
         return None
-    left = pending.remaining(time.monotonic())  # the responder's `Confirmations` runs on the same clock
     return {"id": pending.id, "question": pending.question, "name": pending.name, "arguments": pending.arguments,
-            "voice": pending.voice, "auto_seconds": pending.auto_seconds,
-            "remaining": None if left is None else math.ceil(left)}  # whole seconds: one redraw a second at most
+            "voice": pending.voice}
 
 
 def _fence(text: str) -> str:
@@ -92,23 +88,19 @@ def _shell_command(view: dict) -> str | None:
 
 def confirmation_panel(view: dict | None) -> tuple:
     """The confirmation panel's components for `pending_view`: its visibility, its text, the request's id, and
-    the visibility of its two button rows (the countdown's *Stop* / *Run now*, the ordinary *Run* / *Cancel*).
+    the visibility of its button row (*Run* / *Cancel*).
 
     The text holds the question and, in a code block, the skill and its arguments exactly as they will run
-    (for a shell command the command line itself). A request a spoken yes cannot approve says so; an `auto` request
-    that is counting down says how long is left and puts *Stop* first, since it will run by itself."""
+    (for a shell command the command line itself). A request a spoken yes cannot approve says so."""
     if view is None:
-        return gr.update(visible=False), "", "", gr.update(visible=False), gr.update(visible=False)
+        return gr.update(visible=False), "", "", gr.update(visible=False)
     command = _shell_command(view) if view["name"] == RUN_SHELL else None
     if command is None:
         command = f"{view['name']} {view['arguments']}".rstrip()
     fence = _fence(command)
     notice = "" if view.get("voice", True) else f"{BUTTON_ONLY}\n\n"
-    counting = view.get("remaining") is not None  # an armed `auto` request: the countdown the announcement spoke of
-    if counting:
-        notice += f"{AUTO_COUNTDOWN.format(seconds=view['remaining'])}\n\n"
     return (gr.update(visible=True), f"{view['question']}\n\n{notice}{fence}\n{command}\n{fence}", view["id"],
-            gr.update(visible=counting), gr.update(visible=not counting))
+            gr.update(visible=True))
 
 
 def memory_markdown(notes: list[str]) -> str:
@@ -129,7 +121,7 @@ def refresh_view(conversation: Conversation, known: str, pending: Callable[[], P
     are compared as JSON so an unchanged transcript is never re-rendered.
 
     With `pending` (a responder that asks for confirmation) the confirmation panel is part of the view:
-    its visibility, text, the request's id (which the buttons pass back) and its two button rows' visibility
+    its visibility, text, the request's id (which the buttons pass back) and its button row's visibility
     come after the two views.
     With `browsing` (assistant mode with a browser: whether a browser task runs) the visibility of the task's *Stop*
     row comes after those.
@@ -238,16 +230,11 @@ def build_stream(responder: Responder, conversation: Conversation) -> Stream:
         if pending is not None:
             with gr.Column(visible=False) as confirm_panel:
                 confirm_text = gr.Markdown()
-                # Gradio cannot reorder components, so the two layouts are two rows shown one at a time: a request
-                # that runs by itself after a countdown leads with Stop, every other one with Run
-                with gr.Row(visible=False) as stop_row:
-                    stop_button = gr.Button("Stop", variant="stop")
-                    run_now_button = gr.Button("Run now", variant="secondary")
                 with gr.Row(visible=False) as run_row:
                     run_button = gr.Button("Run", variant="primary")
                     cancel_button = gr.Button("Cancel")
             pending_id = gr.State("")  # the request the panel shows: a click can only settle that one
-            confirm_outputs = [confirm_panel, confirm_text, pending_id, stop_row, run_row]
+            confirm_outputs = [confirm_panel, confirm_text, pending_id, run_row]
         # Assistant mode with a browser: a Stop button while a browser task runs (the 1 s timer shows and hides it)
         browsing = getattr(responder, "browsing", None) if hasattr(responder, "stop_task") else None
         browse_outputs: list = []
@@ -285,12 +272,10 @@ def build_stream(responder: Responder, conversation: Conversation) -> Stream:
                 # hide at once; the blank `seen` makes the next tick draw whatever is pending now
                 return gr.update(visible=False), "", ""
 
-            for approve_button in (run_button, run_now_button):
-                approve_button.click(partial(settle, responder.approve), inputs=[pending_id],
-                                     outputs=[confirm_panel, pending_id, seen])
-            for cancel_or_stop in (cancel_button, stop_button):
-                cancel_or_stop.click(partial(settle, responder.cancel), inputs=[pending_id],
-                                     outputs=[confirm_panel, pending_id, seen])
+            run_button.click(partial(settle, responder.approve), inputs=[pending_id],
+                             outputs=[confirm_panel, pending_id, seen])
+            cancel_button.click(partial(settle, responder.cancel), inputs=[pending_id],
+                                outputs=[confirm_panel, pending_id, seen])
 
         if browsing is not None:
             def stop_browsing() -> tuple:
@@ -342,24 +327,6 @@ def _chat_responder() -> LlamaCppResponder:
     return LlamaCppResponder(tools=tools or None)
 
 
-def _announce_brain() -> None:
-    """Assistant mode: say which brain answers. A helper off this machine gets a warning that says what is sent;
-    nothing here touches the API key, which is never logged (not even its length)."""
-    if not config.BRAIN_URL:
-        return
-    parts = urlsplit(config.BRAIN_URL)
-    log.info("assistant brain: %s, model %s", parts.netloc, config.BRAIN_MODEL or "(none set)")
-    if not config.BRAIN_MODEL:
-        log.warning("VAICE_BRAIN_MODEL is empty: most hosted endpoints require a model name")
-    if parts.hostname not in config.LOCAL_HOSTS:
-        log.warning(
-            "the brain at %s is not on this machine: what you say (as text), the earlier turns of the "
-            "conversation, the skills' results (file names, process names, this computer's name, shell command "
-            "output)%s are sent to it. Audio does not leave: speech recognition and speech output stay on the "
-            "local llama-server", parts.netloc,
-            " and the notes you asked it to keep about you" if config.ASSISTANT_MEMORY else "")
-
-
 def _announce_vision() -> None:
     """Assistant mode: say which vision model looks at the screen. A host off this machine gets a warning that a
     screenshot is sent to it; nothing here touches the API key, which is never logged (not even its length)."""
@@ -400,10 +367,9 @@ def _open_memory() -> Memory | None:
 
 def _open_browse() -> PiAgent | None:
     """Assistant mode: the browser agent for the `browse` skill (None when VAICE_BROWSE is off, or when it cannot be
-    used: the reason is a warning, and the skill is then not offered). Needs its own endpoint (VAICE_BROWSE_URL, apart
-    from the helper brain: Pi uses that, with its key, which goes to the child's environment only and is never
-    logged) and the `pi` command, which the user installs: its presence and version are checked, nothing is
-    installed."""
+    used: the reason is a warning, and the skill is then not offered). Needs its own endpoint (VAICE_BROWSE_URL: Pi
+    uses that, with its key, which goes to the child's environment only and is never logged) and the `pi` command,
+    which the user installs: its presence and version are checked, nothing is installed."""
     if config.BROWSE == "off":
         return None
     if not config.BROWSE_URL:
@@ -450,22 +416,30 @@ def _open_browse() -> PiAgent | None:
                    gate_policy=UNGATED_POLICY if ungated else GATE_POLICY)
 
 
-def _open_mcp(browse: bool = False) -> mcp_skills.McpTools | None:
+def _open_mcp() -> mcp_skills.McpTools | None:
     """Assistant mode: start the MCP servers in VAICE_MCP_CONFIG (None when it is unset) and say what each offers:
-    tool names only, never the file's `env` values. `browse`: the `browse` skill is offered, which is the one browser
-    path (a chrome-devtools-mcp server is skipped)."""
+    tool names only, never the file's `env` values."""
     if config.MCP_CONFIG is None:
         return None
-    tools = mcp_skills.start(config.MCP_CONFIG, config.MCP_TIMEOUT, config.ASSISTANT_AUTO_SECONDS, browse=browse)
+    tools = mcp_skills.start(config.MCP_CONFIG, config.MCP_TIMEOUT)
     for name, offered in tools.summaries:
         log.info("mcp server %s: %d tools offered (%s)", name, len(offered), ", ".join(offered) or "none")
     return tools
+
+
+def _warn_removed_settings() -> None:
+    """One warning naming the settings that are set but no longer read, and why. Names only: a value may be a key."""
+    removed = config.removed_settings()
+    if removed:
+        log.warning("these settings are no longer used and are ignored: %s",
+                    "; ".join(f"{name} ({reason})" for name, reason in removed))
 
 
 def main() -> None:
     up = parse_args().command == "up"
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+    _warn_removed_settings()
     install_stop_handler()  # Ctrl+C: the responders give up, gradio closes the server
     managed = None  # the llama-server `vaice up` started, if any
     mcp_tools = None  # the MCP servers started for assistant mode, if any
@@ -478,11 +452,10 @@ def main() -> None:
             if config.LLAMACPP_TOOLS:
                 log.warning("VAICE_LLAMACPP_TOOLS is ignored in assistant mode: the skills run in vaice, "
                             "not on llama-server")
-            browse_agent = _open_browse()  # before the MCP servers: with it, they leave the browser to it
-            mcp_tools = _open_mcp(browse=browse_agent is not None)
+            browse_agent = _open_browse()
+            mcp_tools = _open_mcp()
             responder = AssistantResponder(memory=_open_memory(), vision=_vision_skill(),
                                            extra_skills=mcp_tools.skills if mcp_tools else (), browse=browse_agent)
-            _announce_brain()
             _announce_vision()
             if config.ASSISTANT_SHELL:
                 log.warning("VAICE_ASSISTANT_SHELL is on: after you approve it, a shell command the assistant "
@@ -490,8 +463,6 @@ def main() -> None:
                             "all others only by the Run button)")
             log.info("assistant mode: skills %s", ", ".join(responder.skills.names))
         else:
-            if config.BRAIN_URL:
-                log.warning("VAICE_BRAIN_URL is ignored in chat mode: the helper brain is for assistant mode only")
             if config.VISION_URL:
                 log.warning("VAICE_VISION_URL is ignored in chat mode: the screen skill is for assistant mode only")
             if config.MCP_CONFIG is not None:

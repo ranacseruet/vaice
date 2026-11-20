@@ -17,9 +17,8 @@ VAICE_MODE=assistant VAICE_BROWSE=pi VAICE_BROWSE_URL=http://localhost:1234/v1 V
 ```
 
 - **Pi has a model of its own.** It uses the `VAICE_BROWSE_URL` endpoint (with `VAICE_BROWSE_MODEL` and
-  `VAICE_BROWSE_API_KEY`), so `browse` is not offered without `VAICE_BROWSE_URL` (a warning says so). There is no
-  fallback to the helper brain's settings: `VAICE_BRAIN_*` may be unset (the local llama-server then decides when to
-  call `browse`) or point elsewhere. The key reaches Pi only through its process environment, never a file or a log
+  `VAICE_BROWSE_API_KEY`), so `browse` is not offered without `VAICE_BROWSE_URL` (a warning says so). The local
+  llama-server decides when to call `browse`. The key reaches Pi only through its process environment, never a file or a log
   line. Whatever the pages show, and your goal, goes to the browse endpoint (startup warns).
 - **Chrome gets a profile of its own**, `<VAICE_DATA_DIR>/browse/chrome-profile` (a temporary directory when
   `VAICE_DATA_DIR` is empty), in a visible window. Logins you make there persist between tasks; your own Chrome is

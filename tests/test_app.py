@@ -838,75 +838,32 @@ def test_assistant_mode_warns_that_the_server_tools_setting_is_ignored(monkeypat
 FAKE_KEY = "fake-key-do-not-log-9f3a"
 
 
-def _helper(monkeypatch, url, model="lfm2.5-24b-a2b"):
-    monkeypatch.setattr(app.config, "BRAIN_URL", url)
-    monkeypatch.setattr(app.config, "BRAIN_MODEL", model)
-    monkeypatch.setattr(app.config, "BRAIN_API_KEY", FAKE_KEY)
-
-
-@pytest.mark.parametrize("url", ["http://localhost:1234/v1", "http://127.0.0.1:1234/v1", "http://[::1]:1234/v1"])
-def test_a_helper_on_this_machine_is_named_without_a_privacy_warning(monkeypatch, tmp_path, caplog, url):
-    _helper(monkeypatch, url)
+def test_removed_settings_that_are_set_are_warned_about_once_by_name_and_never_by_value(monkeypatch, tmp_path, caplog):
+    for name in app.config.REMOVED:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("VAICE_BRAIN_URL", "https://brain.example.net/v1")
+    monkeypatch.setenv("VAICE_BRAIN_API_KEY", FAKE_KEY)
+    monkeypatch.setenv("VAICE_ASSISTANT_AUTO_SECONDS", "7")
     with caplog.at_level(logging.DEBUG):
         assert _assistant_main(monkeypatch, tmp_path)
 
-    assert "assistant brain: " in caplog.text and ", model lfm2.5-24b-a2b" in caplog.text
-    assert "not on this machine" not in caplog.text
-    assert FAKE_KEY not in caplog.text
-
-
-def test_a_remote_helper_gets_a_warning_that_says_what_is_sent_and_that_audio_stays(monkeypatch, tmp_path, caplog):
-    _helper(monkeypatch, "https://openrouter.ai/api/v1")
-    with caplog.at_level(logging.DEBUG):
-        assert _assistant_main(monkeypatch, tmp_path)
-
-    assert "assistant brain: openrouter.ai, model lfm2.5-24b-a2b" in caplog.text
-    (warning,) = [r for r in caplog.records if "not on this machine" in r.getMessage()]
+    (warning,) = [r for r in caplog.records if "no longer used" in r.getMessage()]
     assert warning.levelno == logging.WARNING
     text = warning.getMessage()
-    assert "openrouter.ai" in text
-    for sent in ("what you say", "earlier turns", "file names", "process names", "computer's name",
-                 "shell command output"):
-        assert sent in text
-    assert "Audio does not leave" in text and "local llama-server" in text
-    assert FAKE_KEY not in caplog.text and "key" not in caplog.text.lower()  # the key is not even mentioned
+    for name in ("VAICE_BRAIN_URL", "VAICE_BRAIN_API_KEY", "VAICE_ASSISTANT_AUTO_SECONDS"):
+        assert name in text
+    assert "VAICE_BRAIN_MODEL" not in text  # not set
+    assert "helper brain was removed" in text and "use run or click" in text
+    assert FAKE_KEY not in caplog.text and "brain.example.net" not in caplog.text
 
 
-def test_a_helper_without_a_model_warns_but_the_app_starts(monkeypatch, tmp_path, caplog):
-    _helper(monkeypatch, "http://localhost:1234/v1", model="")
-    with caplog.at_level(logging.INFO):
-        assert _assistant_main(monkeypatch, tmp_path)  # continues
-
-    assert "VAICE_BRAIN_MODEL is empty" in caplog.text
-    assert "model (none set)" in caplog.text
-
-
-def test_without_a_helper_nothing_about_a_brain_is_logged(monkeypatch, tmp_path, caplog):
-    monkeypatch.setattr(app.config, "BRAIN_URL", "")
+def test_no_warning_about_removed_settings_when_none_is_set(monkeypatch, tmp_path, caplog):
+    for name in app.config.REMOVED:
+        monkeypatch.delenv(name, raising=False)
     with caplog.at_level(logging.DEBUG):
         _assistant_main(monkeypatch, tmp_path)
 
-    assert "assistant brain" not in caplog.text and "VAICE_BRAIN" not in caplog.text
-
-
-def test_chat_mode_ignores_a_helper_url_and_says_so_once(monkeypatch, tmp_path, caplog):
-    _helper(monkeypatch, "https://openrouter.ai/api/v1")
-    monkeypatch.setattr(app.config, "MODE", "chat")
-    with caplog.at_level(logging.DEBUG):
-        _main_with(monkeypatch, tmp_path, tools=None)
-
-    assert caplog.text.count("VAICE_BRAIN_URL is ignored in chat mode") == 1
-    assert "assistant brain" not in caplog.text and "not on this machine" not in caplog.text
-    assert FAKE_KEY not in caplog.text
-
-
-def test_chat_mode_without_a_helper_url_logs_nothing_about_it(monkeypatch, tmp_path, caplog):
-    monkeypatch.setattr(app.config, "BRAIN_URL", "")
-    monkeypatch.setattr(app.config, "MODE", "chat")
-    with caplog.at_level(logging.DEBUG):
-        _main_with(monkeypatch, tmp_path, tools=None)
-
-    assert "VAICE_BRAIN_URL" not in caplog.text
+    assert "no longer used" not in caplog.text
 
 
 VISION_KEY = "fake-vision-key-do-not-log-5c1d"
@@ -1028,12 +985,9 @@ def _mcp(monkeypatch, tmp_path, mode="assistant", fake=None):
     started = []
     monkeypatch.setattr(app.config, "MCP_CONFIG", tmp_path / "mcp.json")
     monkeypatch.setattr(app.config, "MCP_TIMEOUT", 12.5)
-    monkeypatch.setattr(app.config, "ASSISTANT_AUTO_SECONDS", 7.0)
-    fake.browse_flags = []  # the `browse` argument each start() got
 
-    def start(path, timeout, auto, browse=False):
-        started.append((path, timeout, auto))
-        fake.browse_flags.append(browse)
+    def start(path, timeout):
+        started.append((path, timeout))
         return fake
 
     monkeypatch.setattr(app.mcp_skills, "start", start)
@@ -1062,7 +1016,7 @@ def test_assistant_mode_starts_the_mcp_servers_gives_their_skills_to_the_respond
     with caplog.at_level(logging.INFO, logger="vaice.app"):
         assert _main_with(monkeypatch, tmp_path, tools=None)
 
-    assert started == [(tmp_path / "mcp.json", 12.5, 7.0)]
+    assert started == [(tmp_path / "mcp.json", 12.5)]
     assert built[0]["extra_skills"] == ["a skill"]
     assert "mcp server notes: 2 tools offered (search_notes, add_note)" in caplog.text
     assert "mcp server idle: 0 tools offered (none)" in caplog.text
@@ -1227,13 +1181,13 @@ def test_assistant_mode_has_a_hidden_panel_with_run_and_cancel_above_the_tool_ac
     page = confirm_page(responder)
     components = page.config["components"]
 
-    assert set(page.clicks) == {"New conversation", "Run", "Cancel", "Stop", "Run now"}
+    assert set(page.clicks) == {"New conversation", "Run", "Cancel"}
     (panel,) = [c for c in components if c["type"] == "column" and c["props"].get("visible") is False]
     (accordion,) = [c for c in components if c["type"] == "accordion"]
     order = [c["id"] for c in components]
     assert order.index(panel["id"]) < order.index(accordion["id"])
-    hidden, text, pending_id, stop_row, run_row, _ = page.tick("")[2:]
-    assert hidden == stop_row == run_row == HIDDEN and text == "" and pending_id == ""
+    hidden, text, pending_id, run_row, _ = page.tick("")[2:]
+    assert hidden == run_row == HIDDEN and text == "" and pending_id == ""
 
 
 def test_the_panel_shows_the_question_and_exactly_what_will_run_and_is_drawn_once():
@@ -1243,16 +1197,16 @@ def test_the_panel_shows_the_question_and_exactly_what_will_run_and_is_drawn_onc
     request = waiting_request()
     responder.waiting = request
 
-    *_, shown, text, pending_id, stop_row, run_row, seen = page.tick(seen)
+    *_, shown, text, pending_id, run_row, seen = page.tick(seen)
 
-    assert shown == SHOWN and stop_row == HIDDEN and run_row == SHOWN  # an ordinary request: Run and Cancel
+    assert shown == SHOWN and run_row == SHOWN  # Run and Cancel
     assert text == 'Shall I quit Safari?\n\n```\nquit_app {"name": "Safari"}\n```'
     assert pending_id == request.id
-    assert all(item == {"__type__": "update"} for item in page.tick(seen)[:7])  # unchanged: nothing re-renders
+    assert all(item == {"__type__": "update"} for item in page.tick(seen)[:6])  # unchanged: nothing re-renders
 
     responder.waiting = None  # settled somewhere else: the panel goes away
-    *_, hidden, text, pending_id, stop_row, run_row, seen = page.tick(seen)
-    assert hidden == stop_row == run_row == HIDDEN and pending_id == ""
+    *_, hidden, text, pending_id, run_row, seen = page.tick(seen)
+    assert hidden == run_row == HIDDEN and pending_id == ""
 
 
 def shell_request(command, voice, question="Shall I run the command ls? The full command is on the screen."):
@@ -1301,60 +1255,18 @@ def test_the_panel_shows_a_view_without_the_voice_key_as_voice_approvable():
     assert "Only the Run button" not in app.confirmation_panel(view)[1]
 
 
-def auto_request(seconds=5.0, armed_at=None):
-    return Pending("chrome__navigate_page", '{"url": "x"}', "Using navigate page from chrome in 5 seconds.", "call_0",
-                   [], conv.Turn(), auto_seconds=seconds, armed_at=armed_at)
+def test_an_ordinary_request_shows_the_panel_and_its_run_and_cancel_row():
+    for request in (waiting_request(), shell_request("ls", voice=True), shell_request("ls | wc", voice=False)):
+        panel, _, _, run_row = app.confirmation_panel(app.pending_view(request))
+
+        assert panel == SHOWN and run_row == SHOWN
 
 
-def test_an_armed_auto_request_shows_the_whole_seconds_left_rounded_up_and_how_to_stop_it(monkeypatch):
-    request = auto_request(armed_at=100.0)
-    monkeypatch.setattr(app.time, "monotonic", lambda: 100.0)
-    assert app.pending_view(request)["remaining"] == 5
-    monkeypatch.setattr(app.time, "monotonic", lambda: 102.2)
-    view = app.pending_view(request)
-    assert view["remaining"] == 3 and view["auto_seconds"] == 5.0  # 2.8 s left, shown as 3
-
-    text = app.confirmation_panel(view)[1]
-
-    assert text == ("Using navigate page from chrome in 5 seconds.\n\n"
-                    "Runs by itself in 3 s; press Stop to cancel it.\n\n"
-                    '```\nchrome__navigate_page {"url": "x"}\n```')
-    monkeypatch.setattr(app.time, "monotonic", lambda: 200.0)
-    assert app.pending_view(request)["remaining"] == 0
+def test_a_request_with_no_view_hides_the_panel_and_its_row():
+    assert app.confirmation_panel(None) == (HIDDEN, "", "", HIDDEN)
 
 
-def test_the_countdown_starts_above_the_wait_by_the_audio_that_was_still_to_play(monkeypatch):
-    request = auto_request(armed_at=100.0)
-    request.auto_delay = 3.0
-    monkeypatch.setattr(app.time, "monotonic", lambda: 100.0)
-    assert app.pending_view(request)["remaining"] == 8
-    monkeypatch.setattr(app.time, "monotonic", lambda: 105.5)
-    assert app.pending_view(request)["remaining"] == 3
-
-
-def test_a_counting_down_request_shows_stop_first_and_run_now_and_hides_run_and_cancel(monkeypatch):
-    monkeypatch.setattr(app.time, "monotonic", lambda: 100.0)
-    view = app.pending_view(auto_request(armed_at=100.0))
-
-    panel, text, pending_id, stop_row, run_row = app.confirmation_panel(view)
-
-    assert panel == SHOWN and stop_row == SHOWN and run_row == HIDDEN and pending_id == view["id"]
-    assert "Runs by itself in 5 s; press Stop to cancel it." in text and "Cancel" not in text
-
-
-def test_an_ordinary_request_shows_run_and_cancel_and_no_stop_row():
-    for request in (waiting_request(), shell_request("ls", voice=True), shell_request("ls | wc", voice=False),
-                    auto_request(armed_at=None)):  # the last one is not armed yet: no countdown
-        panel, _, _, stop_row, run_row = app.confirmation_panel(app.pending_view(request))
-
-        assert panel == SHOWN and stop_row == HIDDEN and run_row == SHOWN
-
-
-def test_a_request_with_no_view_hides_the_panel_and_both_rows():
-    assert app.confirmation_panel(None) == (HIDDEN, "", "", HIDDEN, HIDDEN)
-
-
-def test_the_page_has_the_stop_row_first_and_the_buttons_in_the_right_rows():
+def test_the_page_has_one_row_of_run_and_cancel():
     page = confirm_page(ConfirmingResponder())
     components = {c["id"]: c for c in page.config["components"]}
 
@@ -1368,33 +1280,9 @@ def test_the_page_has_the_stop_row_first_and_the_buttons_in_the_right_rows():
 
     labels = [row for row in rows(page.config["layout"]) if row]
 
-    assert labels == [["Stop", "Run now"], ["Run", "Cancel"]]
+    assert [row for row in labels if "Run" in row] == [["Run", "Cancel"]]
     variants = {c["props"]["value"]: c["props"]["variant"] for c in components.values() if c["type"] == "button"}
-    assert variants["Stop"] == "stop" and variants["Run"] == "primary" and variants["Run now"] == "secondary"
-
-
-def test_an_auto_request_that_is_not_armed_yet_and_an_ordinary_one_show_no_countdown():
-    for request in (auto_request(armed_at=None), waiting_request()):
-        view = app.pending_view(request)
-
-        assert view["remaining"] is None
-        assert "Runs by itself" not in app.confirmation_panel(view)[1]
-
-
-def test_the_countdown_redraws_the_panel_once_a_second_and_not_in_between(monkeypatch):
-    responder = ConfirmingResponder()
-    page = confirm_page(responder)
-    responder.waiting = auto_request(armed_at=100.0)
-    now = [100.0]
-    monkeypatch.setattr(app.time, "monotonic", lambda: now[0])
-    *_, text, _, _, _, seen = page.tick("")
-    assert "Runs by itself in 5 s" in text
-
-    now[0] = 100.4  # still 4.6 s: rounds up to 5, the same view
-    assert all(item == {"__type__": "update"} for item in page.tick(seen)[:7])
-    now[0] = 101.2  # 3.8 s: now 4
-    *_, text, _, _, _, seen = page.tick(seen)
-    assert "Runs by itself in 4 s" in text
+    assert variants["Run"] == "primary"
 
 
 def test_arguments_with_backticks_cannot_close_the_code_block():
@@ -1416,17 +1304,6 @@ def test_run_and_cancel_pass_the_id_the_panel_showed_and_hide_it_and_redraw_on_t
     assert responder.approved == ["id-from-the-panel"] and responder.cancelled == ["another-id"]
     assert set(run_dep["outputs"]) - state_ids != set()  # the panel itself
     assert len(run_dep["outputs"]) == 3  # the panel, the id the panel holds, and `seen`: the blank forces a redraw
-
-
-def test_stop_cancels_and_run_now_approves_exactly_as_cancel_and_run_do():
-    responder = ConfirmingResponder()
-    page = confirm_page(responder)
-    stop, stop_dep = page.clicks["Stop"]
-    run_now, run_now_dep = page.clicks["Run now"]
-
-    assert stop("id-1") == run_now("id-2") == (HIDDEN, "", "")  # hidden at once; the blank `seen` redraws
-    assert responder.cancelled == ["id-1"] and responder.approved == ["id-2"]
-    assert stop_dep["outputs"] == run_now_dep["outputs"] == page.clicks["Cancel"][1]["outputs"]
 
 
 def test_new_conversation_clears_a_waiting_request_and_chat_mode_does_not_need_the_method():
@@ -1511,8 +1388,8 @@ def test_the_memory_panel_comes_after_the_confirmation_panel_when_both_exist():
     _, tick, tick_fn = _tick_fn(stream)
 
     result = tick_fn("")
-    assert len(tick["outputs"]) == len(result) == 9  # chatbot, tool, confirm x5, memory, seen
-    assert result[7] == "Nothing remembered."
+    assert len(tick["outputs"]) == len(result) == 8  # chatbot, tool, confirm x4, memory, seen
+    assert result[6] == "Nothing remembered."
 
 
 def test_new_conversation_leaves_the_notes_alone():
@@ -1637,26 +1514,6 @@ def test_chat_mode_does_not_open_the_memory(monkeypatch, tmp_path):
     assert _main_with(monkeypatch, tmp_path, tools=None)
 
 
-def test_a_remote_helper_warning_says_the_saved_notes_are_sent_too_only_while_memory_is_on(
-        monkeypatch, tmp_path, caplog):
-    _helper(monkeypatch, "https://openrouter.ai/api/v1")
-    monkeypatch.setattr(app.config, "ASSISTANT_MEMORY", True)
-    with caplog.at_level(logging.WARNING):
-        assert _assistant_main(monkeypatch, tmp_path)
-
-    (warning,) = [r for r in caplog.records if "not on this machine" in r.getMessage()]
-    assert "the notes you asked it to keep about you" in warning.getMessage()
-    assert "Audio does not leave" in warning.getMessage()
-
-    caplog.clear()
-    monkeypatch.setattr(app.config, "ASSISTANT_MEMORY", False)
-    with caplog.at_level(logging.WARNING):
-        assert _assistant_main(monkeypatch, tmp_path)
-
-    (warning,) = [r for r in caplog.records if "not on this machine" in r.getMessage()]
-    assert "notes" not in warning.getMessage()
-
-
 class OutboxResponder(FakeResponder):
     """An assistant-like responder: it takes an outbox from `build_stream` (the optional `attach_outbox`)."""
 
@@ -1684,7 +1541,6 @@ def test_a_responder_without_attach_outbox_gets_a_stream_without_one():
 
 # -- the browse skill (VAICE_BROWSE)
 
-BRAIN_KEY = "sk-fake-brain-key-123"
 BROWSE_KEY = "sk-fake-browse-key-456"
 
 
@@ -1702,15 +1558,13 @@ class FakePiAgent:
 
 @pytest.fixture
 def browse_on(monkeypatch, tmp_path):
-    """VAICE_BROWSE=pi with an endpoint of its own and no helper brain, a `pi` that is found and prints 1.5.2, and
+    """VAICE_BROWSE=pi with an endpoint of its own, a `pi` that is found and prints 1.5.2, and
     PiAgent faked."""
     FakePiAgent.made, FakePiAgent.closed = [], 0
     monkeypatch.setattr(app.config, "BROWSE", "pi")
     monkeypatch.setattr(app.config, "BROWSE_URL", "https://llm.example.com/v1")
     monkeypatch.setattr(app.config, "BROWSE_MODEL", "some-model")
     monkeypatch.setattr(app.config, "BROWSE_API_KEY", BROWSE_KEY)
-    for name in ("BRAIN_URL", "BRAIN_MODEL", "BRAIN_API_KEY"):
-        monkeypatch.setattr(app.config, name, "")
     monkeypatch.setattr(app.config, "BROWSE_HEADLESS", False)
     monkeypatch.setattr(app.config, "BROWSE_CONFIRM", "ask")
     monkeypatch.setattr(app.shutil, "which", lambda name: "/usr/bin/pi")
@@ -1769,46 +1623,13 @@ def test_browse_writes_pi_home_under_the_data_dir_and_gives_the_key_to_the_child
     assert models["models"][0]["id"] == "some-model"
 
 
-def test_browse_needs_no_helper_brain_and_ignores_the_brain_settings_even_when_they_are_set(browse_on, monkeypatch,
-                                                                                         tmp_path, caplog):
-    assert app.config.BRAIN_URL == ""  # the fixture has no helper brain, and browse is still offered
-    assert isinstance(app._open_browse(), FakePiAgent)
-
-    monkeypatch.setattr(app.config, "BRAIN_URL", "https://brain.example.net/v1")
-    monkeypatch.setattr(app.config, "BRAIN_MODEL", "brain-model")
-    monkeypatch.setattr(app.config, "BRAIN_API_KEY", BRAIN_KEY)
-    with caplog.at_level(logging.INFO, logger="vaice.app"):
-        agent = app._open_browse()
-
-    assert agent.kwargs["env"] == {"VAICE_PI_API_KEY": BROWSE_KEY}  # never the brain's key
-    base = tmp_path / "data" / "browse" / "pi"
-    models = json.loads((base / "models.json").read_text())["providers"]["vaice"]
-    assert models["baseUrl"] == "https://llm.example.com/v1" and models["models"][0]["id"] == "some-model"
-    for path in base.rglob("*"):
-        assert not path.is_file() or (BRAIN_KEY not in path.read_text() and "brain.example.net" not in path.read_text())
-    assert BRAIN_KEY not in caplog.text and BROWSE_KEY not in caplog.text and "brain.example.net" not in caplog.text
-
-
-def test_browse_is_not_offered_without_its_own_url_even_when_a_helper_brain_is_set(browse_on, monkeypatch, caplog):
-    monkeypatch.setattr(app.config, "BROWSE_URL", "")
-    monkeypatch.setattr(app.config, "BRAIN_URL", "https://brain.example.net/v1")
-    monkeypatch.setattr(app.config, "BRAIN_API_KEY", BRAIN_KEY)
-
-    with caplog.at_level(logging.WARNING, logger="vaice.app"):
-        assert app._open_browse() is None
-
-    assert "needs VAICE_BROWSE_URL" in caplog.text and "browse is not offered" in caplog.text
-    assert FakePiAgent.made == [] and BRAIN_KEY not in caplog.text
-
-
 def test_an_empty_browse_model_warns_naming_the_browse_variable(browse_on, monkeypatch, caplog):
     monkeypatch.setattr(app.config, "BROWSE_MODEL", "")
-    monkeypatch.setattr(app.config, "BRAIN_MODEL", "brain-model")
 
     with caplog.at_level(logging.WARNING, logger="vaice.app"):
         assert isinstance(app._open_browse(), FakePiAgent)
 
-    assert "VAICE_BROWSE_MODEL is empty" in caplog.text and "VAICE_BRAIN_MODEL" not in caplog.text
+    assert "VAICE_BROWSE_MODEL is empty" in caplog.text
 
 
 def test_browse_asks_for_page_changing_steps_unless_the_user_turned_that_off(browse_on, monkeypatch, caplog):
@@ -1825,7 +1646,6 @@ def test_browse_asks_for_page_changing_steps_unless_the_user_turned_that_off(bro
 def test_headless_adds_the_flag_and_no_key_means_no_environment(browse_on, monkeypatch, tmp_path):
     monkeypatch.setattr(app.config, "BROWSE_HEADLESS", True)
     monkeypatch.setattr(app.config, "BROWSE_API_KEY", "")
-    monkeypatch.setattr(app.config, "BRAIN_API_KEY", BRAIN_KEY)  # a brain key is never a fallback
 
     agent = app._open_browse()
 
@@ -1929,14 +1749,3 @@ def test_a_browser_task_shows_a_stop_button_that_ends_it_and_hides_at_once():
     assert shown[-2] == SHOWN
 
     assert stop_fn() == (HIDDEN, "") and responder.stopped == 1  # hidden at once, the blank `seen` redraws
-
-
-def test_the_mcp_servers_leave_the_browser_to_browse_only_when_the_skill_is_offered(browse_on, monkeypatch, tmp_path):
-    fake, _ = _mcp(monkeypatch, tmp_path)
-    assert _assistant_main(monkeypatch, tmp_path)
-    assert fake.browse_flags == [True]  # an agent came back: browse is offered
-
-    monkeypatch.setattr(app.shutil, "which", lambda name: None)  # no `pi`: not offered, the servers are unchanged
-    fake, _ = _mcp(monkeypatch, tmp_path)
-    assert _assistant_main(monkeypatch, tmp_path)
-    assert fake.browse_flags == [False]

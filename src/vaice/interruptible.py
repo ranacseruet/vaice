@@ -3,7 +3,7 @@ plays after the interrupt, and the interrupting utterance lost when the reply en
 with tuned VAD options to reject brief room noise and pre-roll preservation to prevent clipped opening words.
 
 It also serves an `Outbox` (outbox.py): speech queued by a worker thread outside any reply (the outcome of a call
-the user approved with a click or an `auto` countdown) is returned by the idle `emit()`, paced by the estimated end
+the user approved with a click) is returned by the idle `emit()`, paced by the estimated end
 of its playback, and dropped when the user starts talking."""
 import logging
 import threading
