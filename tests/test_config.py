@@ -628,10 +628,12 @@ def test_a_bad_mcp_timeout_is_a_clean_error(monkeypatch, value):
 
 
 def test_browse_is_off_by_default(monkeypatch):
-    for name in ("VAICE_BROWSE", "VAICE_BROWSE_SECONDS", "VAICE_BROWSE_HEADLESS", "VAICE_BROWSE_CONFIRM"):
+    for name in ("VAICE_BROWSE", "VAICE_BROWSE_SECONDS", "VAICE_BROWSE_HEADLESS", "VAICE_BROWSE_CONFIRM",
+                 "VAICE_BROWSE_URL", "VAICE_BROWSE_MODEL", "VAICE_BROWSE_API_KEY"):
         monkeypatch.delenv(name, raising=False)
     try:
         reloaded = importlib.reload(config)
+        assert (reloaded.BROWSE_URL, reloaded.BROWSE_MODEL, reloaded.BROWSE_API_KEY) == ("", "", "")
         assert reloaded.BROWSE == "off" and reloaded.BROWSE_SECONDS == 180.0 and reloaded.BROWSE_HEADLESS is False
         assert reloaded.BROWSE_CONFIRM == "ask"
     finally:
@@ -644,10 +646,36 @@ def test_the_browse_settings_are_read_from_the_environment(monkeypatch):
     monkeypatch.setenv("VAICE_BROWSE_SECONDS", "90")
     monkeypatch.setenv("VAICE_BROWSE_HEADLESS", "1")
     monkeypatch.setenv("VAICE_BROWSE_CONFIRM", "off")
+    monkeypatch.setenv("VAICE_BROWSE_URL", "https://llm.example.com/v1/")
+    monkeypatch.setenv("VAICE_BROWSE_MODEL", " big-model ")
+    monkeypatch.setenv("VAICE_BROWSE_API_KEY", "fake-key-123\n")
     try:
         reloaded = importlib.reload(config)
+        assert reloaded.BROWSE_URL == "https://llm.example.com/v1"  # trailing slash stripped, /v1 kept
+        assert reloaded.BROWSE_MODEL == "big-model" and reloaded.BROWSE_API_KEY == "fake-key-123"
+        assert reloaded.BRAIN_URL == "" and reloaded.BRAIN_MODEL == ""  # the helper brain is a separate setting
         assert reloaded.BROWSE == "pi" and reloaded.BROWSE_SECONDS == 90.0 and reloaded.BROWSE_HEADLESS is True
         assert reloaded.BROWSE_CONFIRM == "off"
+    finally:
+        monkeypatch.undo()
+        importlib.reload(config)
+
+
+def test_a_bad_browse_url_names_the_browse_variables_and_never_repeats_the_value(monkeypatch):
+    monkeypatch.setenv("VAICE_BROWSE_URL", "https://host/v1?key=fake-key-123")
+    try:
+        with pytest.raises(SystemExit, match="vaice: VAICE_BROWSE_URL: it must not contain credentials") as caught:
+            importlib.reload(config)
+        assert "VAICE_BROWSE_API_KEY" in str(caught.value) and "VAICE_BRAIN" not in str(caught.value)
+        assert "fake-key-123" not in str(caught.value)
+
+        monkeypatch.setenv("VAICE_BROWSE_URL", "http://host/v1/chat/completions")
+        with pytest.raises(SystemExit, match="VAICE_BROWSE_URL: give the base URL"):
+            importlib.reload(config)
+
+        monkeypatch.setenv("VAICE_BROWSE_URL", "ftp://host/v1")
+        with pytest.raises(SystemExit, match="VAICE_BROWSE_URL: expected an http"):
+            importlib.reload(config)
     finally:
         monkeypatch.undo()
         importlib.reload(config)
