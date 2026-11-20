@@ -1,6 +1,6 @@
 """The pure pieces of `browse` (`VAICE_BROWSE`): the skills the model sees, how a step that needs an approval is put
 into words, what a running task reports about itself, and how the answer becomes a tool output. The task itself
-(a thread, the outbox, the confirmations) lives in `responders/assistant.py`; the agent in `browse.py`.
+(a thread, the outbox, the confirmations) lives in `assistant.py`; the agent in `browse.py`.
 
 `browse(goal)` is a `background` skill: the call returns `WORKING` at once and the reply ends, the browser agent works
 on a thread of its own and says nothing more than a heads-up that a step needs the Run button until it has finished;
@@ -50,7 +50,7 @@ _MARKDOWN = re.compile(r"\*\*|__|`")
 
 def browse_skill(busy: Callable[[], bool] | None = None) -> Skill:
     """The definition the model sees. It is never `run`: `Skills.prepare` validates the call and the responder starts
-    the task (see `responders/assistant.py`). With `busy`, a call while it is true is refused with `BUSY` as its
+    the task (see `assistant.py`). With `busy`, a call while it is true is refused with `BUSY` as its
     result."""
 
     def start(args: dict) -> str:

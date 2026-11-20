@@ -30,7 +30,7 @@ Before opening a pull request, run both the test suite and Ruff:
 To run a single test file or filter by keyword:
 
 ```bash
-.venv/bin/pytest tests/test_llamacpp.py -k history
+.venv/bin/pytest tests/test_realtime.py -k history
 ```
 
 ### Code Style
@@ -39,10 +39,10 @@ To run a single test file or filter by keyword:
 
 ## Testing Guidelines & Architectural Gotchas
 
-Unit tests run completely offline without a real `llama-server` or microphone by using fakes (`tests/fake_realtime.py` and fake responders). When writing or modifying tests, keep these project-specific invariants in mind:
+Unit tests run completely offline without a real `llama-server` or microphone by using fakes (`tests/fake_realtime.py` and fake assistants). When writing or modifying tests, keep these project-specific invariants in mind:
 
 1. **Reproduce `fastrtc`'s thread-per-resume execution:**
-   `fastrtc` resumes the reply generator (`next(gen)`) on whichever worker thread is free for each audio chunk. Tests that exercise generator state or sockets across chunks use a fresh thread per `next()` call (`resume()` in `tests/test_app.py` and `tests/test_llamacpp.py`).
+   `fastrtc` resumes the reply generator (`next(gen)`) on whichever worker thread is free for each audio chunk. Tests that exercise generator state or sockets across chunks use a fresh thread per `next()` call (`resume()` in `tests/test_app.py` and `tests/test_realtime.py`).
 2. **Never let an exception escape the reply generator:**
    `fastrtc` wraps per-connection `emit()` calls in `webrtc_error_handler`; an uncaught exception kills the connection's audio task until the page is reloaded. `app.py` catches reply errors inside the generator, records them on the `Turn`, and surfaces them in the UI.
 3. **Daemon threads for `llama-server` WebSockets:**
@@ -50,7 +50,7 @@ Unit tests run completely offline without a real `llama-server` or microphone by
 4. **`InterruptSafeReplyOnPause` and `fastrtc` internals:**
    `src/vaice/interruptible.py` works around `fastrtc` 0.0.34 races and idle CPU polling. `tests/test_interruptible.py` tests against the real `ReplyOnPause` class and checks `ReplyOnPause.__init__`'s signature so any upstream `fastrtc` change fails loudly in tests.
 5. **Manual audio verification:**
-   When changing audio resampling (`audio.py`), WebSocket session handling (`responders/llamacpp.py`), or WebRTC stream setup (`app.py`, `interruptible.py`), verify the real audio path by running `vaice` against a live `llama-server` (`LiquidAI/LFM3-Audio-2B-GGUF`), speaking into the browser mic in Chrome (with headphones), and checking the `[llamacpp] time to first audio` log line.
+   When changing audio resampling (`audio.py`), WebSocket session handling (`realtime.py`), or WebRTC stream setup (`app.py`, `interruptible.py`), verify the real audio path by running `vaice` against a live `llama-server` (`LiquidAI/LFM3-Audio-2B-GGUF`), speaking into the browser mic in Chrome (with headphones), and checking the `[assistant] time to first audio` log line.
 6. **Live evals for model behavior:**
    `evals/` is a hand-run harness that measures how reliably spoken commands become the right tool call against a real `llama-server` (`.venv/bin/python evals/run.py`, with repeats). Use it before claiming anything about the model's behavior, a prompt change or a tool-set change, and quote the results with the build, model and quantization. CI does not run it; `tests/test_eval_scoring.py` covers its scoring logic and checks that `evals/cases.json` and `evals/tools.json` are consistent, so run it when you add a case. See [evals/README.md](evals/README.md).
 

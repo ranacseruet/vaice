@@ -41,7 +41,7 @@ When you see `Running on local URL: http://127.0.0.1:7860`:
 2. Put on **headphones** (otherwise speaker audio feeds back into the microphone).
 3. Allow microphone access, click **Record**, ask a question, and pause when done.
 
-For each reply, the terminal logs `[llamacpp] time to first audio: N.NNs` and `[llamacpp] reply finished in N.NNs`.
+For each reply, the terminal logs `[assistant] time to first audio: N.NNs` and `[assistant] reply finished in N.NNs`.
 
 ### Manual alternative: run `llama-server` yourself
 

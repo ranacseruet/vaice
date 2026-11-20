@@ -12,7 +12,7 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 
-# What responders receive as history: (role, text) with role "user" or "assistant"
+# What the assistant receives as history: (role, text) with role "user" or "assistant"
 Message = tuple[str, str]
 
 TRANSCRIPT_WAIT = 5.0  # seconds history() waits for the previous turn's transcript
@@ -20,7 +20,7 @@ INAUDIBLE = "(inaudible)"
 INTERRUPTED = " (interrupted)"
 _clock = time.monotonic  # when playback started/stopped; tests substitute a fake
 _VERSION = 1
-# The model-facing tool output was already compacted (responders/llamacpp `_speech_friendly`); what is recorded
+# The model-facing tool output was already compacted (realtime `_speech_friendly`); what is recorded
 # and shown in the UI's activity panel is stored capped, so a long file does not bloat the panel or
 # conversation.json. The cap is idempotent: re-applying it to an already-capped value changes nothing.
 TOOL_EVENT_OUTPUT_CHARS = 800
@@ -57,11 +57,11 @@ def write_json_atomically(path: Path, data) -> None:
 class Turn:
     """One exchange: what the user said, and the part of the reply that was played.
 
-    Thread-safe: responders, fastrtc's workers and the UI all touch it. Once closed (the next
+    Thread-safe: the assistant, fastrtc's workers and the UI all touch it. Once closed (the next
     turn started, or the reply finished) the assistant text is frozen, so a generator that
     fastrtc finalizes late can't change history.
 
-    Responders report the text of the audio they handed out, but handed out is not played: fastrtc
+    The assistant reports the text of the audio it handed out, but handed out is not played: fastrtc
     queues chunks for playback (an unbounded queue, so it can run ahead) and cuts playback only
     when the user's interrupting utterance ends. So when the next turn starts, close() also
     compares the time since the first audio with the audio handed out, and keeps only the share
@@ -78,7 +78,7 @@ class Turn:
         self.error = ""  # why the reply failed, for the UI only; never sent to the model
         self.interrupted = False
         self.complete = False
-        self.closed = threading.Event()  # responders poll this to stop generating
+        self.closed = threading.Event()  # the assistant polls this to stop generating
         self.transcribed = threading.Event()
         self._audio_started: float | None = None  # _clock() when the first audio went out
         self._audio_seconds = 0.0  # audio handed out so far
@@ -128,7 +128,7 @@ class Turn:
 
     def fail(self, message: str) -> None:
         """The reply failed. `message` is shown in the UI, never sent to the model; a transcript
-        the responder never reported counts as inaudible so the next turn's history doesn't wait."""
+        the assistant never reported counts as inaudible so the next turn's history doesn't wait."""
         with self._lock:
             try:
                 self.error = message
@@ -217,7 +217,7 @@ def _spoken(turn: Turn) -> str:
 def tool_activity_for_ui(turns: list[Turn], events: int = 10) -> str:
     """Markdown for the UI's collapsed tool-activity panel: the last `events` calls, oldest first.
 
-    The tool output was already compacted for the model (see `responders.llamacpp`), so it is short
+    The tool output was already compacted for the model (see `realtime`), so it is short
     enough to show; the arguments are the model's own JSON and can run long, so they are cut.
     Outputs are capped with an explicit marker as well (events from files written before the cap
     was added carry the full compacted text).

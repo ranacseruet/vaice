@@ -2,7 +2,7 @@
 
 Explicit only: a note is stored when the user asks to remember something (the `remember` skill) and nothing is
 extracted from what is said. The notes are read at the start of every reply and put into its instructions (see
-`responders/assistant.AssistantResponder`), so a note is model-written text that every later prompt carries: an
+`assistant.Assistant`), so a note is model-written text that every later prompt carries: an
 injection path that outlives the conversation. Hence `clean_note` (one line, no control characters or chat
 markers, a length cap), the cap on how many there are, and the skill being `direct_only` (see `skills.Skill`).
 

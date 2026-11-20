@@ -1,4 +1,4 @@
-"""A fake llama-server /v1/realtime endpoint, for the llamacpp backend's tests (no model involved).
+"""A fake llama-server /v1/realtime endpoint, for the realtime session's tests (no model involved).
 
 Speaks the events the real server does (session.created / session.updated, response.output_*.delta,
 response.done, the transcription events, error), records what the client sent, and plays a script

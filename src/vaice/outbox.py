@@ -30,14 +30,12 @@ from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 
-import numpy as np
+from vaice.audio import AudioFrame
 
 log = logging.getLogger(__name__)
 
 # No emit() for this long means no connection was draining the outbox: what was queued meanwhile is dropped
 STALE_SECONDS = 30.0
-
-AudioFrame = tuple[int, np.ndarray]
 
 
 @dataclass(frozen=True)

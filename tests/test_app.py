@@ -18,11 +18,11 @@ from threads import next_on_fresh_thread, run_on_thread
 from vaice import app, config, lifecycle, vision
 from vaice import conversation as conv
 from vaice.app import CHATBOT_HEIGHT, UI_TITLE, VIEW_REFRESH_SECONDS, build_stream, make_handler, parse_args
+from vaice.assistant import Assistant
 from vaice.confirm import Pending
 from vaice.conversation import Conversation
 from vaice.interruptible import InterruptSafeReplyOnPause
 from vaice.memory import Memory
-from vaice.responders.llamacpp import LlamaCppResponder
 from vaice.skills import Skills
 
 AUDIO = (48000, np.zeros((1, 480), dtype=np.int16))
@@ -53,8 +53,8 @@ def tick_fn(stream):
     return stream.ui.fns[tick["id"]].fn
 
 
-class FakeResponder:
-    """What `app` needs of an `AssistantResponder`: respond plus the outbox, panel and Stop hooks."""
+class StubAssistant:
+    """What `app` needs of an `Assistant`: respond plus the outbox, panel and Stop hooks."""
 
     name = "fake"
     memory = None
@@ -94,7 +94,7 @@ class FakeResponder:
 
 def test_each_reply_logs_which_backend_answered(caplog):
     with caplog.at_level(logging.INFO, logger="vaice.app"):
-        outputs = list(make_handler(FakeResponder(), Conversation())(AUDIO))
+        outputs = list(make_handler(StubAssistant(), Conversation())(AUDIO))
 
     assert len(outputs) == 2  # the audio chunk, then the transcript update
     assert "[fake] time to first audio" in caplog.text
@@ -103,7 +103,7 @@ def test_each_reply_logs_which_backend_answered(caplog):
 
 def test_finished_reply_completes_the_turn_and_sends_the_transcript_to_the_ui():
     conversation = Conversation()
-    *chunks, update = make_handler(FakeResponder(), conversation)(AUDIO)
+    *chunks, update = make_handler(StubAssistant(), conversation)(AUDIO)
 
     assert len(chunks) == 1
     assert isinstance(update, AdditionalOutputs)
@@ -115,7 +115,7 @@ def test_finished_reply_completes_the_turn_and_sends_the_transcript_to_the_ui():
 
 def test_replies_get_the_earlier_turns_as_history():
     conversation = Conversation()
-    responder = FakeResponder()
+    responder = StubAssistant()
     handler = make_handler(responder, conversation)
     list(handler(AUDIO))
     list(handler(AUDIO))
@@ -127,14 +127,14 @@ def test_replies_get_the_earlier_turns_as_history():
 
 def test_an_interrupted_reply_never_completes_its_turn():
     conversation = Conversation()
-    gen = make_handler(FakeResponder(), conversation)(AUDIO)
+    gen = make_handler(StubAssistant(), conversation)(AUDIO)
     next(gen)
     gen.close()
 
     assert not conversation._turns[0].complete
 
 
-class SentenceResponder:
+class SentenceAssistant:
     """Speaks its replies a sentence at a time, two chunks each, and records a sentence's text only
     after both chunks went out: a reply cut off mid-sentence keeps the sentences before it."""
 
@@ -160,7 +160,7 @@ class SentenceResponder:
 
 def barge_in_setup(tmp_path):
     replies = [["First one.", "Second one.", "Third one."], ["Fine."]]
-    responder = SentenceResponder(replies, ["question one", "question two"])
+    responder = SentenceAssistant(replies, ["question one", "question two"])
     conversation = Conversation(tmp_path / "conversation.json")
     return make_handler(responder, conversation), conversation, responder.histories
 
@@ -200,13 +200,13 @@ def test_barge_in_keeps_the_partial_reply_and_a_late_finalization_changes_nothin
     assert [t.complete for t in conversation._turns] == [False, True]
 
 
-def test_two_questions_through_the_app_and_the_llamacpp_backend(tmp_path, realtime):
+def test_two_questions_through_the_app_and_the_realtime_session(tmp_path, realtime):
     server = realtime(
         reply=[("text", "It is Paris."), ("audio", pcm(1, 2)), ("audio", pcm(3)), ("done",)],
         transcription=[("transcript", "What is the capital of France?")],
     )
     conversation = Conversation(tmp_path / "conversation.json")
-    handler = make_handler(LlamaCppResponder(server.url, "Be brief."), conversation)
+    handler = make_handler(Assistant(server.url, prompt="Be brief."), conversation)
 
     def ask(n):
         gen = handler(AUDIO)
@@ -247,7 +247,7 @@ def test_cli_takes_an_optional_up_command_and_nothing_else(capsys):
 
 def test_ui_has_the_transcript_a_reset_button_and_loads_the_stored_conversation():
     conversation = Conversation()
-    stream = build_stream(FakeResponder(), conversation)
+    stream = build_stream(StubAssistant(), conversation)
     config = stream.ui.get_config_file()
 
     (chatbot,) = [c for c in config["components"] if c["type"] == "chatbot"]
@@ -279,7 +279,7 @@ def one_component(components, type_name, place):
 
 
 def test_the_page_identifies_the_llama_server_service():
-    stream = build_stream(FakeResponder(), Conversation())
+    stream = build_stream(StubAssistant(), Conversation())
     config = stream.ui.get_config_file()
 
     title = one_component(config["components"], "html", "the heading")
@@ -291,7 +291,7 @@ def test_the_page_identifies_the_llama_server_service():
 
 
 def test_the_chatbot_is_taller_and_does_not_render_html_tags():
-    stream = build_stream(FakeResponder(), Conversation())
+    stream = build_stream(StubAssistant(), Conversation())
 
     chatbot = one_component(stream.ui.get_config_file()["components"], "chatbot", "the transcript")
     assert chatbot["props"]["height"] == CHATBOT_HEIGHT
@@ -301,7 +301,7 @@ def test_the_chatbot_is_taller_and_does_not_render_html_tags():
 
 def test_a_late_transcript_reaches_the_chatbot_after_the_reply_ran_out():
     conversation = Conversation()
-    stream = build_stream(FakeResponder(), conversation)
+    stream = build_stream(StubAssistant(), conversation)
     tick = tick_fn(stream)
 
     view, tools, *_, seen = tick("")  # the State starts blank, so the first tick shows the empty view once
@@ -317,7 +317,7 @@ def test_a_late_transcript_reaches_the_chatbot_after_the_reply_ran_out():
 
 def test_a_tool_round_fills_the_collapsed_tool_panel():
     conversation = Conversation()
-    stream = build_stream(FakeResponder(), conversation)
+    stream = build_stream(StubAssistant(), conversation)
     tick = tick_fn(stream)
 
     *_, seen = tick("")
@@ -335,7 +335,7 @@ def test_a_tool_round_fills_the_collapsed_tool_panel():
 
 def test_what_you_say_after_new_conversation_is_the_next_turn():
     conversation = Conversation()
-    stream = build_stream(FakeResponder(), conversation)
+    stream = build_stream(StubAssistant(), conversation)
 
     conversation.start_turn().set_user_text("said before the reset")
     button_fn(stream, "New conversation")()
@@ -346,20 +346,20 @@ def test_what_you_say_after_new_conversation_is_the_next_turn():
 
 
 def test_the_stream_drops_the_chunk_a_barge_in_leaves_in_flight():
-    stream = build_stream(FakeResponder(), Conversation())
+    stream = build_stream(StubAssistant(), Conversation())
 
     assert isinstance(stream.event_handler, InterruptSafeReplyOnPause)
     assert isinstance(stream.event_handler.copy(), InterruptSafeReplyOnPause)  # fastrtc copies it per connection
 
 
 def test_the_stream_wires_can_interrupt_from_the_config(monkeypatch):
-    stream = build_stream(FakeResponder(), Conversation())
+    stream = build_stream(StubAssistant(), Conversation())
     assert stream.event_handler.can_interrupt is config.CAN_INTERRUPT  # default: on
 
     monkeypatch.setenv("VAICE_CAN_INTERRUPT", "0")
     importlib.reload(config)
     try:
-        stream = build_stream(FakeResponder(), Conversation())
+        stream = build_stream(StubAssistant(), Conversation())
         assert stream.event_handler.can_interrupt is False
     finally:
         monkeypatch.undo()
@@ -367,7 +367,7 @@ def test_the_stream_wires_can_interrupt_from_the_config(monkeypatch):
 
 
 def test_the_reset_button_silences_a_playing_reply(tmp_path):
-    stream = build_stream(FakeResponder(), Conversation())
+    stream = build_stream(StubAssistant(), Conversation())
     stopped = []
 
     class PlayingReply:  # a per-connection handler copy, as fastrtc registers it
@@ -384,7 +384,7 @@ def test_the_reset_button_silences_a_playing_reply(tmp_path):
 
 
 def test_a_failed_reply_is_finished_not_marked_interrupted():
-    class Failing(FakeResponder):
+    class Failing(StubAssistant):
         def respond(self, audio, history, turn):
             turn.set_user_text("what was asked")
             turn.set_assistant_text("Half an")
@@ -410,7 +410,7 @@ def test_a_failed_reply_is_finished_not_marked_interrupted():
 
 
 def test_a_failed_reply_reports_a_transcript_the_responder_never_gave():
-    class Failing(FakeResponder):
+    class Failing(StubAssistant):
         def respond(self, audio, history, turn):
             raise ValueError("transcription exploded")
 
@@ -428,7 +428,7 @@ def test_a_failed_reply_reports_a_transcript_the_responder_never_gave():
 
 
 def test_a_failed_reply_is_logged_with_its_traceback(monkeypatch, caplog):
-    class Failing(FakeResponder):
+    class Failing(StubAssistant):
         def respond(self, audio, history, turn):
             raise RuntimeError("model blew up")
 
@@ -441,7 +441,7 @@ def test_a_failed_reply_is_logged_with_its_traceback(monkeypatch, caplog):
 
 
 def test_the_connection_survives_when_the_ui_update_itself_fails(monkeypatch, caplog):
-    class Failing(FakeResponder):
+    class Failing(StubAssistant):
         def respond(self, audio, history, turn):
             raise RuntimeError("llama-server fell over")
 
@@ -461,7 +461,7 @@ def test_the_connection_survives_when_the_ui_update_itself_fails(monkeypatch, ca
 
 
 def test_a_failure_that_cannot_be_recorded_still_shows_the_error_and_keeps_the_connection(monkeypatch, caplog):
-    class Failing(FakeResponder):
+    class Failing(StubAssistant):
         def respond(self, audio, history, turn):
             raise RuntimeError("llama-server fell over")
 
@@ -499,7 +499,7 @@ def test_a_failure_before_the_reply_starts_is_reported_in_the_ui_and_does_not_es
     monkeypatch.setattr(conversation, "start_turn", boom)
 
     with caplog.at_level(logging.ERROR, logger="vaice.app"):
-        outputs = list(make_handler(FakeResponder(), conversation)(AUDIO))
+        outputs = list(make_handler(StubAssistant(), conversation)(AUDIO))
 
     (update,) = outputs
     assert isinstance(update, AdditionalOutputs)
@@ -516,7 +516,7 @@ def test_a_failure_reading_the_history_is_recorded_on_the_turn(monkeypatch, capl
     monkeypatch.setattr(conversation, "history", boom)
 
     with caplog.at_level(logging.ERROR, logger="vaice.app"):
-        outputs = list(make_handler(FakeResponder(), conversation)(AUDIO))
+        outputs = list(make_handler(StubAssistant(), conversation)(AUDIO))
 
     (update,) = outputs
     assert isinstance(update, AdditionalOutputs)
@@ -538,7 +538,7 @@ def test_a_failure_finishing_the_turn_is_reported_in_the_ui(monkeypatch, caplog)
     conversation = Conversation()
 
     with caplog.at_level(logging.ERROR, logger="vaice.app"):
-        *chunks, update = make_handler(FakeResponder(), conversation)(AUDIO)
+        *chunks, update = make_handler(StubAssistant(), conversation)(AUDIO)
 
     assert len(chunks) == 1  # the audio that was handed out before the failure
     assert isinstance(update, AdditionalOutputs)
@@ -553,7 +553,7 @@ def test_a_failure_finishing_the_turn_is_reported_in_the_ui(monkeypatch, caplog)
 def test_a_reply_whose_audio_is_still_playing_when_the_next_turn_starts_is_cut_to_what_played(monkeypatch):
     clock = iter([100.0, 102.5])  # first audio at t=100, the next question at t=102.5
 
-    class TenSecondReply(FakeResponder):
+    class TenSecondReply(StubAssistant):
         def respond(self, audio, history, turn):
             turn.set_user_text("tell me a story")
             turn.set_assistant_text("one two three four five six seven eight")
@@ -569,7 +569,7 @@ def test_a_reply_whose_audio_is_still_playing_when_the_next_turn_starts_is_cut_t
 
 
 def test_main_installs_the_stop_handler_and_asks_the_app_to_stop_when_the_server_is_gone(monkeypatch, tmp_path):
-    """Ctrl+C must reach the responders, and the app must not wait for a stuck model call at exit."""
+    """Ctrl+C must reach the assistant, and the app must not wait for a stuck model call at exit."""
     previous = signal.getsignal(signal.SIGINT)
     launched = []
     startup = []
@@ -583,7 +583,7 @@ def test_main_installs_the_stop_handler_and_asks_the_app_to_stop_when_the_server
 
     monkeypatch.setattr(app, "parse_args", lambda: argparse.Namespace(command=None))
     monkeypatch.setattr(app, "check_server", lambda: startup.append("check"))
-    monkeypatch.setattr(app, "AssistantResponder", lambda **_: startup.append("construct") or FakeAssistant())
+    monkeypatch.setattr(app, "Assistant", lambda **_: startup.append("construct") or FakeAssistant())
     monkeypatch.setattr(app, "build_stream", lambda responder, conversation: FakeStream())
     monkeypatch.setattr(app.config, "CONVERSATION_FILE", tmp_path / "conversation.json")
 
@@ -594,7 +594,7 @@ def test_main_installs_the_stop_handler_and_asks_the_app_to_stop_when_the_server
         assert startup == ["check", "construct"]
         # pwa on, or the browser 404s on /manifest.json; plain vaice does not open the browser
         assert launched == [(app.config.PORT, True, False)]
-        assert lifecycle.stopping.is_set()  # the server is gone: the responders may give up
+        assert lifecycle.stopping.is_set()  # the server is gone: the assistant may give up
     finally:
         signal.signal(signal.SIGINT, previous)
         lifecycle.stopping.clear()
@@ -628,7 +628,7 @@ def _main_with(monkeypatch, tmp_path, conversation_file="default", command=None)
 
 
 def test_main_reports_a_keyboard_interrupt_and_still_requests_stop(monkeypatch, tmp_path, caplog):
-    """Ctrl+C while the server is loading: 'stopped' is logged and the responders are told to give up."""
+    """Ctrl+C while the server is loading: 'stopped' is logged and the assistant is told to give up."""
     monkeypatch.setattr(app, "parse_args", lambda: argparse.Namespace(command=None))
 
     def interrupt():
@@ -678,7 +678,7 @@ def test_vaice_up_ensures_the_server_before_the_startup_check_and_opens_the_brow
     monkeypatch.setattr(app, "ensure_server", lambda: events.append("ensure") or FakeManagedServer(events))
     monkeypatch.setattr(app, "parse_args", lambda: argparse.Namespace(command="up"))
     monkeypatch.setattr(app, "check_server", lambda: events.append("check"))
-    monkeypatch.setattr(app, "AssistantResponder", FakeAssistant)
+    monkeypatch.setattr(app, "Assistant", FakeAssistant)
     monkeypatch.setattr(app, "build_stream", lambda responder, conversation: _fake_stream_class(launched)())
     monkeypatch.setattr(app.config, "CONVERSATION_FILE", tmp_path / "conversation.json")
     previous = signal.getsignal(signal.SIGINT)
@@ -753,7 +753,7 @@ def test_vaice_up_exits_with_the_servers_message_and_starts_nothing_else(monkeyp
 
 
 class FakeAssistant:
-    """What `main()` builds in place of `AssistantResponder`, keeping what it was given."""
+    """What `main()` builds in place of `Assistant`, keeping what it was given."""
 
     name = "assistant"
     skills = SimpleNamespace(names=("disk_space", "battery_status"))  # the attribute main() reads
@@ -768,7 +768,7 @@ class FakeAssistant:
 @pytest.fixture(autouse=True)
 def fake_responder_class(monkeypatch):
     """`main()` builds a `FakeAssistant`: no test starts a real responder."""
-    monkeypatch.setattr(app, "AssistantResponder", FakeAssistant)
+    monkeypatch.setattr(app, "Assistant", FakeAssistant)
 
 
 def test_main_builds_the_assistant_responder_and_logs_its_skills(monkeypatch, tmp_path, caplog):
@@ -840,7 +840,7 @@ def test_without_a_vision_url_there_is_no_screen_skill_and_nothing_about_vision_
         monkeypatch, tmp_path, caplog):
     monkeypatch.setattr(app.config, "VISION_URL", "")
     built = []
-    monkeypatch.setattr(app, "AssistantResponder", lambda **kwargs: built.append(kwargs) or FakeAssistant(**kwargs))
+    monkeypatch.setattr(app, "Assistant", lambda **kwargs: built.append(kwargs) or FakeAssistant(**kwargs))
     with caplog.at_level(logging.DEBUG):
         assert _main_with(monkeypatch, tmp_path)
 
@@ -852,7 +852,7 @@ def test_without_a_vision_url_there_is_no_screen_skill_and_nothing_about_vision_
 def test_a_vision_model_on_this_machine_is_named_without_a_privacy_warning(monkeypatch, tmp_path, caplog, url):
     _vision(monkeypatch, url)
     built = []
-    monkeypatch.setattr(app, "AssistantResponder", lambda **kwargs: built.append(kwargs) or FakeAssistant(**kwargs))
+    monkeypatch.setattr(app, "Assistant", lambda **kwargs: built.append(kwargs) or FakeAssistant(**kwargs))
     with caplog.at_level(logging.DEBUG):
         assert _main_with(monkeypatch, tmp_path)
 
@@ -937,7 +937,7 @@ def test_without_an_mcp_config_nothing_is_started_and_nothing_about_it_is_logged
     monkeypatch.setattr(app.config, "MCP_CONFIG", None)
     monkeypatch.setattr(app.mcp_skills, "start", lambda *_: pytest.fail("MCP started without a config"))
     built = []
-    monkeypatch.setattr(app, "AssistantResponder", lambda **kwargs: built.append(kwargs) or FakeAssistant(**kwargs))
+    monkeypatch.setattr(app, "Assistant", lambda **kwargs: built.append(kwargs) or FakeAssistant(**kwargs))
     with caplog.at_level(logging.DEBUG):
         assert _main_with(monkeypatch, tmp_path)
 
@@ -949,7 +949,7 @@ def test_assistant_mode_starts_the_mcp_servers_gives_their_skills_to_the_respond
     _, started = _mcp(monkeypatch, tmp_path, fake=FakeMcp(summaries=[("notes", ["search_notes", "add_note"]),
                                                                         ("idle", [])]))
     built = []
-    monkeypatch.setattr(app, "AssistantResponder", lambda **kwargs: built.append(kwargs) or FakeAssistant(**kwargs))
+    monkeypatch.setattr(app, "Assistant", lambda **kwargs: built.append(kwargs) or FakeAssistant(**kwargs))
     with caplog.at_level(logging.INFO, logger="vaice.app"):
         assert _main_with(monkeypatch, tmp_path)
 
@@ -961,14 +961,14 @@ def test_assistant_mode_starts_the_mcp_servers_gives_their_skills_to_the_respond
 
 def test_the_mcp_servers_are_closed_when_the_app_ends_and_when_it_fails_to_start(monkeypatch, tmp_path):
     fake, _ = _mcp(monkeypatch, tmp_path)
-    monkeypatch.setattr(app, "AssistantResponder", FakeAssistant)
+    monkeypatch.setattr(app, "Assistant", FakeAssistant)
     assert _main_with(monkeypatch, tmp_path)
     assert fake.closed == 1
 
     def boom(**_):
         raise SystemExit("the responder could not be built")
 
-    monkeypatch.setattr(app, "AssistantResponder", boom)
+    monkeypatch.setattr(app, "Assistant", boom)
     with pytest.raises(SystemExit, match="could not be built"):
         _main_with(monkeypatch, tmp_path)
     assert fake.closed == 2  # started before the failure: still ended
@@ -982,14 +982,14 @@ def test_a_missing_mcp_package_stops_assistant_mode_with_the_install_hint(monkey
         _main_with(monkeypatch, tmp_path)
 
 
-# --- tool history reaches only the responders that ask for it
+# --- tool history reaches only the assistant when it asks for it
 
 
 # --- the confirmation panel
 
 
-class ConfirmingResponder(FakeResponder):
-    """A responder that asks for confirmation, as AssistantResponder does."""
+class ConfirmingAssistant(StubAssistant):
+    """A responder that asks for confirmation, as Assistant does."""
 
     def __init__(self):
         super().__init__()
@@ -1033,7 +1033,7 @@ SHOWN = {"visible": True, "__type__": "update"}
 
 
 def test_the_page_has_a_hidden_panel_with_run_and_cancel_above_the_tool_activity():
-    responder = ConfirmingResponder()
+    responder = ConfirmingAssistant()
     page = confirm_page(responder)
     components = page.config["components"]
 
@@ -1047,7 +1047,7 @@ def test_the_page_has_a_hidden_panel_with_run_and_cancel_above_the_tool_activity
 
 
 def test_the_panel_shows_the_question_and_exactly_what_will_run_and_is_drawn_once():
-    responder = ConfirmingResponder()
+    responder = ConfirmingAssistant()
     page = confirm_page(responder)
     *_, seen = page.tick("")  # the first tick draws the hidden panel
     request = waiting_request()
@@ -1105,7 +1105,7 @@ def test_a_request_with_no_view_hides_the_panel_and_its_row():
 
 
 def test_the_page_has_one_row_of_run_and_cancel():
-    page = confirm_page(ConfirmingResponder())
+    page = confirm_page(ConfirmingAssistant())
     components = {c["id"]: c for c in page.config["components"]}
 
     def rows(node):  # the page's layout tree: the labels of the buttons of every row, in order
@@ -1130,7 +1130,7 @@ def test_arguments_with_backticks_cannot_close_the_code_block():
 
 
 def test_run_and_cancel_pass_the_id_the_panel_showed_and_hide_it_and_redraw_on_the_next_tick():
-    responder = ConfirmingResponder()
+    responder = ConfirmingAssistant()
     page = confirm_page(responder)
     run, run_dep = page.clicks["Run"]
     cancel, _ = page.clicks["Cancel"]
@@ -1145,7 +1145,7 @@ def test_run_and_cancel_pass_the_id_the_panel_showed_and_hide_it_and_redraw_on_t
 
 
 def test_new_conversation_clears_a_waiting_request():
-    responder = ConfirmingResponder()
+    responder = ConfirmingAssistant()
     responder.waiting = waiting_request()
     page = confirm_page(responder)
 
@@ -1157,7 +1157,7 @@ def test_new_conversation_clears_a_waiting_request():
 # -- memory: the Memory panel and the startup line
 
 
-class MemoryResponder(FakeResponder):
+class MemoryAssistant(StubAssistant):
     """What `build_stream` finds on a responder with memory on: a `memory` holding the notes."""
 
     def __init__(self, memory):
@@ -1166,7 +1166,7 @@ class MemoryResponder(FakeResponder):
 
 
 def test_the_memory_panel_is_a_collapsed_accordion_under_the_tool_panel_when_memory_is_on():
-    stream = build_stream(MemoryResponder(Memory(None)), Conversation())
+    stream = build_stream(MemoryAssistant(Memory(None)), Conversation())
     config = stream.ui.get_config_file()
 
     labels = [c["props"]["label"] for c in config["components"] if c["type"] == "accordion"]
@@ -1176,7 +1176,7 @@ def test_the_memory_panel_is_a_collapsed_accordion_under_the_tool_panel_when_mem
 
 
 def test_without_memory_there_is_no_memory_panel():
-    stream = build_stream(FakeResponder(), Conversation())  # VAICE_MEMORY off: `memory` is None
+    stream = build_stream(StubAssistant(), Conversation())  # VAICE_MEMORY off: `memory` is None
     config = stream.ui.get_config_file()
 
     assert [c["props"]["label"] for c in config["components"] if c["type"] == "accordion"] == ["Tool activity"]
@@ -1185,7 +1185,7 @@ def test_without_memory_there_is_no_memory_panel():
 
 def test_the_timer_fills_the_memory_panel_when_the_notes_change_and_is_silent_otherwise():
     memory = Memory(None)
-    stream = build_stream(MemoryResponder(memory), Conversation())
+    stream = build_stream(MemoryAssistant(memory), Conversation())
     tick = tick_fn(stream)
     assert len(tick("")) == 9  # chatbot, tool panel, confirm x4, browse row, memory panel, seen
 
@@ -1206,7 +1206,7 @@ def test_new_conversation_leaves_the_notes_alone():
     memory = Memory(None)
     memory.add("The user parks on level three.")
     conversation = Conversation()
-    stream = build_stream(MemoryResponder(memory), conversation)
+    stream = build_stream(MemoryAssistant(memory), conversation)
     config = stream.ui.get_config_file()
     conversation.start_turn().set_user_text("hello")
 
@@ -1263,7 +1263,7 @@ def _memory_main(monkeypatch, tmp_path, notes=None, memory_file="default", on=Tr
     """main() with the real `_open_memory`; returns the `memory` the responder was given."""
     given = []
 
-    class Responder(FakeAssistant):
+    class Built(FakeAssistant):
         def __init__(self, memory=None, vision=None, extra_skills=(), browse=None):
             super().__init__(memory, vision)
             given.append(memory)
@@ -1273,7 +1273,7 @@ def _memory_main(monkeypatch, tmp_path, notes=None, memory_file="default", on=Tr
         path.write_text(json.dumps({"version": 1, "notes": notes}))
     monkeypatch.setattr(app.config, "MEMORY", on)
     monkeypatch.setattr(app.config, "MEMORY_FILE", path)
-    monkeypatch.setattr(app, "AssistantResponder", Responder)
+    monkeypatch.setattr(app, "Assistant", Built)
     assert _main_with(monkeypatch, tmp_path)
     return given[0]
 
@@ -1316,7 +1316,7 @@ def test_with_memory_off_the_responder_gets_no_memory_the_file_is_left_alone_and
 
 
 def test_the_responder_gets_the_outbox_the_handler_serves():
-    responder = FakeResponder()
+    responder = StubAssistant()
 
     stream = build_stream(responder, Conversation())
 
@@ -1497,8 +1497,8 @@ def test_the_stop_row_follows_whether_a_browser_task_runs():
     assert view(on[-1], True)[-2] == app.gr.skip()
 
 
-class BrowsingResponder(ConfirmingResponder):
-    """A responder with a browser task (the Stop button's two methods), as AssistantResponder has."""
+class BrowsingAssistant(ConfirmingAssistant):
+    """A responder with a browser task (the Stop button's two methods), as Assistant has."""
 
     def __init__(self):
         super().__init__()
@@ -1513,7 +1513,7 @@ class BrowsingResponder(ConfirmingResponder):
 
 
 def test_a_browser_task_shows_a_stop_button_that_ends_it_and_hides_at_once():
-    responder = BrowsingResponder()
+    responder = BrowsingAssistant()
     page = confirm_page(responder)
     components = {c["id"]: c for c in page.config["components"]}
     stop_fn, stop_click = page.clicks["Stop the browser task"]

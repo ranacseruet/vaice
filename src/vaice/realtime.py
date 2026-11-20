@@ -1,4 +1,4 @@
-"""llama.cpp backend: llama-server's own speech, streamed from its /v1/realtime WebSocket.
+"""The realtime session: llama-server's own speech, streamed from its /v1/realtime WebSocket.
 
 Every reply is one realtime session: the user's audio in, text and speech out, and the assistant's skills declared as
 tools that vaice runs (`_converse`). Speech with no reply in flight (what a Run click or a browser task has to say) is
@@ -20,10 +20,9 @@ from websockets.exceptions import ConnectionClosed, InvalidStatus, WebSocketExce
 from websockets.sync.client import ClientConnection, connect
 
 from vaice import config, lifecycle
-from vaice.audio import from_pcm16, to_pcm16
+from vaice.audio import AudioFrame, from_pcm16, to_pcm16
 from vaice.conversation import Message, Turn
 from vaice.outbox import Outbox
-from vaice.responders.base import AudioFrame, spoken_part
 
 log = logging.getLogger(__name__)
 
@@ -83,7 +82,7 @@ def _open(url: str, timeout: float) -> Iterator[ClientConnection]:
     try:
         yield ws
     finally:
-        threading.Thread(target=_close, args=(ws,), name="vaice-llamacpp-close", daemon=True).start()
+        threading.Thread(target=_close, args=(ws,), name="vaice-realtime-close", daemon=True).start()
 
 
 class _Session:
@@ -468,7 +467,7 @@ def _converse(
                         # the reply cannot stop itself: record it without the repeated tail and end
                         # it here (closing the socket cancels the generation and frees the slot)
                         acc[0] = trimmed
-                        log.warning("llamacpp reply fell into a repetition loop; cut it off after the answer")
+                        log.warning("realtime reply fell into a repetition loop; cut it off after the answer")
                         break
                 elif kind == "response.output_audio.delta":
                     frame = from_pcm16(base64.b64decode(event.get("delta", "")))
@@ -481,7 +480,7 @@ def _converse(
                     trimmed = _loop_trimmed(acc[0], final=True)
                     if trimmed is not None:  # the repeated tail only completed in the last line
                         acc[0] = trimmed
-                        log.warning("llamacpp reply fell into a repetition loop; cut it off after the answer")
+                        log.warning("realtime reply fell into a repetition loop; cut it off after the answer")
                     had_calls = bool(calls)
                     _check_done(event, acc[1], max_output_tokens, had_calls)
                     if not calls or executor is None:
@@ -489,7 +488,7 @@ def _converse(
                     if rounds >= MAX_TOOL_ROUNDS:
                         # the last response was forced with tool_choice "none"; a call that still
                         # arrived is not executed, or the model could keep the loop alive forever
-                        log.warning("llamacpp ignored a tool call in the forced final round (%s)", calls[0].name)
+                        log.warning("realtime ignored a tool call in the forced final round (%s)", calls[0].name)
                         break
                     # the model asked for tools: run them, feed the results back, and let it speak them
                     rounds += 1
@@ -503,7 +502,7 @@ def _converse(
                     stripper = _MarkupStripper()
                     out.put(_ROUND)
                     for call in calls:
-                        log.info("llamacpp tool call %s(%s)", call.name, call.arguments)
+                        log.info("realtime tool call %s(%s)", call.name, call.arguments)
                         if stop():
                             raise _Stopped
                         output = _speech_friendly(executor(call.name, call.arguments))
@@ -530,7 +529,7 @@ def _check_done(event: dict, samples: int, max_output_tokens: int, had_calls: bo
     # A reply that hits max_output_tokens still reports "completed"; the usage is what gives it away
     tokens = (response.get("usage") or {}).get("output_tokens")
     if isinstance(tokens, int) and tokens >= max_output_tokens:
-        log.warning("llamacpp reply hit the %d-token limit and was cut off", max_output_tokens)
+        log.warning("realtime reply hit the %d-token limit and was cut off", max_output_tokens)
     if not samples and not had_calls:
         # a tool-call response has no audio by design; the answer comes after the tool result
         log.warning("llama-server's reply had no audio (is the model one with audio output?)")
@@ -624,7 +623,7 @@ def _instructions(prompt: str, history: Sequence[Message], context: str = "") ->
     return text
 
 
-class LlamaCppResponder:
+class RealtimeResponder:
     """Streams the reply of an audio-output model on llama-server (LFM3-Omni, LFM3-Audio) over /v1/realtime.
 
     Each reply is a fresh realtime session on a daemon thread of its own, which hands the audio to the
@@ -636,8 +635,6 @@ class LlamaCppResponder:
     reply's executor, which runs the calls on the session thread and carries that reply's stop signal. `prompt_extra()`
     is text appended to the prompt at the start of every reply (the user's notes).
     """
-
-    name = "llamacpp"
 
     def __init__(
         self,
@@ -666,7 +663,7 @@ class LlamaCppResponder:
         threading.Thread(
             target=_transcribe_into,
             args=(self._url, self._timeout, audio, turn),
-            name="vaice-llamacpp-asr",
+            name="vaice-realtime-asr",
             daemon=True,
         ).start()
         chunks: queue.Queue = queue.Queue()
@@ -684,7 +681,7 @@ class LlamaCppResponder:
             target=_converse,
             args=(self._url, self._timeout, _instructions(prompt, history, context), audio, chunks, cancelled,
                   self._max_output_tokens, self._tools, executor),
-            name="vaice-llamacpp",
+            name="vaice-realtime",
             daemon=True,
         ).start()
         handed_out = 0
@@ -850,7 +847,7 @@ def check_server(url: str = config.LLAMACPP_URL) -> None:
     if not speaks:
         raise RuntimeError(
             f"the model on llama-server at {url} ({', '.join(names) or 'none listed'}) does not output audio; "
-            "the llamacpp backend needs an audio-output model such as LiquidAI/LFM3-Omni-2B-GGUF"
+            "vaice needs an audio-output model such as LiquidAI/LFM3-Omni-2B-GGUF"
         )
     _probe_realtime(url, unavailable)
     _warn_text_temperature(url)
@@ -874,7 +871,7 @@ def _probe_realtime(url: str, unavailable: Callable[[str], None]) -> None:
             # The server answered "no such endpoint": permanent, no wait fixes it.
             raise RuntimeError(
                 f"llama-server at {url} does not serve {ws_url} (handshake returned {status}); "
-                "the llamacpp backend needs a server with the realtime endpoint"
+                "vaice needs a server with the realtime endpoint"
             ) from exc
         # A 429/5xx/3xx from the server or a proxy in front of it is transient —
         # treat it like the other startup checks: warn and let the server recover
@@ -885,3 +882,22 @@ def _probe_realtime(url: str, unavailable: Callable[[str], None]) -> None:
         unavailable(f"the realtime endpoint at {ws_url} did not accept a connection ({type(exc).__name__}: {exc})")
         return
     connection.close()
+
+
+def spoken_part(text: str, total: int, handed_out: int) -> str:
+    """The words of `text` that the first `handed_out` of `total` units of audio cover (approximate).
+
+    The model writes its text about twice as fast as speaking speed, so the text is
+    often complete after the first second of audio. Taking the text generated so far would record a
+    whole reply that was cut off early; split it by the share of audio handed out instead. The units
+    (frames, samples) are the caller's; `total` is the audio generated so far, not the final length.
+    """
+    if not total:  # text-only reply: nothing was said
+        return ""
+    if handed_out >= total:
+        return text
+    words = text.split()
+    # truncate, don't round: the same conservative estimate as Turn.close(), which floors and keeps
+    # at least one word because some audio played — words the user had no time to hear stay uncounted
+    keep = max(1, int(len(words) * handed_out / total)) if handed_out else 0
+    return " ".join(words[:keep])
