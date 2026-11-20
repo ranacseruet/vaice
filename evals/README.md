@@ -80,6 +80,39 @@ Options: `--goal TEXT` (repeatable; replaces the built-in goals), `--repeats N` 
 
 It measures whether the agent finishes a research task and how (tools, pages, time); it does not grade whether the answer is right, read that yourself. Results are per agent, model and build and vary run to run: quote `k/N` answered over repeats with the label, never a single run.
 
+## Browser task, end to end
+
+`run.py --browse` scores whether the voice model calls `browse`, and `browse_live.py` the browser agent; neither shows what the user gets around them. `browse_flow.py` runs a whole browser task as the user experiences it, with the real voice model (llama-server `/v1/realtime`) and a **fake browser agent that replays recorded real answers** (`browse_answers.json`: the six full answers of two live `browse_live.py` runs, Pi 1.5.2 with a local model, each starting with the agent's own narration before its report). So it measures vaice and the voice model, not the browser agent (that is `browse_live.py`). It needs only llama-server: no browser, Pi, network or browse model.
+
+```bash
+.venv/bin/python evals/browse_flow.py --cases coffee-real --repeats 1   # a quick check
+.venv/bin/python evals/browse_flow.py --label Q8_0                      # all 8 cases, 3 repeats
+```
+
+Options: `--url`, `--cases id,id`, `--repeats N` (default 3), `--task-seconds S` (how long the fake task takes, default 8), `--vision` (also offer the stubbed `look_at_screen`, as the app does with vision on), `--prompt TEXT`, `--label TEXT` and `--out FILE` (default `evals/results/browse-flow-<UTC timestamp>.json`, gitignored).
+
+Each run is the app's own wiring: an `Assistant` with a browser agent (so `_start_browse`, the task thread, the real busy check, `browser_status`, `stop_browsing` and the outcome speech are the app's code) over the stub skills of `run.py` (nothing runs on this machine), a `Conversation` whose turns and history are made as `app.make_handler` makes them, and an `Outbox` drained by a thread that does what the idle `emit()` does (paced by the same lead, serving nothing while a reply is in flight; frames are counted, nothing is played). The sequence: the request (spoken by `say`, or a recording named `<case id>.wav`; the follow-up's recording is `<case id>-followup.wav`), the task, then the follow-up, asked while the fake task still runs (`"when": "running"`: the task is held open until the follow-up's reply is over) or after the outcome was spoken and recorded (`"finished"`). Afterwards the run stops any task and joins its threads.
+
+A case file entry is `{"id", "say", "fixture", "followup": {"say", "when"}}` (`browse_flow_cases.json`); a fixture is `{"id", "goal", "answer", "keywords"}`, where `keywords` are two to four names from the report part of the answer (products, missions) that any summary should keep.
+
+Recorded per run, raw data first (so a number can be traced): the start reply's calls, text, time to first audio and audio seconds; the outcome speech's text and the seconds from the task's end to its first audio; the chat as the UI would show it (`ui`) and every turn with its tool events; the follow-up's calls, text and timings; the fake agent's run count and goals; the errors. On top, per run:
+
+| flag | meaning |
+|---|---|
+| `start_browse` | the request's reply called `browse` |
+| `start_invented` | the start text is over 120 characters, or it names a fixture keyword before the task returned (the reply made up findings) |
+| `outcome_spoken` | an outcome was recorded on the asking turn |
+| `outcome_named` | the outcome names a fixture keyword (case ignored): it says what was found |
+| `outcome_narration` | the outcome matches self-narration (`compil`, `let me`, `I now have`, `I have gathered`, `final answer`) |
+| `chat_report` | the chat holds a whole keyword-bearing line of the report body: the report itself, not a spoken summary |
+| `followup_rebrowse` | the follow-up called `browse` again, or the fake agent ran more than once |
+| `followup_status` | the follow-up called `browser_status` |
+| `followup_named` | the follow-up's answer names a fixture keyword |
+
+plus `start_extra_chars`. The summary prints `k/N` per flag per case and overall (N counts the runs where the flag applies: no follow-up after a failed start, no `outcome_narration` without an outcome), and the medians of the start length and of the first-audio times.
+
+The heuristics are crude: the length threshold and the keyword test only say that a start reply said more than "I'll look into it", not that what it said is wrong; `outcome_named` passes a reply that names a product and still garbles it; the narration pattern can miss a rewording, and fires on a legitimate "let me know"; `chat_report` wants an exact line, so a report shown reformatted fails it. A narrow case (`k/N` of 3) is a lead, not a measurement: read the failing runs' `start`, `outcome` and `followup` texts in the results before quoting a number, with the label and server info. The recorded answers come from one agent and model; they are the test input, not a claim about other agents.
+
 ## Cases
 
 A case file is a list of `{"id", "say", "expect"}`, plus an optional `"history"`: a list of `["user" | "assistant", text]` earlier turns that replaces the default history for that case (also under `--no-history`), for a follow-up that only makes sense after an earlier answer (`vision-look-again`: "what do you see now?" after a screen answer). History carries the spoken words only: the app does not replay tool results. `expect` is one of:

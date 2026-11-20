@@ -14,6 +14,7 @@ import sys
 import tempfile
 import time
 import wave
+from collections.abc import Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -26,7 +27,7 @@ from vaice import browse_task, config
 from vaice.assistant import Assistant
 from vaice.conversation import WAITING_FOR_CONFIRMATION, Turn
 from vaice.memory import Memory
-from vaice.skills import SkillResult, Skills, default_skills
+from vaice.skills import Skill, SkillResult, Skills, default_skills
 from vaice.vision import VisionClient, vision_skill
 
 HERE = Path(__file__).parent
@@ -134,7 +135,7 @@ def audio_for(case: dict, scratch: Path) -> tuple[int, np.ndarray]:
 
 
 def stub_skills(shell: bool = False, memory: Memory | None = None, vision: bool = False,
-                browse: bool = False) -> Skills:
+                browse: bool = False, browse_control: Sequence[Skill] | None = None) -> Skills:
     """The real skills' definitions with canned results: the model sees what the app offers, and nothing
     runs on this machine (the stubs replace each skill's `run`, and `run_stoppable` is dropped so the real
     command runner cannot be reached; Skills.run still checks the arguments). A `confirm` skill's `ask` is
@@ -142,7 +143,8 @@ def stub_skills(shell: bool = False, memory: Memory | None = None, vision: bool 
     `vision` adds `look_at_screen` (its stub answers from `VISION_STUBS`: no screenshot is taken, nothing is sent),
     `browse` adds `browse` (the real definition: it is a background skill that only validates its goal here, so no
     browser task is started and nothing is run) and the two that ask about and end it, `browser_status` and
-    `stop_browsing` (their stubs answer with a fixed text).
+    `stop_browsing` (their stubs answer with a fixed text; `browse_control` replaces those three with the caller's
+    own, as `browse_flow.py` does to wire in the real assistant's busy check, status and stop).
 
     `memory` adds the memory skills, which stay real: they only touch that store, which must be in memory only
     (no path), so an eval can never read or write the app's own `memory.json`."""
@@ -152,8 +154,9 @@ def stub_skills(shell: bool = False, memory: Memory | None = None, vision: bool 
     # the real definition, over a client that is never used: the stub replaces the skill's `run`
     screen = vision_skill(VisionClient("http://stub.invalid/v1", 1), "stub") if vision else None
     # the real definitions of `browse`, `browser_status` and `stop_browsing`; the last two answer with a fixed text
-    control = browse_task.browse_skills(busy=None, status=lambda: SkillResult(BROWSER_STATUS_STUB),
-                                        stop=lambda: SkillResult(browse_task.STOPPED)) if browse else ()
+    control = (browse_control if browse_control is not None else
+               browse_task.browse_skills(busy=None, status=lambda: SkillResult(BROWSER_STATUS_STUB),
+                                         stop=lambda: SkillResult(browse_task.STOPPED))) if browse else ()
     return Skills([
         skill if skill.name not in answers and skill.name not in SKILL_STUBS else
         replace(skill, run_stoppable=None,

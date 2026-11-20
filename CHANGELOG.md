@@ -35,7 +35,9 @@ the pull requests (#53 to #126).
 - **`vaice up`**: one command that starts `llama-server` when none is running and opens the UI (#89).
 - **A live eval** (`evals/run.py`) that measures how reliably spoken requests become the right skill call, with repeats
   (#88); research requests in `evals/browse_cases.json`, and `evals/browse_live.py`, an opt-in check that the browser
-  agent finishes research tasks with the configured model (headless, muted, never in CI).
+  agent finishes research tasks with the configured model (headless, muted, never in CI); `evals/browse_flow.py`,
+  which scores a whole browser task as the user hears it (the start reply, the spoken outcome, the chat, a follow-up)
+  with a fake agent that replays recorded answers.
 - The *Tool activity* panel (#55); the current date and time in every reply's instructions (#78); a loop breaker that
   cuts a reply repeating itself (#78); a `/v1/realtime` probe and a temperature warning at startup (#47, #74, #81).
 - Settings: `VAICE_VAD_THRESHOLD`, `VAICE_VAD_MIN_SILENCE_MS`, `VAICE_VAD_SPEECH_PAD_MS`, `VAICE_CAN_INTERRUPT` (#49),

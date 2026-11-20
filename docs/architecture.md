@@ -197,6 +197,7 @@ tests/
 evals/
   run.py            Live tool-calling eval against a real llama-server (run by hand; see evals/README.md)
   scoring.py        Pure scoring and aggregation for the eval (unit-tested)
+  browse_flow.py    Live eval of a whole browser task (request, outcome, chat, follow-up) with a fake agent replaying recorded answers: `browse_answers.json`, `browse_flow_cases.json`
   cases.json        Spoken questions and expected skills (memory ones carry `notes`)
   shell_cases.json, vision_cases.json, browse_cases.json  The same for the opt-in skills (`--shell`, `--vision`, `--browse`)
   recordings/       Optional real-mic clips, <case id>.wav
