@@ -400,13 +400,15 @@ def _open_memory() -> Memory | None:
 
 def _open_browse() -> PiAgent | None:
     """Assistant mode: the browser agent for the `browse` skill (None when VAICE_BROWSE is off, or when it cannot be
-    used: the reason is a warning, and the skill is then not offered). Needs the helper brain's endpoint (Pi uses it,
-    with its key, which goes to the child's environment only and is never logged) and the `pi` command, which the
-    user installs: its presence and version are checked, nothing is installed."""
+    used: the reason is a warning, and the skill is then not offered). Needs its own endpoint (VAICE_BROWSE_URL, apart
+    from the helper brain: Pi uses that, with its key, which goes to the child's environment only and is never
+    logged) and the `pi` command, which the user installs: its presence and version are checked, nothing is
+    installed."""
     if config.BROWSE == "off":
         return None
-    if not config.BRAIN_URL:
-        log.warning("VAICE_BROWSE needs VAICE_BRAIN_URL (the browser agent uses that endpoint): browse is not offered")
+    if not config.BROWSE_URL:
+        log.warning("VAICE_BROWSE needs VAICE_BROWSE_URL (the browser agent has an endpoint of its own): "
+                    "browse is not offered")
         return None
     if shutil.which("pi") is None:
         log.warning("VAICE_BROWSE=pi, but the `pi` command is not on PATH (install the Pi coding agent, "
@@ -426,22 +428,23 @@ def _open_browse() -> PiAgent | None:
     if config.BROWSE_HEADLESS:
         args.append("--headless")
     try:
-        write_pi_home(base / "pi", base_url=config.BRAIN_URL, model=config.BRAIN_MODEL,
-                      api_key_env=API_KEY_ENV if config.BRAIN_API_KEY else None, browser_args=args)
+        write_pi_home(base / "pi", base_url=config.BROWSE_URL, model=config.BROWSE_MODEL,
+                      api_key_env=API_KEY_ENV if config.BROWSE_API_KEY else None, browser_args=args)
     except OSError as exc:
         log.warning("could not write the browser agent's configuration under %s (%s): browse is not offered", base,
                     type(exc).__name__)
         return None
-    if not config.BRAIN_MODEL:
-        log.warning("VAICE_BRAIN_MODEL is empty: the browser agent needs a model name")
-    log.info("browse: Pi in %s, browser profile %s, %s window, up to %g s a task", base / "pi", profile,
+    if not config.BROWSE_MODEL:
+        log.warning("VAICE_BROWSE_MODEL is empty: the browser agent needs a model name")
+    log.info("browse: Pi in %s with %s, model %s, browser profile %s, %s window, up to %g s a task", base / "pi",
+             urlsplit(config.BROWSE_URL).netloc, config.BROWSE_MODEL or "(none set)", profile,
              "no" if config.BROWSE_HEADLESS else "a visible", config.BROWSE_SECONDS)
     ungated = config.BROWSE_CONFIRM == "off"
-    log.warning("browse: pages' text and what the browser agent does go to the brain at %s; %s",
-                urlsplit(config.BRAIN_URL).netloc,
+    log.warning("browse: pages' text and what the browser agent does go to %s; %s",
+                urlsplit(config.BROWSE_URL).netloc,
                 "VAICE_BROWSE_CONFIRM=off: the agent clicks, types and submits forms without asking" if ungated else
                 "a step that changes a page needs a spoken yes or the Run button, but navigation and reading do not")
-    env = {API_KEY_ENV: config.BRAIN_API_KEY} if config.BRAIN_API_KEY else None
+    env = {API_KEY_ENV: config.BROWSE_API_KEY} if config.BROWSE_API_KEY else None
     return PiAgent(base / "pi", log_path=base / "pi.log", env=env,
                    ask_timeout_s=CONFIRM_SECONDS + BROWSE_ASK_EXTRA_SECONDS, chrome_profile=profile,
                    gate_policy=UNGATED_POLICY if ungated else GATE_POLICY)

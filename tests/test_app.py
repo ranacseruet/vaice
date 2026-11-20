@@ -1685,6 +1685,7 @@ def test_a_responder_without_attach_outbox_gets_a_stream_without_one():
 # -- the browse skill (VAICE_BROWSE)
 
 BRAIN_KEY = "sk-fake-brain-key-123"
+BROWSE_KEY = "sk-fake-browse-key-456"
 
 
 class FakePiAgent:
@@ -1701,12 +1702,15 @@ class FakePiAgent:
 
 @pytest.fixture
 def browse_on(monkeypatch, tmp_path):
-    """VAICE_BROWSE=pi with a brain, a `pi` that is found and prints 1.5.2, and PiAgent faked."""
+    """VAICE_BROWSE=pi with an endpoint of its own and no helper brain, a `pi` that is found and prints 1.5.2, and
+    PiAgent faked."""
     FakePiAgent.made, FakePiAgent.closed = [], 0
     monkeypatch.setattr(app.config, "BROWSE", "pi")
-    monkeypatch.setattr(app.config, "BRAIN_URL", "https://llm.example.com/v1")
-    monkeypatch.setattr(app.config, "BRAIN_MODEL", "some-model")
-    monkeypatch.setattr(app.config, "BRAIN_API_KEY", BRAIN_KEY)
+    monkeypatch.setattr(app.config, "BROWSE_URL", "https://llm.example.com/v1")
+    monkeypatch.setattr(app.config, "BROWSE_MODEL", "some-model")
+    monkeypatch.setattr(app.config, "BROWSE_API_KEY", BROWSE_KEY)
+    for name in ("BRAIN_URL", "BRAIN_MODEL", "BRAIN_API_KEY"):
+        monkeypatch.setattr(app.config, name, "")
     monkeypatch.setattr(app.config, "BROWSE_HEADLESS", False)
     monkeypatch.setattr(app.config, "BROWSE_CONFIRM", "ask")
     monkeypatch.setattr(app.shutil, "which", lambda name: "/usr/bin/pi")
@@ -1723,10 +1727,10 @@ def test_browse_is_off_by_default_and_builds_nothing(monkeypatch):
 
 
 @pytest.mark.parametrize(("setting", "value", "warning"), [
-    (app.config, ("BRAIN_URL", ""), "needs VAICE_BRAIN_URL"),
+    (app.config, ("BROWSE_URL", ""), "needs VAICE_BROWSE_URL"),
     (app.shutil, ("which", lambda name: None), "not on PATH"),
     (app, ("pi_version", lambda: (1, 5, 1)), "is version 1.5.1, browse needs 1.5.2")])
-def test_browse_needs_the_brain_the_pi_command_and_a_recent_enough_version(browse_on, monkeypatch, caplog, setting,
+def test_browse_needs_its_endpoint_the_pi_command_and_a_recent_enough_version(browse_on, monkeypatch, caplog, setting,
                                                                          value, warning):
     monkeypatch.setattr(setting, *value)
 
@@ -1752,7 +1756,7 @@ def test_browse_writes_pi_home_under_the_data_dir_and_gives_the_key_to_the_child
 
     base = tmp_path / "data" / "browse"
     assert agent.pi_home == base / "pi" and agent.kwargs["log_path"] == base / "pi.log"
-    assert agent.kwargs["env"] == {"VAICE_PI_API_KEY": BRAIN_KEY}  # the child's environment, nowhere else
+    assert agent.kwargs["env"] == {"VAICE_PI_API_KEY": BROWSE_KEY}  # the child's environment, nowhere else
     assert agent.kwargs["chrome_profile"] == base / "chrome-profile"
     assert agent.kwargs["ask_timeout_s"] == app.CONFIRM_SECONDS + app.BROWSE_ASK_EXTRA_SECONDS
     mcp = json.loads((base / "pi" / "mcp.json").read_text())["mcpServers"]["chrome"]["args"]
@@ -1760,8 +1764,51 @@ def test_browse_writes_pi_home_under_the_data_dir_and_gives_the_key_to_the_child
     models = json.loads((base / "pi" / "models.json").read_text())["providers"]["vaice"]
     assert models["baseUrl"] == "https://llm.example.com/v1" and models["apiKey"] == "$VAICE_PI_API_KEY"
     for path in (base / "pi").rglob("*"):  # the key is in no file and no log line
-        assert not path.is_file() or BRAIN_KEY not in path.read_text()
-    assert BRAIN_KEY not in caplog.text and "llm.example.com" in caplog.text
+        assert not path.is_file() or BROWSE_KEY not in path.read_text()
+    assert BROWSE_KEY not in caplog.text and "llm.example.com" in caplog.text and "some-model" in caplog.text
+    assert models["models"][0]["id"] == "some-model"
+
+
+def test_browse_needs_no_helper_brain_and_ignores_the_brain_settings_even_when_they_are_set(browse_on, monkeypatch,
+                                                                                         tmp_path, caplog):
+    assert app.config.BRAIN_URL == ""  # the fixture has no helper brain, and browse is still offered
+    assert isinstance(app._open_browse(), FakePiAgent)
+
+    monkeypatch.setattr(app.config, "BRAIN_URL", "https://brain.example.net/v1")
+    monkeypatch.setattr(app.config, "BRAIN_MODEL", "brain-model")
+    monkeypatch.setattr(app.config, "BRAIN_API_KEY", BRAIN_KEY)
+    with caplog.at_level(logging.INFO, logger="vaice.app"):
+        agent = app._open_browse()
+
+    assert agent.kwargs["env"] == {"VAICE_PI_API_KEY": BROWSE_KEY}  # never the brain's key
+    base = tmp_path / "data" / "browse" / "pi"
+    models = json.loads((base / "models.json").read_text())["providers"]["vaice"]
+    assert models["baseUrl"] == "https://llm.example.com/v1" and models["models"][0]["id"] == "some-model"
+    for path in base.rglob("*"):
+        assert not path.is_file() or (BRAIN_KEY not in path.read_text() and "brain.example.net" not in path.read_text())
+    assert BRAIN_KEY not in caplog.text and BROWSE_KEY not in caplog.text and "brain.example.net" not in caplog.text
+
+
+def test_browse_is_not_offered_without_its_own_url_even_when_a_helper_brain_is_set(browse_on, monkeypatch, caplog):
+    monkeypatch.setattr(app.config, "BROWSE_URL", "")
+    monkeypatch.setattr(app.config, "BRAIN_URL", "https://brain.example.net/v1")
+    monkeypatch.setattr(app.config, "BRAIN_API_KEY", BRAIN_KEY)
+
+    with caplog.at_level(logging.WARNING, logger="vaice.app"):
+        assert app._open_browse() is None
+
+    assert "needs VAICE_BROWSE_URL" in caplog.text and "browse is not offered" in caplog.text
+    assert FakePiAgent.made == [] and BRAIN_KEY not in caplog.text
+
+
+def test_an_empty_browse_model_warns_naming_the_browse_variable(browse_on, monkeypatch, caplog):
+    monkeypatch.setattr(app.config, "BROWSE_MODEL", "")
+    monkeypatch.setattr(app.config, "BRAIN_MODEL", "brain-model")
+
+    with caplog.at_level(logging.WARNING, logger="vaice.app"):
+        assert isinstance(app._open_browse(), FakePiAgent)
+
+    assert "VAICE_BROWSE_MODEL is empty" in caplog.text and "VAICE_BRAIN_MODEL" not in caplog.text
 
 
 def test_browse_asks_for_page_changing_steps_unless_the_user_turned_that_off(browse_on, monkeypatch, caplog):
@@ -1777,7 +1824,8 @@ def test_browse_asks_for_page_changing_steps_unless_the_user_turned_that_off(bro
 
 def test_headless_adds_the_flag_and_no_key_means_no_environment(browse_on, monkeypatch, tmp_path):
     monkeypatch.setattr(app.config, "BROWSE_HEADLESS", True)
-    monkeypatch.setattr(app.config, "BRAIN_API_KEY", "")
+    monkeypatch.setattr(app.config, "BROWSE_API_KEY", "")
+    monkeypatch.setattr(app.config, "BRAIN_API_KEY", BRAIN_KEY)  # a brain key is never a fallback
 
     agent = app._open_browse()
 
