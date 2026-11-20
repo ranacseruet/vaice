@@ -690,3 +690,85 @@ def test_a_click_cannot_answer_a_step_twice(realtime):
 
     assert results.count("go ahead") == 1 and results.count(None) == 1
     wait_until(browse_over)
+
+
+# -- "New conversation" while a reply is still preparing a call, and one utterance at a time
+
+
+def test_new_conversation_while_a_confirm_call_is_prepared_leaves_no_request(realtime):
+    preparing, release, ran = threading.Event(), threading.Event(), []
+
+    def question(args):  # `quit_app` asks `lsappinfo` here; the user starts over meanwhile
+        preparing.set()
+        release.wait(5)
+        return "Shall I quit Safari?"
+
+    name = {"type": "object", "properties": {"name": {"type": "string"}}}
+    skills = Skills([Skill("quit_app", "Quit an app.", name, lambda args: ran.append(args) or SkillResult("quit"),
+                           kind="confirm", ask=question)])
+    server = realtime(reply=calls_then_speech(QUIT))
+    resp = assistant_over(server, skills)
+    turn = Turn()
+    reply = threading.Thread(target=drive, args=(resp, turn), daemon=True)
+    reply.start()
+    assert preparing.wait(3)
+
+    resp.clear_pending()  # "New conversation"
+    release.set()
+    reply.join(5)
+
+    assert resp.pending() is None and ran == []
+    assert outputs(sessions(server)[0]) == [assistant.DROPPED]
+    assert tool_events(turn) == [("quit_app", assistant.DROPPED)]
+
+
+def test_a_browser_task_or_step_from_before_new_conversation_never_starts_or_asks(realtime):
+    server = realtime(reply=SPEECH)
+    agent = FakeAgent(answers)
+    resp = assistant_over(server, None, browse=agent)
+    BROWSERS.append(resp)
+    began = resp._confirmations.epoch
+
+    resp.clear_pending()
+    resp._start_browse(Turn(), "browse", GOAL, began)
+
+    assert not resp.browsing() and not agent.entered.wait(0.2)
+    hooks = assistant._BrowseHooks(resp._confirmations, lambda request: None, browse_task.BrowseStatus("goal"),
+                                   lambda: False, began)
+    assert hooks.ask(*CLICK_STEP, lambda: False) is False and resp.pending() is None
+
+
+def test_outcomes_are_spoken_one_at_a_time_and_a_clear_while_waiting_still_cancels(realtime, monkeypatch):
+    active, most, generations = [0], [0], []
+    first_in, release = threading.Event(), threading.Event()
+    lock = threading.Lock()
+
+    def fake_speak(url, timeout, max_tokens, outbox, turn, request, stop, generation):
+        with lock:
+            active[0] += 1
+            most[0] = max(most[0], active[0])
+            generations.append((request, generation))
+        if request == "first":
+            first_in.set()
+            release.wait(5)
+        with lock:
+            active[0] -= 1
+
+    monkeypatch.setattr(assistant, "speak", fake_speak)
+    resp = assistant_over(realtime(reply=SPEECH), None)
+    before = resp.outbox.generation
+    first = threading.Thread(target=resp._say, args=(Turn(), "first"), daemon=True)
+    first.start()
+    assert first_in.wait(3)
+    second = threading.Thread(target=resp._say, args=(Turn(), "second"), daemon=True)
+    second.start()
+    time.sleep(0.1)  # the second waits for the first
+
+    resp.outbox.clear()  # the user spoke: what waits to be said is dropped
+    release.set()
+    first.join(5)
+    second.join(5)
+
+    assert most[0] == 1
+    assert generations == [("first", before), ("second", before)]  # stale: its frames are refused
+    assert resp.outbox.generation != before

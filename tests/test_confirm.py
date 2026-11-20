@@ -211,3 +211,18 @@ def test_a_yes_and_a_click_cancel_race_gives_the_waiter_exactly_the_winners_answ
             thread.join()
 
         assert len(won) == 1 and request.waiter.wait(0) is won[0]
+
+
+def test_a_clear_refuses_a_request_from_an_asker_that_began_before_it():
+    confirmations = Confirmations()
+    began = confirmations.epoch
+    waiter = Waiter()
+    stale = Pending("browse_step", "{}", "Shall I click?", Turn(), waiter=waiter)
+
+    confirmations.clear()  # "New conversation" while the asker was still preparing its request
+
+    assert confirmations.ask(stale, began) is False
+    assert confirmations.current() is None and waiter.wait(0) is False  # a refused step is a no
+    fresh = pending()
+    assert confirmations.ask(fresh, confirmations.epoch) is True and confirmations.current() is fresh
+    assert confirmations.ask(pending()) is True  # without an epoch, as before
