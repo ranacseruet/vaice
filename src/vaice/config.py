@@ -1,6 +1,7 @@
 """Settings, overridable through environment variables."""
 import os
 import shlex
+from collections.abc import Mapping
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -143,11 +144,6 @@ ASSISTANT_SHELL = _flag("VAICE_ASSISTANT_SHELL", default=False)
 ASSISTANT_PROGRESS_SECONDS = _number("VAICE_ASSISTANT_PROGRESS_SECONDS", default="2.5", kind=float)
 if not ASSISTANT_PROGRESS_SECONDS >= 0:
     raise SystemExit("vaice: VAICE_ASSISTANT_PROGRESS_SECONDS must be >= 0 (0 = no spoken progress)")
-# Assistant mode only: an MCP tool with the policy `auto` (VAICE_MCP_CONFIG) runs by itself this many seconds after
-# its announcement was spoken, unless you press Stop or say stop. 0 turns it off: `auto` then works like `click`.
-ASSISTANT_AUTO_SECONDS = _number("VAICE_ASSISTANT_AUTO_SECONDS", default="5", kind=float)
-if not ASSISTANT_AUTO_SECONDS >= 0:
-    raise SystemExit("vaice: VAICE_ASSISTANT_AUTO_SECONDS must be >= 0 (0 = an `auto` tool waits for the Run button)")
 # Assistant mode only: the budget of one task (a question, and what follows a spoken yes). The brain is called at most
 # MAX_STEPS times, the last call without tools so it has to answer (2 is the least: 1 would never use a tool); no
 # new call starts with tools once TASK_SECONDS have passed since the task began (a call in flight is not cut off).
@@ -158,19 +154,19 @@ ASSISTANT_TASK_SECONDS = _number("VAICE_ASSISTANT_TASK_SECONDS", default="120", 
 if not ASSISTANT_TASK_SECONDS > 0:
     raise SystemExit("vaice: VAICE_ASSISTANT_TASK_SECONDS must be > 0 (seconds)")
 # Assistant mode only: the assistant keeps short notes you ask it to remember ("remember that I park on level
-# three") in <VAICE_DATA_DIR>/memory.json, across conversations, and puts them into every prompt (so a remote
-# helper brain gets them too). Off: no memory skills and no notes in the prompt (an existing file is left alone).
+# three") in <VAICE_DATA_DIR>/memory.json, across conversations, and puts them into every prompt. Off: no memory
+# skills and no notes in the prompt (an existing file is left alone).
 # Off by default: on the local 2B brain the memory skills cost 3 of the 51 older eval cases (225 -> 210 of 255:
 # remember("Goodbye"), a reminder sent to remember, and Calculator opened for "Who makes the calculator app?").
 ASSISTANT_MEMORY = _flag("VAICE_ASSISTANT_MEMORY", default=False)
 VOICE = _choice("VAICE_VOICE", default="female", choices=("female", "male"))
 
 
-LOCAL_HOSTS = ("localhost", "127.0.0.1", "::1")  # a brain at one of these hosts does not leave this machine
+LOCAL_HOSTS = ("localhost", "127.0.0.1", "::1")  # an endpoint at one of these hosts does not leave this machine
 
 
-def brain_base(raw: str, key_variable: str = "VAICE_BRAIN_API_KEY") -> str:
-    """An OpenAI-compatible endpoint's base URL as OpenAI clients take it (the helper brain's, the vision model's),
+def endpoint_base(raw: str, key_variable: str) -> str:
+    """An OpenAI-compatible endpoint's base URL as OpenAI clients take it (the vision model's, the browser agent's),
     `/v1` included, without a trailing slash. `key_variable` is named in the error for credentials in the URL.
 
     Raises ValueError with a message that never repeats `raw`: a key pasted into a URL must not reach the log."""
@@ -187,34 +183,24 @@ def brain_base(raw: str, key_variable: str = "VAICE_BRAIN_API_KEY") -> str:
     return f"{parts.scheme}://{parts.netloc}{path}"
 
 
-def _brain_url(name: str) -> str:
-    """`brain_base` of the variable; "" (unset or empty) = no helper. Its key variable is the `_API_KEY` sibling."""
+def _endpoint_url(name: str) -> str:
+    """`endpoint_base` of the variable; "" (unset or empty) = not configured. Its key variable is the `_API_KEY`
+    sibling."""
     raw = os.getenv(name, "").strip()
     if not raw:
         return ""
     try:
-        return brain_base(raw, name.removesuffix("_URL") + "_API_KEY")
+        return endpoint_base(raw, name.removesuffix("_URL") + "_API_KEY")
     except ValueError as exc:
         raise SystemExit(f"vaice: {name}: {exc}") from None
 
-
-# Assistant mode only: an optional helper for the brain step, any OpenAI-compatible chat-completions endpoint
-# (a local server such as LM Studio or Ollama, or a hosted one); vaice does not tell them apart. Unset = the
-# local llama-server answers. Only the brain moves: speech recognition and speech output stay on llama-server.
-# Everything the brain sees is sent to that endpoint (see docs/privacy.md). The key is a secret: never logged.
-BRAIN_URL = _brain_url("VAICE_BRAIN_URL")
-BRAIN_MODEL = _env("VAICE_BRAIN_MODEL", default="").strip()
-BRAIN_API_KEY = _env("VAICE_BRAIN_API_KEY", default="").strip()
-BRAIN_TIMEOUT = _number("VAICE_BRAIN_TIMEOUT", default="60", kind=float)
-if BRAIN_TIMEOUT <= 0:
-    raise SystemExit("vaice: VAICE_BRAIN_TIMEOUT must be > 0")
 
 # Assistant mode only: the `look_at_screen` skill (vision.py) takes a screenshot when the user asks about their
 # screen and asks this vision model about it: any OpenAI-compatible endpoint that accepts images (LFM3-Omni-2B on
 # a llama-server of its own, a hosted model). Unset = no skill, no screenshot is ever taken. The screenshot is
 # sent to that endpoint, so a host off this machine receives an image of the screen (see docs/privacy.md). The key
 # is a secret: never logged.
-VISION_URL = _brain_url("VAICE_VISION_URL")
+VISION_URL = _endpoint_url("VAICE_VISION_URL")
 VISION_MODEL = _env("VAICE_VISION_MODEL", default="").strip()
 VISION_API_KEY = _env("VAICE_VISION_API_KEY", default="").strip()
 VISION_TIMEOUT = _number("VAICE_VISION_TIMEOUT", default="30", kind=float)
@@ -230,7 +216,7 @@ if VISION_MAX_TOKENS < 0:
 
 # Assistant mode only: MCP (Model Context Protocol) tools as skills (mcp_skills.py). A JSON file in Claude Desktop's
 # `mcpServers` shape names the stdio servers to start and, per server, the tools to offer and how each is approved
-# (`run`, `voice` or `click`; click by default). Unset = no MCP, and the optional `mcp` package is never imported.
+# (`run` or `click`; click by default). Unset = no MCP, and the optional `mcp` package is never imported.
 # Needs `uv sync --extra mcp`. The file may hold tokens (a server's `env`): vaice never logs them. Each tool call
 # may take at most MCP_TIMEOUT seconds; a server must also start within it.
 _MCP_CONFIG = _env("VAICE_MCP_CONFIG", default="").strip()
@@ -241,12 +227,12 @@ if not MCP_TIMEOUT > 0:
 
 # Assistant mode only: the `browse` skill (browse.py, browse_task.py), a task in a browser run by the Pi coding agent
 # in the background. `off` (default) or `pi` (needs the `pi` command on PATH, version 1.5.2 or newer, and
-# VAICE_BROWSE_URL: Pi has its own OpenAI-compatible endpoint, model and key, apart from the helper brain, which
-# may be unset). The browser is Chrome with a profile of its own under VAICE_DATA_DIR, in a visible window unless
-# VAICE_BROWSE_HEADLESS is on. A task is stopped after VAICE_BROWSE_SECONDS. Pages' text and what the agent does go
-# to that endpoint (see docs/privacy.md). The key is a secret: it reaches Pi's environment only, never logged.
+# VAICE_BROWSE_URL: Pi has its own OpenAI-compatible endpoint, model and key). The browser is Chrome with a profile
+# of its own under VAICE_DATA_DIR, in a visible window unless VAICE_BROWSE_HEADLESS is on. A task is stopped after
+# VAICE_BROWSE_SECONDS. Pages' text and what the agent does go to that endpoint (see docs/privacy.md). The key is a
+# secret: it reaches Pi's environment only, never logged.
 BROWSE = _choice("VAICE_BROWSE", default="off", choices=("off", "pi"))
-BROWSE_URL = _brain_url("VAICE_BROWSE_URL")
+BROWSE_URL = _endpoint_url("VAICE_BROWSE_URL")
 BROWSE_MODEL = _env("VAICE_BROWSE_MODEL", default="").strip()
 BROWSE_API_KEY = _env("VAICE_BROWSE_API_KEY", default="").strip()
 BROWSE_SECONDS = _number("VAICE_BROWSE_SECONDS", default="180", kind=float)
@@ -280,3 +266,20 @@ if VAD_MIN_SILENCE_MS < 0 or VAD_SPEECH_PAD_MS < 0:
 
 # Whether speech can interrupt a playing reply at all. Off = a reply always runs to the end.
 CAN_INTERRUPT = _flag("VAICE_CAN_INTERRUPT", default=True)
+
+
+# Settings an earlier version read and this one ignores: name -> why. `removed_settings` finds the ones still set (in
+# the environment or the `.env` loaded above) so `app.main()` can say they do nothing, instead of leaving the user
+# to wonder why a hosted brain is no longer used. Only names are ever reported: a value may be a key.
+REMOVED = {
+    "VAICE_BRAIN_URL": "the helper brain was removed; assistant mode uses the local llama-server",
+    "VAICE_BRAIN_MODEL": "the helper brain was removed; assistant mode uses the local llama-server",
+    "VAICE_BRAIN_API_KEY": "the helper brain was removed; assistant mode uses the local llama-server",
+    "VAICE_BRAIN_TIMEOUT": "the helper brain was removed; assistant mode uses the local llama-server",
+    "VAICE_ASSISTANT_AUTO_SECONDS": "the MCP auto tier was removed; use run or click",
+}
+
+
+def removed_settings(environ: Mapping[str, str] = os.environ) -> list[tuple[str, str]]:
+    """The `REMOVED` settings that are set in `environ`, as (name, reason), in `REMOVED` order. Never their values."""
+    return [(name, reason) for name, reason in REMOVED.items() if name in environ]

@@ -41,8 +41,8 @@ These decide trade-offs, and they are why the architecture looks the way it does
    timeouts and cancellation, and keeps untrusted text (files, web pages, tool output) away from instruction-bearing
    roles.
 3. **Spoken, not dictated.** The voice says one or two sentences; the screen holds the paths, output and commands.
-4. **Local first, remote by choice.** The default needs no account and sends nothing out. A stronger helper model, a
-   vision model or a cloud MCP server is a choice you make, and startup says what it will receive.
+4. **Local first, remote by choice.** The default needs no account and sends nothing out. A
+   vision model, a browser-agent endpoint or a cloud MCP server is a choice you make, and startup says what it will receive.
 5. **Measure, don't assume.** Claims about what a model does come from the live eval with repeats, per build and
    quantization. A web-search skill was removed, and the shell and memory skills kept off by default, after the eval showed they
    made a small model worse; that is the process working.
@@ -59,11 +59,11 @@ The roadmap ([#87](https://github.com/ranacseruet/vaice/issues/87)) was built in
 | 1 | `vaice up`: one command starts the model server and the UI |
 | 2 | Assistant mode: skills run by vaice, not the model server, read-only first |
 | 3 | Action skills, the confirmation policy, and opt-in shell commands |
-| 4 | An optional stronger helper brain (any OpenAI-compatible endpoint) and spoken progress for slow answers |
+| 4 | Spoken progress for slow answers |
 | 5 | Long-term memory, screen vision, and MCP tools |
 
 On the local 2B model the assistant routes about 225 of 255 scored requests correctly across 51 spoken cases (five
-runs each); a 24B helper model does better, and the cases where the small model over-calls tools are why the shell,
+runs each); the cases where the small model over-calls tools are why the shell,
 memory and web search are off or absent by default.
 
 ## What is missing
@@ -75,7 +75,7 @@ Roughly in the order it limits the north star. These are directions to refine in
   microphone hearing the assistant, [#36](https://github.com/ranacseruet/vaice/issues/36)) must be solved first for
   anything but headphones.
 - **A smarter local brain.** A 2B model picks skills reasonably but writes poor shell commands and over-calls tools. The
-  helper-model seam exists; the open work is a local model that is good enough that the helper is optional.
+  open work is a local model that is good enough to choose skills and write commands reliably.
 - **More to do.** Skills for the things people actually ask: calendar and mail, files, notes, the browser. Much of this
   can arrive as MCP tools rather than as built-ins. Reminders and timers need something that runs later, which vaice
   does not have yet (it refuses to pretend).

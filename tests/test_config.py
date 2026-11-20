@@ -285,46 +285,6 @@ def test_a_bad_choice_names_the_variable_and_the_values(monkeypatch, name, value
         importlib.reload(config)
 
 
-BRAIN_NAMES = ("VAICE_BRAIN_URL", "VAICE_BRAIN_MODEL", "VAICE_BRAIN_API_KEY", "VAICE_BRAIN_TIMEOUT")
-
-
-def test_the_helper_brain_is_off_by_default(monkeypatch):
-    for name in BRAIN_NAMES:
-        monkeypatch.delenv(name, raising=False)
-    try:
-        reloaded = importlib.reload(config)
-        assert (reloaded.BRAIN_URL, reloaded.BRAIN_MODEL, reloaded.BRAIN_API_KEY) == ("", "", "")
-        assert reloaded.BRAIN_TIMEOUT == 60.0
-    finally:
-        monkeypatch.undo()
-        importlib.reload(config)
-
-
-def test_an_empty_brain_url_is_no_helper(monkeypatch):
-    monkeypatch.setenv("VAICE_BRAIN_URL", "  ")
-    try:
-        assert importlib.reload(config).BRAIN_URL == ""
-    finally:
-        monkeypatch.undo()
-        importlib.reload(config)
-
-
-def test_the_helper_brain_settings_are_read_from_the_environment(monkeypatch):
-    monkeypatch.setenv("VAICE_BRAIN_URL", "https://openrouter.ai/api/v1/")
-    monkeypatch.setenv("VAICE_BRAIN_MODEL", " some/model ")
-    monkeypatch.setenv("VAICE_BRAIN_API_KEY", "fake-key-123\n")
-    monkeypatch.setenv("VAICE_BRAIN_TIMEOUT", "12.5")
-    try:
-        reloaded = importlib.reload(config)
-        assert reloaded.BRAIN_URL == "https://openrouter.ai/api/v1"  # trailing slash stripped, path kept
-        assert reloaded.BRAIN_MODEL == "some/model"
-        assert reloaded.BRAIN_API_KEY == "fake-key-123"  # a pasted newline is not part of the key
-        assert reloaded.BRAIN_TIMEOUT == 12.5
-    finally:
-        monkeypatch.undo()
-        importlib.reload(config)
-
-
 @pytest.mark.parametrize(("given", "base"), [
     ("http://localhost:1234/v1", "http://localhost:1234/v1"),
     ("http://localhost:1234/v1/", "http://localhost:1234/v1"),
@@ -332,55 +292,29 @@ def test_the_helper_brain_settings_are_read_from_the_environment(monkeypatch):
     ("localhost:11434/v1", "http://localhost:11434/v1"),  # no scheme: plain http, as for the llama-server URL
     ("http://localhost:11434", "http://localhost:11434"),
 ])
-def test_a_brain_base_url_keeps_its_path_and_loses_the_trailing_slash(given, base):
-    assert config.brain_base(given) == base
+def test_a_base_url_keeps_its_path_and_loses_the_trailing_slash(given, base):
+    assert config.endpoint_base(given, "VAICE_X_API_KEY") == base
 
 
 @pytest.mark.parametrize("given", ["http://host/v1/chat/completions", "http://host/v1/chat/completions/"])
 def test_the_endpoint_instead_of_the_base_is_a_clear_error(given):
     with pytest.raises(ValueError, match=r"base URL.*not the endpoint"):
-        config.brain_base(given)
+        config.endpoint_base(given, "VAICE_X_API_KEY")
 
 
 @pytest.mark.parametrize("given", ["ftp://host/v1", "http://", "ws://host:1/v1"])
-def test_a_brain_url_that_is_not_http_is_refused(given):
+def test_an_endpoint_url_that_is_not_http_is_refused(given):
     with pytest.raises(ValueError, match="http"):
-        config.brain_base(given)
+        config.endpoint_base(given, "VAICE_X_API_KEY")
 
 
 @pytest.mark.parametrize("given", ["https://user:fake-key-123@host/v1", "https://host/v1?key=fake-key-123",
                                    "https://host/v1#fake-key-123"])
-def test_credentials_a_query_or_a_fragment_in_the_brain_url_are_refused_without_echoing_them(given):
+def test_credentials_a_query_or_a_fragment_in_an_endpoint_url_are_refused_without_echoing_them(given):
     with pytest.raises(ValueError, match="credentials, a query or a fragment") as caught:
-        config.brain_base(given)
+        config.endpoint_base(given, "VAICE_X_API_KEY")
 
     assert "fake-key-123" not in str(caught.value)
-
-
-def test_a_bad_brain_url_names_the_variable_and_never_repeats_the_value(monkeypatch):
-    monkeypatch.setenv("VAICE_BRAIN_URL", "https://host/v1?key=fake-key-123")
-    try:
-        with pytest.raises(SystemExit, match="vaice: VAICE_BRAIN_URL: it must not contain credentials") as caught:
-            importlib.reload(config)
-        assert "fake-key-123" not in str(caught.value)
-
-        monkeypatch.setenv("VAICE_BRAIN_URL", "http://host/v1/chat/completions")
-        with pytest.raises(SystemExit, match="VAICE_BRAIN_URL: give the base URL"):
-            importlib.reload(config)
-    finally:
-        monkeypatch.undo()
-        importlib.reload(config)
-
-
-@pytest.mark.parametrize("value", ["0", "-5", "soon"])
-def test_a_bad_brain_timeout_is_a_clean_error(monkeypatch, value):
-    monkeypatch.setenv("VAICE_BRAIN_TIMEOUT", value)
-    try:
-        with pytest.raises(SystemExit, match="VAICE_BRAIN_TIMEOUT must be"):
-            importlib.reload(config)
-    finally:
-        monkeypatch.undo()
-        importlib.reload(config)
 
 
 VISION_NAMES = ("VAICE_VISION_URL", "VAICE_VISION_MODEL", "VAICE_VISION_API_KEY", "VAICE_VISION_TIMEOUT",
@@ -411,7 +345,6 @@ def test_the_vision_settings_are_read_from_the_environment(monkeypatch):
         assert reloaded.VISION_MODEL == "omni"
         assert reloaded.VISION_API_KEY == "fake-key-123"
         assert reloaded.VISION_TIMEOUT == 12.5
-        assert reloaded.BRAIN_URL == ""  # the helper brain is a separate setting
     finally:
         monkeypatch.undo()
         importlib.reload(config)
@@ -422,7 +355,7 @@ def test_a_bad_vision_url_names_the_variable_and_never_repeats_the_value(monkeyp
     try:
         with pytest.raises(SystemExit, match="vaice: VAICE_VISION_URL: it must not contain credentials") as caught:
             importlib.reload(config)
-        assert "VAICE_VISION_API_KEY" in str(caught.value) and "VAICE_BRAIN" not in str(caught.value)
+        assert "VAICE_VISION_API_KEY" in str(caught.value)
         assert "fake-key-123" not in str(caught.value)
 
         monkeypatch.setenv("VAICE_VISION_URL", "http://host/v1/chat/completions")
@@ -437,9 +370,9 @@ def test_a_bad_vision_url_names_the_variable_and_never_repeats_the_value(monkeyp
         importlib.reload(config)
 
 
-def test_a_bad_brain_url_still_names_the_brain_key():
-    with pytest.raises(ValueError, match="VAICE_BRAIN_API_KEY"):
-        config.brain_base("https://user:pw@host/v1")
+def test_a_bad_endpoint_url_names_the_key_variable_it_was_given():
+    with pytest.raises(ValueError, match="VAICE_X_API_KEY"):
+        config.endpoint_base("https://user:pw@host/v1", "VAICE_X_API_KEY")
 
 
 def test_the_vision_token_cap_can_be_changed_or_switched_off(monkeypatch):
@@ -524,30 +457,6 @@ def test_a_bad_task_budget_is_a_clean_error(monkeypatch, name, value):
     monkeypatch.setenv(name, value)
     try:
         with pytest.raises(SystemExit, match=f"{name} must be"):
-            importlib.reload(config)
-    finally:
-        monkeypatch.undo()
-        importlib.reload(config)
-
-
-def test_an_auto_tool_waits_five_seconds_by_default_and_the_wait_can_be_changed_or_turned_off(monkeypatch):
-    monkeypatch.delenv("VAICE_ASSISTANT_AUTO_SECONDS", raising=False)
-    try:
-        assert importlib.reload(config).ASSISTANT_AUTO_SECONDS == 5
-        monkeypatch.setenv("VAICE_ASSISTANT_AUTO_SECONDS", "0")
-        assert importlib.reload(config).ASSISTANT_AUTO_SECONDS == 0
-        monkeypatch.setenv("VAICE_ASSISTANT_AUTO_SECONDS", "8.5")
-        assert importlib.reload(config).ASSISTANT_AUTO_SECONDS == 8.5
-    finally:
-        monkeypatch.undo()
-        importlib.reload(config)
-
-
-@pytest.mark.parametrize("value", ["-1", "soon", "nan"])
-def test_a_bad_auto_setting_is_a_clean_error(monkeypatch, value):
-    monkeypatch.setenv("VAICE_ASSISTANT_AUTO_SECONDS", value)
-    try:
-        with pytest.raises(SystemExit, match="VAICE_ASSISTANT_AUTO_SECONDS must be"):
             importlib.reload(config)
     finally:
         monkeypatch.undo()
@@ -653,7 +562,6 @@ def test_the_browse_settings_are_read_from_the_environment(monkeypatch):
         reloaded = importlib.reload(config)
         assert reloaded.BROWSE_URL == "https://llm.example.com/v1"  # trailing slash stripped, /v1 kept
         assert reloaded.BROWSE_MODEL == "big-model" and reloaded.BROWSE_API_KEY == "fake-key-123"
-        assert reloaded.BRAIN_URL == "" and reloaded.BRAIN_MODEL == ""  # the helper brain is a separate setting
         assert reloaded.BROWSE == "pi" and reloaded.BROWSE_SECONDS == 90.0 and reloaded.BROWSE_HEADLESS is True
         assert reloaded.BROWSE_CONFIRM == "off"
     finally:
@@ -666,7 +574,7 @@ def test_a_bad_browse_url_names_the_browse_variables_and_never_repeats_the_value
     try:
         with pytest.raises(SystemExit, match="vaice: VAICE_BROWSE_URL: it must not contain credentials") as caught:
             importlib.reload(config)
-        assert "VAICE_BROWSE_API_KEY" in str(caught.value) and "VAICE_BRAIN" not in str(caught.value)
+        assert "VAICE_BROWSE_API_KEY" in str(caught.value)
         assert "fake-key-123" not in str(caught.value)
 
         monkeypatch.setenv("VAICE_BROWSE_URL", "http://host/v1/chat/completions")
@@ -708,6 +616,35 @@ def test_a_bad_browse_timeout_is_a_clean_error(monkeypatch, value):
     try:
         with pytest.raises(SystemExit, match="VAICE_BROWSE_SECONDS must be"):
             importlib.reload(config)
+    finally:
+        monkeypatch.undo()
+        importlib.reload(config)
+
+
+def test_a_removed_setting_that_is_set_is_reported_by_name_and_reason(monkeypatch):
+    for name in config.REMOVED:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("VAICE_BRAIN_URL", "http://localhost:1234/v1")
+    monkeypatch.setenv("VAICE_ASSISTANT_AUTO_SECONDS", "5")
+
+    found = config.removed_settings()
+
+    assert [name for name, _ in found] == ["VAICE_BRAIN_URL", "VAICE_ASSISTANT_AUTO_SECONDS"]
+    assert all(reason for _, reason in found)
+
+
+def test_no_removed_setting_is_reported_when_none_is_set(monkeypatch):
+    for name in config.REMOVED:
+        monkeypatch.delenv(name, raising=False)
+
+    assert config.removed_settings() == []
+
+
+def test_a_removed_setting_does_not_stop_the_config_from_loading(monkeypatch):
+    monkeypatch.setenv("VAICE_BRAIN_TIMEOUT", "soon")  # it used to be a startup error; now it is ignored
+    monkeypatch.setenv("VAICE_ASSISTANT_AUTO_SECONDS", "-1")
+    try:
+        importlib.reload(config)
     finally:
         monkeypatch.undo()
         importlib.reload(config)

@@ -1,8 +1,8 @@
 """The brain: one chat-completions request that answers or asks for tools.
 
-Generic on purpose: any OpenAI-compatible `POST <base>/chat/completions` endpoint works (the local llama-server
-at `<url>/v1`, LM Studio, a hosted API) and nothing here knows which one it is talking to. `ChatBrain` takes the
-complete endpoint URL; `ChatBrain.local` and `ChatBrain.helper` build it from a base the way each is configured.
+Generic on purpose: any OpenAI-compatible `POST <base>/chat/completions` endpoint works and nothing here knows which
+one it is talking to. `ChatBrain` takes the complete endpoint URL; `ChatBrain.local` builds it for the local
+llama-server (the assistant's brain) and `ChatBrain.helper` from any OpenAI-compatible base URL (the vision model).
 
 Every failure of the request is a `BrainError` carrying a fixed sentence the assistant can speak. The API key is
 never put into an error, a log line or a repr: the only place it goes is the Authorization header.
@@ -52,7 +52,7 @@ def chat_endpoint(base: str) -> str:
 
 class ChatBrain:
     """`temperature` and `max_tokens` are sent only when not None: hosted models differ in which of them they
-    accept, and a token cap cuts a reasoning model's answer short, so the helper sends neither."""
+    accept, and a token cap cuts a reasoning model's answer short, so `helper` sends neither unless asked."""
 
     def __init__(self, endpoint: str, timeout: float, model: str | None = None, api_key: str | None = None,
                  temperature: float | None = 0, max_tokens: int | None = 300):

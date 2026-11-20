@@ -1,6 +1,6 @@
 """Speech that no reply is carrying: audio and markers queued by a worker thread, served by the handler's idle emit().
 
-A click on *Run* or an `auto` countdown runs a call outside any reply, so there is no reply generator to hand
+A click on *Run* runs a call outside any reply, so there is no reply generator to hand
 the outcome's audio to fastrtc. The worker puts it here instead and `InterruptSafeReplyOnPause.emit()` drains it
 while nobody is talking (fastrtc plays whatever an idle `emit()` returns). Two kinds of item, in one FIFO:
 

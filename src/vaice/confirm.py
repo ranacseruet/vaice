@@ -3,8 +3,7 @@
 When the brain asks for a `confirm` skill, the reply speaks a question and the request waits here. The
 user approves by saying one of `YES` as the whole utterance, or by clicking *Run* in the UI (a request that is
 not `voice`, such as a shell command, only by the click); anything else drops it. The model never sees or
-interprets the answer. A request with `auto_seconds` also runs by itself that long after its question was fully
-spoken, unless one of those settles it first (the timer lives in `responders/assistant.py`).
+interprets the answer.
 
 A request with a `waiter` is a different kind: a question of a task that is already running (a step of the browser
 agent), not a skill call to run. Its answer goes to the waiter, which the task blocks on. Whoever settles the request
@@ -79,17 +78,8 @@ class Pending:
     id: str = field(default_factory=lambda: uuid.uuid4().hex)
     armed_at: float | None = None  # when the question was fully handed out; None until then
     voice: bool = True  # whether a spoken yes may approve it; False: only the UI's Run button
-    auto_seconds: float = 0  # > 0: runs by itself this long after the question's audio has played, unless settled first
-    auto_delay: float = 0  # set by `arm`: the estimated seconds of the question still to play when it was armed
     task: object | None = None  # the asking reply's `assistant.Task` (step budget, taint), carried over a spoken yes
     waiter: Waiter | None = None  # a question of a running task: the answer goes here, nothing is run (see above)
-
-    def remaining(self, now: float) -> float | None:
-        """Seconds left of an armed auto request at clock time `now` (never negative), else None: the time the
-        question still had to play when it was armed, then `auto_seconds`."""
-        if self.auto_seconds <= 0 or self.armed_at is None:
-            return None
-        return max(0.0, self.auto_seconds + self.auto_delay - (now - self.armed_at))
 
 
 class Confirmations:
@@ -112,28 +102,16 @@ class Confirmations:
             replaced, self._pending = self._pending, pending
             _refuse(replaced)
 
-    def arm(self, pending_id: str, playing: float = 0.0) -> None:
-        """Start the clock, if `pending_id` is still the current request. `playing`: the seconds of the question's
-        audio estimated still to play (handed out is not played: the playback queue is unbounded); only an auto
-        request's countdown waits for it, answerability and expiry run from now."""
+    def arm(self, pending_id: str) -> None:
+        """Start the clock, if `pending_id` is still the current request."""
         with self._lock:
             if self._pending is not None and self._pending.id == pending_id:
                 self._pending.armed_at = self._clock()
-                self._pending.auto_delay = max(0.0, playing)
 
     def current(self) -> Pending | None:
         """The request, unless it expired `CONFIRM_SECONDS` after it was armed (then it is dropped)."""
         with self._lock:
             return self._live()
-
-    def remaining(self, pending: Pending) -> float | None:
-        """Seconds until `pending`, an armed auto request, runs by itself; None when it is not that, or no longer
-        the current request."""
-        with self._lock:
-            live = self._live()
-            if live is None or live.id != pending.id:
-                return None
-            return live.remaining(self._clock())
 
     def take(self, pending_id: str | None = None) -> Pending | None:
         """Remove and return the request; with `pending_id`, only if that is the current one, so a click on

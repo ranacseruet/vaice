@@ -606,7 +606,7 @@ def test_the_child_gets_the_gate_policy_it_was_given(tmp_path):
 
 
 def test_the_child_runs_isolated_and_logs_to_a_private_file(harness, monkeypatch):
-    monkeypatch.setenv("VAICE_BRAIN_API_KEY", "another-secret")
+    monkeypatch.setenv("VAICE_VISION_API_KEY", "another-secret")
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "aws-secret")
     h = harness(VAICE_PI_API_KEY=KEY)
     h.run()
@@ -614,7 +614,7 @@ def test_the_child_runs_isolated_and_logs_to_a_private_file(harness, monkeypatch
     assert start["env"]["PI_CODING_AGENT_DIR"] == str(h.home)
     assert start["env"]["HOME"] == str(h.home / "home")
     assert start["env"]["VAICE_PI_API_KEY"] == KEY  # the one thing passed on purpose
-    assert "VAICE_BRAIN_API_KEY" not in start["env_names"] and "AWS_SECRET_ACCESS_KEY" not in start["env_names"]
+    assert "VAICE_VISION_API_KEY" not in start["env_names"] and "AWS_SECRET_ACCESS_KEY" not in start["env_names"]
     assert Path(start["cwd"]).resolve() == (h.home / "work").resolve()
     assert json.loads(start["env"]["VAICE_GATE_POLICY"]) == browse.GATE_POLICY
     assert int(start["env"]["VAICE_GATE_TIMEOUT_MS"]) == 65000  # ask_timeout_s 60 + the grace

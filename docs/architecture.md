@@ -17,8 +17,8 @@ skills and every safety decision; the models only produce speech and text.
 └──────────┘                │ Conversation: history, saved to disk   │        │  /tts                    │
                             │ Skills + confirmation + memory         │        └──────────────────────────┘
                             └───────────┬────────────────────────────┘        ┌──────────────────────────┐
-                                        │  optional, each its own endpoint    │ helper brain  (optional) │
-                                        ├────────────────────────────────────▶│ vision model  (optional) │
+                                        │  optional, each its own endpoint    │ vision model  (optional) │
+                                        ├────────────────────────────────────▶│ browser agent (optional) │
                                         │                                     └──────────────────────────┘
                                         ▼  stdio
                                  MCP servers (optional, started by vaice)
@@ -77,8 +77,7 @@ audio ─▶ transcribe ─▶ decide(brain ⇄ skills) ─▶ speakable()+sente
    tools. If the brain asks for skills, vaice runs them and calls the brain again, within a task budget of
    `VAICE_ASSISTANT_MAX_STEPS` brain calls (10) and `VAICE_ASSISTANT_TASK_SECONDS` seconds (120, checked between calls);
    the last call has no tools, so it must answer. A spoken yes to a question continues the same task (the budget keeps
-   counting, and a skill having run taints it for the rest of the task). The brain is the local `llama-server` at temperature 0, or any
-   OpenAI-compatible endpoint you configure ([helper model](helper-model.md)).
+   counting, and a skill having run taints it for the rest of the task). The brain is the local `llama-server` at temperature 0.
 3. **Speak.** The answer is cleaned for speech (`voice.speakable`: no markdown, no paths), split into sentences, and
    each sentence is streamed from `/tts`. Text is recorded sentence by sentence as its audio is queued, so a barge-in
    keeps what was actually spoken.
@@ -108,14 +107,7 @@ request is taken atomically, so a click and a spoken yes cannot both run it. A r
 commands outside a tiny allowlist, `click`-policy MCP tools) never accepts a spoken yes at all. Question texts contain
 none of the words a user answers with, because speaker echo can reach the microphone.
 
-An `auto`-policy MCP tool adds a timer: the announcement (`Question.auto_seconds`) is armed like any question, and a
-daemon thread (`vaice-assistant-auto`) then runs the request `VAICE_ASSISTANT_AUTO_SECONDS` after the announcement's estimated end of playback (each frame handed out plays after what is queued, or at once when the queue had drained; fastrtc reports no playback position) through
-`AssistantResponder.approve`, the same atomic `take` a click uses, so a Stop click, a spoken stop or yes, "New
-conversation" or an expiry that comes first means it runs once or not at all. If another skill ran earlier in the
-same task (a continuation after a spoken yes included), `decide()` swaps the question for the tool's click-only `fallback` (that skill's output may be untrusted
-text); content read in an earlier turn is not tracked.
-
-**After a click or an `auto` run** there is no reply generator to carry audio, so `approve` starts the continuation on
+**After a click** there is no reply generator to carry audio, so `approve` starts the continuation on
 a daemon thread (`vaice-assistant-task`, `_continue`): the same `Task` (tainted by the approved result), `decide()` over
 the stored chat plus the tool message, events recorded on the asking turn. A brain failure after the call ran is not
 reported as one: the call's own result is spoken. The outcome goes to an `Outbox` (`app.build_stream` creates it, passes
@@ -127,8 +119,7 @@ so the next item is served only while the audio served so far (a reply's include
 which keeps the markers close to real playback. Starting to talk with no reply running clears the outbox (the drop
 hooks run) and, when proactive audio is estimated still playing, fastrtc's playback queue; with `VAICE_CAN_INTERRUPT=0`
 it does neither. A new reply, a second approval and *New conversation* cancel the continuation (one task at a time) and
-clear the outbox; speech queued while no connection polled for 30 s is dropped. Step 2 (a countdown inside a
-continuation, narration, a whole-task Stop) is not built: the question a continuation asks waits for you.
+clear the outbox; speech queued while no connection polled for 30 s is dropped. Narration and a whole-task Stop are not built: the question a continuation asks waits for you.
 
 ### The skills and their extensions
 
@@ -140,7 +131,7 @@ continuation, narration, a whole-task Stop) is not built: the question a continu
 | `remember`, `forget`, `forget_everything` (opt-in) | `memory.py` | Explicit notes only, saved to `memory.json` and appended to the system prompt. A note is text that outlives its conversation, so it is cleaned, capped, and refused if a tool ran earlier in the same reply |
 | `look_at_screen` (opt-in) | `vision.py` | One `screencapture` + `sips` shrink, asked of a vision model, never kept or logged. See [Screen vision](screen-vision.md) |
 | `browse` (opt-in) | `browse_task.py`, `browse.py` | A `background` skill: the reply says one fixed line and ends, then a task thread runs the Pi agent quietly (it speaks only a step question and the outcome, through the outbox); a step that changes a page asks, answered by a spoken yes or a click; a new utterance does not stop the task, and `browser_status` (what vaice already got from Pi: goal, tools and pages, a waiting step, Pi's latest words) and `stop_browsing` let the brain report on and end it; the task's answer (or a click-approved skill's outcome) may make the brain start another browser task, up to 3 per request. See [Browser tasks](browser-tasks.md) |
-| MCP tools (opt-in) | `mcp_skills.py` | Each listed tool of each stdio server becomes `<server>__<tool>` with a `run`, `voice`, `auto` or `click` policy. See [MCP tools](mcp-tools.md) |
+| MCP tools (opt-in) | `mcp_skills.py` | Each listed tool of each stdio server becomes `<server>__<tool>` with a `run` or `click` policy. See [MCP tools](mcp-tools.md) |
 
 ## Safety model
 
@@ -201,7 +192,7 @@ src/vaice/
   lifecycle.py      Stop signal handler: Ctrl+C asks the app and its responders to abandon in-flight calls
   config.py         Environment-driven settings (.env.example lists them with defaults)
   conversation.py   Turn / Conversation: history windowing, barge-in trimming, atomic JSON persistence, error notes
-  brain.py          Assistant mode: ChatBrain, one chat-completions call with tools (local llama-server or a helper endpoint), BrainError
+  brain.py          Assistant mode: ChatBrain, one chat-completions call with tools (the local llama-server), BrainError
   skills.py         Assistant mode: the skills (read-only answers, plus open/quit app, volume, mute) and the Skills registry
   vision.py         Assistant mode, opt-in: the look_at_screen skill (one screenshot via screencapture + sips, asked of a vision model)
   memory.py         Assistant mode: long-term notes (Memory, kept in memory.json) and the remember / forget / forget_everything skills

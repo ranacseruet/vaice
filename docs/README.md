@@ -26,7 +26,6 @@ everything else.
 |---|---|
 | [Chat mode](chat-mode.md) | The default speech-to-speech mode and the model's built-in tools |
 | [Assistant mode](assistant-mode.md) | Skills, spoken progress, confirmation, shell commands and memory |
-| [Helper model](helper-model.md) | Use a stronger model (local or hosted) for the brain |
 | [Screen vision](screen-vision.md) | The `look_at_screen` skill and its vision model |
 | [MCP tools](mcp-tools.md) | Offer tools from MCP servers as skills, with a per-tool approval policy |
 | [Browser tasks](browser-tasks.md) | The `browse` skill: a Chrome window driven by the Pi agent in the background, asking before it changes a page |

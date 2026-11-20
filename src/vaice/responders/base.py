@@ -34,7 +34,7 @@ class Responder(Protocol):
     `getattr`; absent means no confirmation panel): `pending()` returns the request waiting for the user
     (a `confirm.Pending`) or None; `approve(pending_id)` runs it and returns the result text, or None when
     `pending_id` is no longer the current request; `cancel(pending_id)` drops it; `clear_pending()` drops
-    any (a new conversation). A click or an `auto` countdown happens with no reply in flight, so its follow-up
+    any (a new conversation). A click happens with no reply in flight, so its follow-up
     cannot go through a reply generator.
 
     Optional method `attach_outbox(outbox)` (`outbox.Outbox`; `app.build_stream` calls it with `getattr`, a responder

@@ -18,7 +18,7 @@ more, asking before it does anything it cannot undo. The goal is a real-life Jar
 - **Gets things done** (assistant mode): disk space, battery, running processes, finding files, opening and quitting
   apps, volume. Anything that cannot be undone asks first, by voice or with a button.
 - **Opt-in power:** approved shell commands, long-term memory of facts you ask it to keep, looking at your screen,
-  a stronger helper model for the thinking, tools from any [MCP](https://modelcontextprotocol.io) server, and web
+  tools from any [MCP](https://modelcontextprotocol.io) server, and web
   tasks in a browser window that asks before it changes a page.
 - **Local first.** Audio, transcripts and tool results stay on your machine unless you point an optional feature at
   a remote endpoint, and startup warns when you do. See [Privacy](docs/privacy.md).
@@ -71,7 +71,7 @@ Start at the [documentation index](docs/README.md). The main pages:
 | [Architecture](docs/architecture.md) | How the pieces fit, and the code layout |
 | [Installation](docs/installation.md) · [Configuration](docs/configuration.md) | Setup, requirements, every `VAICE_*` setting |
 | [Assistant mode](docs/assistant-mode.md) | Skills, confirmation, shell commands, memory |
-| [Helper model](docs/helper-model.md) · [Screen vision](docs/screen-vision.md) · [MCP tools](docs/mcp-tools.md) · [Browser tasks](docs/browser-tasks.md) | The opt-in extensions |
+| [Screen vision](docs/screen-vision.md) · [MCP tools](docs/mcp-tools.md) · [Browser tasks](docs/browser-tasks.md) | The opt-in extensions |
 | [Privacy](docs/privacy.md) · [Troubleshooting](docs/troubleshooting.md) | What leaves your machine; fixing common problems |
 
 ## Contributing
