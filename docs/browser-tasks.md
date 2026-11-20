@@ -25,8 +25,8 @@ VAICE_BROWSE=pi VAICE_BROWSE_URL=http://localhost:1234/v1 VAICE_BROWSE_MODEL=lfm
   never touched. `VAICE_BROWSE_HEADLESS=1` hides the window. Navigation is unrestricted: the agent may open any site.
 - **Steps that change a page ask first, and only the Run button approves.** Reading and navigating run at once.
   Clicking, filling, typing, pressing a key, running a script, uploading, dragging and answering a dialog ask: the panel
-  shows the tool and its exact arguments with **Run** and **Cancel**, and a fresh realtime session says a fixed
-  sentence naming the action and the site ("The browser task wants to click something on example.com. The details are
+  shows the tool and its exact arguments with **Run** and **Cancel**, and a fresh realtime session is asked to say a
+  fixed sentence naming the action and the site ("The browser task wants to click something on example.com. The details are
   on the screen. Press Run to allow it, or Cancel."). **Run** lets the task go on; **Cancel** stops it and says "Okay,
   I stopped there." Nothing you say answers it, and silence expires after 60 s as a no. Pi's own words are never
   spoken: only fixed sentences and the final answer. `VAICE_BROWSE_CONFIRM=off` turns these questions off: every
@@ -40,11 +40,11 @@ VAICE_BROWSE=pi VAICE_BROWSE_URL=http://localhost:1234/v1 VAICE_BROWSE_MODEL=lfm
   task runs at a time: a second `browse` request while one works is refused, and one made while the previous task's
   outcome is still being said replaces it (the old outcome is dropped). A stop is quiet.
 - **Quiet.** Nothing is spoken while the task works except the step heads-up and the outcome (or, when it fails or is
-  declined, a fixed sentence). The outcome is added to the turn that asked for the task even if you spoke meanwhile.
+  declined, a fixed sentence). The outcome (and each step's heads-up, [#127](https://github.com/ranacseruet/vaice/issues/127)) is added to the turn that asked for the task even if you spoke meanwhile.
   The *Tool activity* panel shows a single `browse` entry per task.
-- **One browser path.** While `browse` is offered, an MCP server in `VAICE_MCP_CONFIG` that runs `chrome-devtools-mcp`
-  is not started (a warning names it): with both, the model mixed the two browsers' tools. Set `VAICE_BROWSE=off` to
-  use such a server directly.
+- **One browser path.** Do not also configure a browser MCP server (such as `chrome-devtools-mcp`) in
+  `VAICE_MCP_CONFIG`: with both, the model mixed the two browsers' tools. vaice does not filter such a server out; it
+  is up to the config file (see [MCP tools](mcp-tools.md)).
 - **No Google.** Pi is told to search with Bing or DuckDuckGo: Google shows an automated browser a bot check instead
   of results.
 

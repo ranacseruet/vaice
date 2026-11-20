@@ -78,8 +78,8 @@ audio ─▶ realtime session ─▶ speech frames ─▶ fastrtc
 3. **Results are compacted** (`_speech_friendly`) before they go back, because the model reads a fed-back result aloud.
    Only the answer after the last tool round is recorded as the reply's text; the words before a result are spoken but
    dropped from the record.
-4. **One worker thread per reply.** The generator that fastrtc drives only polls a queue; the slow work happens on a
-   daemon thread. See [Threading and cancellation](#threading-and-cancellation).
+4. **Slow work on daemon threads.** The generator that fastrtc drives only polls a queue; the reply session and the
+   transcription session each run on a daemon thread of their own. See [Threading and cancellation](#threading-and-cancellation).
 
 ### Confirmation
 
@@ -132,8 +132,9 @@ Layers, from the outside in:
 6. **Secrets are opaque.** API keys and MCP `env` values live in configuration and in one header; no log line, error or
    result holds them.
 
-Honest limits: a 2B model still misjudges when to call a skill (and can say it did something it did not), and speaker
-echo can still cut a reply short (use headphones). See [Privacy](privacy.md) and the "Not verified" notes in AGENTS.md.
+Honest limits: a 2B model still misjudges when to call a skill (and can say it did something it did not), it sometimes
+reads a skill's raw result aloud, and speaker echo can still cut a reply short (use headphones). See [Privacy](privacy.md)
+and the "Not verified" notes on each feature's page.
 
 ## Threading and cancellation
 
@@ -191,6 +192,7 @@ tests/
   fake_realtime.py  Fake /v1/realtime WebSocket + HTTP server for testing the assistant end to end
   threads.py        fastrtc's real threading (a fresh thread per resume) for generator tests
   fixtures/fake_pi.py  A fake `pi --mode rpc` (scripted scenarios, records the commands it gets) for tests/test_browse.py
+  fixtures/mcp_server.py  A small stdio MCP server the MCP tests start for real (tests/test_mcp_skills.py)
 evals/
   run.py            Live tool-calling eval against a real llama-server (run by hand; see evals/README.md)
   scoring.py        Pure scoring and aggregation for the eval (unit-tested)

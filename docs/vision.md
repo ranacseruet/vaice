@@ -24,7 +24,7 @@ Five capabilities, each of which has to work before the experience does:
 
 | Capability | What it means | Today |
 |---|---|---|
-| **Talk like a person** | Low latency, talk over it and it stops, short spoken answers (never paths or raw output read aloud), no push-to-talk ritual | Streaming replies from one speech-to-speech model, barge-in. Still needs a browser tab and headphones |
+| **Talk like a person** | Low latency, talk over it and it stops, short spoken answers (never paths or raw output read aloud), no push-to-talk ritual | Streaming replies from one speech-to-speech model, barge-in. The 2B model sometimes reads a skill's raw result aloud (results are shortened first). Still needs a browser tab and headphones |
 | **Get things done** | Run real actions on the computer, from a growing set of skills, with free-form commands as the escape hatch | A handful of read and action skills for macOS, approved shell commands, any [MCP](https://modelcontextprotocol.io) tool |
 | **Know the context** | Remember you, see your screen, keep the thread of a conversation | Multi-turn history, explicit notes, on-demand screen vision |
 | **Be trustworthy** | You can see what it is about to do, say no, and trust that it will not do more | Anything that cannot be undone waits for the Run button, exact calls shown, off-by-default opt-ins, cancellable everything |
@@ -55,18 +55,22 @@ The roadmap ([#87](https://github.com/ranacseruet/vaice/issues/87)) was built in
 
 | Phase | What it added |
 |---|---|
-| 0 | A live eval harness, and a measured comparison of two reply paths (the one-session path was kept) |
+| 0 | A live eval harness, and a measured comparison of two reply paths (the text path won then: 125 against 112 of 165) |
 | 1 | `vaice up`: one command starts the model server and the UI |
-| 2 | Skills run by vaice, not the model server, read-only first |
+| 2 | Skills run by vaice, not the model server, read-only first (built on the text path) |
 | 3 | Action skills, the confirmation policy, and opt-in shell commands |
-| 4 | Spoken progress for slow answers (since removed with the separate text and voice steps) |
+| 4 | An optional helper model and spoken progress for slow answers (both removed in phase 6) |
 | 5 | Long-term memory, screen vision, and MCP tools |
+| 6 | One audio-to-audio path: every reply is one speech-to-speech session whose tools are the skills, and every confirmation is a button |
 
-The assistant was first built as separate steps (transcribe, a text model that calls skills, then text to speech),
-and later simplified to one speech-to-speech session whose tools are the skills. Measured on the earlier steps path,
-the local 2B model routed about 225 of 255 scored requests correctly across 51 spoken cases (five runs each); the
-cases where the small model over-calls tools are why the shell, memory and web search are off or absent by default.
-The one-session path's numbers are in `evals/README.md` when measured.
+Browser tasks (the `browse` skill, carried out by the Pi agent) landed between phases 5 and 6.
+
+The assistant was first built as separate steps (transcribe, a text model that calls skills, then text to speech).
+Phase 6 replaced them with one speech-to-speech session, on purpose, for a simpler design: a spike before the switch
+(LFM3-Omni-2B Q8_0, llama-server b12359, 53 spoken cases, five runs each) scored 219 of 265 runs right on the
+one-session path against 248 of 265 on the steps path, with the first audio after 0.8 s against the answer text after
+1.1 s. The bet is that better speech models close that gap without a more complex design. The cases where the small
+model over-calls tools are why the shell, memory and web search are off or absent by default.
 
 ## What is missing
 
@@ -76,12 +80,13 @@ Roughly in the order it limits the north star. These are directions to refine in
   global hotkey would make "just ask" real, and how it is invoked day to day is still open. Speaker echo (the
   microphone hearing the assistant, [#36](https://github.com/ranacseruet/vaice/issues/36)) must be solved first for
   anything but headphones.
-- **A smarter local model.** A 2B model picks skills reasonably but writes poor shell commands and over-calls tools. The
-  open work is a local model that is good enough to choose skills and write commands reliably.
+- **A smarter local model.** A 2B speech model picks skills reasonably but writes poor shell commands, over-calls tools
+  and sometimes reads raw results aloud. The one-session design waits on a better speech model rather than adding a
+  second model; the open work is one good enough to choose skills and write commands reliably.
 - **More to do.** Skills for the things people actually ask: calendar and mail, files, notes, the browser. Much of this
   can arrive as MCP tools rather than as built-ins. Reminders and timers need something that runs later, which vaice
   does not have yet (it refuses to pretend).
-- **Multi-step tasks.** Today one reply is at most a few skill calls. A real assistant plans, carries on across turns,
+- **Multi-step tasks.** Today one reply is at most two rounds of skill calls. A real assistant plans, carries on across turns,
   recovers from a failed step, and reports at the end. The browser task is the first of these.
 - **Context without ceremony.** Memory is explicit notes only; screen vision is a screenshot on request. More ambient,
   proactive context is valuable and is a privacy question first.
@@ -98,7 +103,7 @@ Roughly in the order it limits the north star. These are directions to refine in
 - **Latency:** time to first audio under about a second for a plain answer.
 - **Accuracy:** the live eval's per-case pass rate, tracked per model and build, with no
   regression when a skill is added.
-- **Safety:** no skill that can change the machine runs without its policy, and every refusal and failure is spoken, not
-  silent. Held by unit tests.
+- **Safety:** no skill that can change the machine runs without its policy (held by unit tests), and a refusal or
+  failure is reported to the model and shown in *Tool activity*, never swallowed.
 - **Usefulness:** the one that matters and the hardest to measure: does it save you a trip to the keyboard often
   enough that you keep it running?

@@ -89,7 +89,7 @@ The summary prints `answer faithful k/N` and `command ok k/N` when a case asked 
 
 `cases.json` names the skills in `src/vaice/skills.py` (`disk_space`, `battery_status`, `system_info`, `top_processes`, `find_files`, the actions, and with `--memory` `remember`, `forget`, `forget_everything`); its must-not-call cases (`{"tools": []}`) include things a skill might wrongly match (the time, opening an app, the weather, a timer, volume). `tests/test_eval_scoring.py` checks that every expected tool is a real skill and every skill is exercised.
 
-`vision_cases.json` is for `--vision` only: 5 questions about the screen that should call `look_at_screen`, and the rest must not (battery, disk space, "What is a screen saver?", general knowledge, opening an app). The stub answers from a fixed fake screen (a Numbers window titled Quarterly report, and a dialog "Your disk is almost full" when the question is about a dialog, error or message), so `answer_has` is checked against that text. The vision model itself is not measured here.
+`vision_cases.json` is for `--vision` only: 14 cases. 7 questions about the screen should call `look_at_screen` (two of them follow an earlier screen answer and must look again); the rest must not (one asks about that earlier answer, the others are battery, disk space, "What is a screen saver?", general knowledge and opening an app). The stub answers from a fixed fake screen (a Numbers window titled Quarterly report, and a dialog "Your disk is almost full" when the question is about a dialog, error or message), so `answer_has` is checked against that text. The vision model itself is not measured here.
 
 `browse_cases.json` is for `--browse` only: requests to do something on a website that should call `browse` (the goal must name the site or topic, matched with `contains`), questions about a running task that should call `browser_status`, a request to stop it that should call `stop_browsing`, and requests that must call none of them. The run ends at the call (`browse` answers `Working in the browser.`), so what the browser agent does is not measured here.
 
@@ -106,3 +106,12 @@ Synthesized speech is clean; a real microphone is not, and the two can differ a 
 Results are per llama.cpp build, model and quantization, and they move with the prompt and the history. Even at `--temp 0` a 2B model is not perfectly repeatable across audio, so one run proves nothing: compare `k/N` over repeats, and record the `--label` and the server info with any number you quote. Each run also runs a transcription session in parallel, as the app does.
 
 Numbers measured before the single realtime path (the old text-routing brain, spoken `chat` mode) are not comparable with this harness's: the model now decides inside a speech session, and tool results are not replayed in history.
+
+## Measured
+
+| When | Setup | Result |
+|---|---|---|
+| 2026-11-19, before the switch | A spike harness (not this file) running both paths on the same cases: LFM3-Omni-2B Q8_0, llama-server b12359, `--temp 0`, the 53 cases without memory, 5 repeats | One-session path 219/265 correct (should call 139/170, must not call 80/95), first audio median 0.82 s; the earlier steps path 248/265, answer text after 1.07 s |
+| 2026-11-19, after the switch | This harness, the same server, `--repeats 1`, 6 cases | 5/6 correct (the miss: `disk-free`, also missed in the spike), first audio median 0.74 s |
+
+A full run of this harness on the current path has not been recorded yet; quote one here with its label and server info when it is.
