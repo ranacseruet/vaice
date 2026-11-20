@@ -95,13 +95,14 @@ def run_goal(agent: browse.BrowseAgent, goal: str, repeat: int, seconds: float,
     return record
 
 
-def ps_listing() -> str:
+def ps_listing() -> str | None:
+    """The process table, or None when it could not be read (then the cleanup is unverified, not clean)."""
     try:
         return subprocess.run(["ps", "-axww", "-o", "pid=,command="], capture_output=True, text=True,
                               stdin=subprocess.DEVNULL, timeout=PS_TIMEOUT, check=True).stdout
     except (OSError, subprocess.SubprocessError) as exc:
         print(f"evals: could not list processes ({type(exc).__name__})", file=sys.stderr)
-        return ""
+        return None
 
 
 def agent_info() -> dict:
@@ -146,6 +147,7 @@ def main(argv: list[str] | None = None) -> int:
     started = datetime.now(UTC).isoformat(timespec="seconds")
     runs: list[dict] = []
     leftovers: int | None = None
+    unverified = False
     profile = getattr(agent, "_chrome_profile", None)
     info: dict = {}
     try:
@@ -166,7 +168,9 @@ def main(argv: list[str] | None = None) -> int:
             signal.signal(signal.SIGINT, previous)
     if profile is not None:
         time.sleep(LEFTOVER_WAIT)
-        leftovers = len(browse._profile_pids(profile, ps_listing()))
+        listing = ps_listing()
+        unverified = listing is None
+        leftovers = None if unverified else len(browse._profile_pids(profile, listing))
     print_summary(runs, leftovers)
 
     document = {"label": args.label, "started": started,
@@ -177,7 +181,7 @@ def main(argv: list[str] | None = None) -> int:
     out.write_text(json.dumps(document, indent=2) + "\n")
     print(f"\nresults written to {out}")
     clean = bool(runs) and not interrupted.is_set() and all(r["outcome"] == "answer" for r in runs)
-    return 0 if clean and not leftovers else 1
+    return 0 if clean and not leftovers and not unverified else 1
 
 
 if __name__ == "__main__":

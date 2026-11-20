@@ -1,5 +1,6 @@
 """The live browser-agent check's own logic, over a fake agent: no browser, no model, no network."""
 import json
+import subprocess
 
 import browse_live
 import pytest
@@ -130,6 +131,19 @@ def test_leftover_processes_exit_one(harness):
     harness["holders"] = [101, 102]
     assert run(harness, "--goal", "g") == 1
     assert json.loads(harness["out"].read_text())["leftover_processes"] == 2
+
+
+def test_an_unreadable_process_table_is_a_failure_not_a_clean_exit(harness, monkeypatch):
+    monkeypatch.setattr(browse_live, "ps_listing", lambda: None)
+    assert run(harness, "--goal", "g") == 1
+    assert json.loads(harness["out"].read_text())["leftover_processes"] is None
+
+
+def test_ps_listing_is_none_when_ps_fails(monkeypatch):
+    def broken(*args, **kwargs):
+        raise subprocess.TimeoutExpired("ps", 1)
+    monkeypatch.setattr(subprocess, "run", broken)
+    assert browse_live.ps_listing() is None
 
 
 def test_no_agent_is_a_failure_that_points_at_the_startup_warnings(harness):

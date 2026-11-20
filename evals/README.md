@@ -76,7 +76,7 @@ Options: `--goal TEXT` (repeatable; replaces the built-in goals), `--repeats N` 
 - It uses the browser profile under `VAICE_DATA_DIR` (your logins included), and ends whatever holds that profile before the agent starts: while vaice itself is running, point it elsewhere, e.g. `VAICE_DATA_DIR=/tmp/vaice-live .venv/bin/python evals/browse_live.py` (the environment wins over `.env`).
 - It approves every step the agent asks about, whatever `VAICE_BROWSE_CONFIRM` says, so do not point it at a profile or goals you would not want clicked through.
 - Goals run one after another on the same agent, as in the app. Per run it records the outcome (`answer`, or the exception class: `BrowseError`, `BrowseDeclined`, ...), the answer or the error and its spoken sentence, the seconds, the tool calls in order, the steps it was asked about and the pages visited. After the last run it closes the agent and counts the processes still holding the Chrome profile a second later.
-- Exit status is 0 when every run produced an answer and nothing was left holding the profile, 1 otherwise. Ctrl+C stops the running task, closes the agent and reports what finished.
+- Exit status is 0 when every run produced an answer and nothing was left holding the profile, 1 otherwise (also when the process table could not be read: the cleanup is then unverified). Ctrl+C stops the running task, closes the agent and reports what finished.
 
 It measures whether the agent finishes a research task and how (tools, pages, time); it does not grade whether the answer is right, read that yourself. Results are per agent, model and build and vary run to run: quote `k/N` answered over repeats with the label, never a single run.
 
