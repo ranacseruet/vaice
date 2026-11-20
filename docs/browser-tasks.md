@@ -96,8 +96,9 @@ a version it cannot parse only warns), and for `acp` that the agent's program is
   recent news or prices, as well as opening a website. With the earlier site-only wording the voice model answered
   "I can't browse the web" to most research requests: 13 of 30 calls without the screen skill, 0 of 30 with it, on
   `evals/browse_cases.json` (5 repeats, LFM3-Omni-2B Q8_0); 30 of 30 both ways with the new one, and no `browse` call on
-  a question it should answer itself. `evals/browse_live.py` checks the agent's side: with the model named above, 3 of
-  3 research goals answered (94 to 222 s), nothing left holding the profile.
+  a question it should answer itself. `evals/browse_live.py` checks the agent's side: Pi 1.5.2 with a local Sage-A1.5 model
+  answered 3 of 3 research goals in each of two runs (79 to 302 s, 16 to 43 tool calls), with nothing left holding
+  the profile. Two of those six took longer than the default `VAICE_BROWSE_SECONDS` (180): raise it for research.
 
 Not verified: speaker echo (the microphone hearing the heads-up and the VAD cutting a reply, #36; headphones assumed),
 any model other than the one named above driving Pi, ACP agents other than Pi (the protocol is generic, vaice's tests
