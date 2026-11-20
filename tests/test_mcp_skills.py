@@ -12,11 +12,11 @@ from types import SimpleNamespace
 import pytest
 
 from vaice import app, config, mcp_skills
+from vaice.assistant import WAITING, _Executor
 from vaice.confirm import Confirmations
 from vaice.conversation import Turn
 from vaice.mcp_skills import McpTools, ServerConfig, _Server, load_config, question, skill_name
 from vaice.memory import REFUSED_AFTER_TOOL, Memory
-from vaice.responders.assistant import WAITING, _Executor
 from vaice.skills import Question, Skills, default_skills
 
 SECRET = "tok-9f3a-do-not-log"  # stands for a token in a server's `env`

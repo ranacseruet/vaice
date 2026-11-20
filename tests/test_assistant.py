@@ -1,6 +1,6 @@
 """The assistant: one speech-to-speech session per reply with vaice's skills as its tools, the confirmation requests
 only the Run button settles, and the browser task, against a fake /v1/realtime server (tests/fake_realtime.py) and
-fake skills and browser agent (nothing runs on this machine). The session itself is tested in test_llamacpp.py."""
+fake skills and browser agent (nothing runs on this machine). The session itself is tested in test_realtime.py."""
 import json
 import threading
 import time
@@ -11,14 +11,14 @@ import pytest
 from fake_realtime import pcm
 from threads import next_on_fresh_thread
 
-from vaice import browse_task, lifecycle
+from vaice import assistant, browse_task, lifecycle
+from vaice import realtime as rt
+from vaice.assistant import APPROVED, NOTES_HEADER, REPORT, SAY, WAITING, Assistant
 from vaice.browse import BrowseDeclined, BrowseError, BrowseStopped
 from vaice.confirm import Confirmations
 from vaice.conversation import WAITING_FOR_CONFIRMATION, Turn
 from vaice.memory import REFUSED_AFTER_TOOL, Memory, memory_skills
 from vaice.outbox import Marker, Outbox
-from vaice.responders import assistant, llamacpp
-from vaice.responders.assistant import APPROVED, NOTES_HEADER, REPORT, SAY, WAITING, AssistantResponder
 from vaice.skills import Skill, SkillError, SkillResult, Skills
 
 AUDIO = (48000, np.zeros((1, 480), dtype=np.int16))
@@ -29,7 +29,7 @@ QUIT = ("quit_app", '{"name": "Safari"}')
 @pytest.fixture(autouse=True)
 def quick_polls(monkeypatch):
     monkeypatch.setattr(assistant, "POLL_SECONDS", 0.02)
-    monkeypatch.setattr(llamacpp, "POLL_SECONDS", 0.02)
+    monkeypatch.setattr(rt, "POLL_SECONDS", 0.02)
 
 
 def calls_then_speech(*calls, speech=None):
@@ -129,8 +129,8 @@ def make_skills(ran):
 
 
 def assistant_over(server, skills, outbox=True, **options):
-    """An `AssistantResponder` on the fake server; `resp.outbox` is one primed like a draining connection."""
-    resp = AssistantResponder(server.url, 5.0, "Be brief.", 1024, skills=skills, **options)
+    """An `Assistant` on the fake server; `resp.outbox` is one primed like a draining connection."""
+    resp = Assistant(server.url, 5.0, "Be brief.", 1024, skills=skills, **options)
     resp.outbox = None
     if outbox:
         resp.outbox = Outbox()
@@ -400,8 +400,8 @@ def test_forget_everything_asks_and_only_the_run_button_erases_while_new_convers
 
 
 def test_the_default_skills_have_the_memory_skills_only_with_memory_on():
-    on = AssistantResponder("http://h", memory=Memory(None))
-    off = AssistantResponder("http://h")
+    on = Assistant("http://h", memory=Memory(None))
+    off = Assistant("http://h")
 
     assert {"remember", "forget", "forget_everything"} <= set(on.skills.names)
     assert not {"remember", "forget", "forget_everything"} & set(off.skills.names)
@@ -646,8 +646,8 @@ def test_the_status_and_stop_skills_are_the_models_way_to_ask_how_it_goes_and_to
 def test_the_browse_skills_are_offered_only_with_an_agent():
     names = {"browse", "browser_status", "stop_browsing"}
 
-    assert not names & set(AssistantResponder("http://h").skills.names)
-    assert names <= set(AssistantResponder("http://h", browse=FakeAgent(None)).skills.names)
+    assert not names & set(Assistant("http://h").skills.names)
+    assert names <= set(Assistant("http://h", browse=FakeAgent(None)).skills.names)
 
 
 def test_a_failure_and_a_crash_are_recorded_and_spoken_once_in_fixed_words(realtime):

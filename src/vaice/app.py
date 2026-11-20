@@ -1,4 +1,4 @@
-"""Gradio/WebRTC voice UI: pause detection → responder (audio in, audio out)."""
+"""Gradio/WebRTC voice UI: pause detection → assistant (audio in, audio out)."""
 import argparse
 import json
 import logging
@@ -16,6 +16,7 @@ import numpy as np
 from fastrtc import AdditionalOutputs, Stream
 
 from vaice import config, mcp_skills
+from vaice.assistant import Assistant
 from vaice.browse import (
     API_KEY_ENV,
     GATE_POLICY,
@@ -32,8 +33,7 @@ from vaice.interruptible import InterruptSafeReplyOnPause, stop_playing_reply
 from vaice.lifecycle import install_stop_handler, request_stop
 from vaice.memory import Memory
 from vaice.outbox import Outbox
-from vaice.responders.assistant import AssistantResponder
-from vaice.responders.llamacpp import check_server
+from vaice.realtime import check_server
 from vaice.server import ensure_server
 from vaice.shell import RUN_SHELL
 from vaice.skills import Skill
@@ -130,7 +130,7 @@ def refresh_view(conversation: Conversation, known: str, pending: Callable[[], P
     return (*components, rendered)
 
 
-def make_handler(responder: AssistantResponder, conversation: Conversation):
+def make_handler(responder: Assistant, conversation: Conversation):
     def reply(audio: tuple[int, np.ndarray]):
         """Called by ReplyOnPause when the speaker stops; streams audio back as it is produced."""
         start = time.perf_counter()  # before history(): waiting for the last transcript counts as latency
@@ -181,7 +181,7 @@ def make_handler(responder: AssistantResponder, conversation: Conversation):
     return reply
 
 
-def build_stream(responder: AssistantResponder, conversation: Conversation) -> Stream:
+def build_stream(responder: Assistant, conversation: Conversation) -> Stream:
     chatbot = gr.Chatbot(type="messages", label="Conversation", height=CHATBOT_HEIGHT, allow_tags=False)
     # what the responder says with no reply in flight (the outcome of a Run click, a browser task) goes to the outbox
     # the audio handler drains
@@ -379,7 +379,7 @@ def main() -> None:
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     _warn_removed_settings()
-    install_stop_handler()  # Ctrl+C: the responders give up, gradio closes the server
+    install_stop_handler()  # Ctrl+C: the assistant gives up, gradio closes the server
     managed = None  # the llama-server `vaice up` started, if any
     mcp_tools = None  # the MCP servers started, if any
     browse_agent = None  # the browser agent for the `browse` skill, if any
@@ -389,7 +389,7 @@ def main() -> None:
         check_server()
         browse_agent = _open_browse()
         mcp_tools = _open_mcp()
-        responder = AssistantResponder(memory=_open_memory(), vision=_vision_skill(),
+        responder = Assistant(memory=_open_memory(), vision=_vision_skill(),
                                        extra_skills=mcp_tools.skills if mcp_tools else (), browse=browse_agent)
         _announce_vision()
         if config.SHELL:

@@ -60,7 +60,7 @@ class Question:
 @dataclass(frozen=True)
 class Started:
     """What `Skills.prepare` returns for a `background` skill: the sentence the reply speaks now. The skill's work
-    (a browser task) goes on after the reply, outside `Skills.run`; see `responders/assistant.py`."""
+    (a browser task) goes on after the reply, outside `Skills.run`; see `assistant.py`."""
 
     text: str
 
@@ -82,7 +82,7 @@ class Skill:
     # this in place of `run` when it has one. `run` stays the fallback that cannot be stopped.
     run_stoppable: Callable[[dict, Callable[[], bool]], SkillResult] | None = None
     # A skill that must not act on what a tool reported (it stores text the model chose, e.g. `remember`): the
-    # executor refuses it once another skill has run in the same reply. See `responders.assistant._Executor`.
+    # executor refuses it once another skill has run in the same reply. See `assistant._Executor`.
     direct_only: bool = False
 
 
@@ -521,7 +521,7 @@ def default_skills(shell: bool = False, memory: "Memory | None" = None, vision: 
     """The skills the assistant offers: five read-only checks, then the actions, with `shell`
     (`VAICE_SHELL`) `run_shell`, which asks first, with a `memory` (`VAICE_MEMORY`) the
     skills that keep and forget notes (see `memory.py`), with `browse` (`VAICE_BROWSE`) the background `browse` skill
-    (see `browse_task.py`; `browse_skills` replaces it with the set the responder builds: `browse` with its busy
+    (see `browse_task.py`; `browse_skills` replaces it with the set the assistant builds: `browse` with its busy
     check, `browser_status` and `stop_browsing`), with a `vision` skill (`VAICE_VISION_URL`, built by
     `vision.vision_skill`) `look_at_screen`, which comes right after the read-only checks, and with `extra` (the MCP
     tools, `VAICE_MCP_CONFIG`, see `mcp_skills.py`) last. An MCP name always holds `__` and no built-in does, so

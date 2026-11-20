@@ -13,7 +13,7 @@ def request_stop() -> None:
 
 
 def install_stop_handler() -> None:
-    """Make Ctrl+C ask the app to stop: gradio closes the server, the responders give up.
+    """Make Ctrl+C ask the app to stop: gradio closes the server, the assistant gives up.
 
     Gradio does not install a SIGINT handler of its own (its uvicorn server runs in a thread
     and `install_signal_handlers` is a no-op), so this stays in charge.

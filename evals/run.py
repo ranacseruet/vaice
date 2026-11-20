@@ -1,7 +1,7 @@
 """Live eval: how reliably do spoken commands turn into the right skill call?
 
 Run by hand against a real llama-server with an audio model (see evals/README.md); not imported by the app, not run
-in CI. Every run is the app's own path: `AssistantResponder` over /v1/realtime with the real skill definitions as
+in CI. Every run is the app's own path: `Assistant` over /v1/realtime with the real skill definitions as
 the session's tools and the real executor, over stub skills (canned results; nothing is executed on this machine).
 The calls are read from the turn's tool events, so a confirm skill's request and `browse`'s start count as the call.
 """
@@ -23,9 +23,9 @@ import requests
 import scoring
 
 from vaice import browse_task, config
+from vaice.assistant import Assistant
 from vaice.conversation import WAITING_FOR_CONFIRMATION, Turn
 from vaice.memory import Memory
-from vaice.responders.assistant import AssistantResponder
 from vaice.skills import SkillResult, Skills, default_skills
 from vaice.vision import VisionClient, vision_skill
 
@@ -175,10 +175,10 @@ def case_memory(case: dict) -> Memory:
 
 
 def run_case(url: str, prompt: str, skills: Skills, memory: Memory | None, audio, history) -> dict:
-    """One reply: the audio through `AssistantResponder`, timed to the first audio, with the calls read back from
+    """One reply: the audio through `Assistant`, timed to the first audio, with the calls read back from
     the turn's tool events. `pending`: the run ended in a request for the Run button or a browser task, whose spoken
     answer is the model's wording of that, not an answer to the question."""
-    responder = AssistantResponder(url=url, prompt=prompt, skills=skills, memory=memory)
+    responder = Assistant(url=url, prompt=prompt, skills=skills, memory=memory)
     turn = Turn()
     record: dict = {"error": None}
     first = None

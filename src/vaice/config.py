@@ -67,7 +67,7 @@ def _server_url(name: str, *, default: str) -> str:
 
 
 # llama-server's /v1/realtime. The mode line that tells the model to write its text alongside the speech is added in
-# code (responders/llamacpp.py), so VAICE_PROMPT only has to say how to answer.
+# code (realtime.py), so VAICE_PROMPT only has to say how to answer.
 LLAMACPP_URL = _server_url("VAICE_LLAMACPP_URL", default="http://localhost:8001")
 LLAMACPP_TIMEOUT = _number("VAICE_LLAMACPP_TIMEOUT", default="120", kind=float)
 

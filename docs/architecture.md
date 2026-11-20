@@ -13,7 +13,7 @@ skills and every safety decision; the model only listens and speaks, and asks fo
 ┌──────────┐  WebRTC audio  ┌────────────────────────────────────────┐        ┌──────────────────────────┐
 │ mic      │───────────────▶│ fastrtc: VAD finds the end of your     │        │ llama-server  (required) │
 │ speaker  │◀───────────────│ utterance, plays the reply, barge-in   │        │  /v1/realtime  speech    │
-│ Gradio UI│◀──── HTTP ────▶│ AssistantResponder: one session per    │──────▶ │  and transcription       │
+│ Gradio UI│◀──── HTTP ────▶│ Assistant: one session per             │──────▶ │  and transcription       │
 └──────────┘                │  reply, skills as its tools            │        └──────────────────────────┘
                             │ Conversation: history, saved to disk   │        ┌──────────────────────────┐
                             │ Skills + confirmation + memory         │        │ vision model  (optional) │
@@ -40,25 +40,24 @@ Principles that decide most design questions (the long form is in the [vision](v
 
 | Piece | Job |
 |---|---|
-| `app.py` | The CLI (`vaice`, `vaice up`) and the Gradio page: the microphone, the transcript, the *Tool activity*, confirmation and *Memory* panels, the **New conversation** button. Wraps the responder and logs time to first audio |
+| `app.py` | The CLI (`vaice`, `vaice up`) and the Gradio page: the microphone, the transcript, the *Tool activity*, confirmation and *Memory* panels, the **New conversation** button. Wraps the assistant and logs time to first audio |
 | `interruptible.py` | `InterruptSafeReplyOnPause`, a fastrtc `ReplyOnPause` subclass. Tunes the VAD, keeps 0.3 s of pre-roll so opening words are not clipped, fixes the races that made barge-in drop the interrupting question, and serves the outbox when no reply is playing |
 | `outbox.py` | `Outbox`: audio frames and callback markers that a worker thread queues for speech no reply carries (the outcome of a Run click, a browser task); the handler's idle `emit()` serves it |
-| `audio.py` | Browser frames to mono PCM16 at the model's rate, and replies back to float32 |
-| `responders/base.py` | The `Responder` contract: `respond(audio, history, turn)` yields `(sample_rate, float32 samples)` chunks and reports the transcript and the spoken text on the `turn` |
+| `audio.py` | Browser frames to mono PCM16 at the model's rate, and replies back to float32; the `AudioFrame` type, `(sample_rate, samples)` |
 | `conversation.py` | `Conversation` and `Turn`: the windowed history that goes into each prompt, barge-in trimming, atomic JSON persistence |
 | `server.py` | `vaice up`: reuse a running `llama-server` or start one, wait for `/health`, stop it at exit |
 | `lifecycle.py` | The one stop signal: Ctrl+C asks the app and every in-flight call to give up |
 
-The user speaks, fastrtc's VAD decides the utterance ended, and the responder produces a reply as a stream of audio
-chunks. If the user speaks again while a reply plays, fastrtc interrupts it ("barge-in"); the `Turn` then keeps only the
+The user speaks, fastrtc's VAD decides the utterance ended, and the assistant (`Assistant.respond(audio, history, turn)`) produces a reply as a stream of
+`(sample_rate, float32 samples)` chunks, reporting the transcript and the spoken text on the `turn`. If the user speaks again while a reply plays, fastrtc interrupts it ("barge-in"); the `Turn` then keeps only the
 part of the reply that could have been heard.
 
 ## A reply: one session, skills as its tools
 
-`LlamaCppResponder` (`responders/llamacpp.py`) opens a fresh `/v1/realtime` WebSocket session per reply. It sends the
+`RealtimeResponder` (`realtime.py`) opens a fresh `/v1/realtime` WebSocket session per reply. It sends the
 whole utterance as audio and receives the spoken reply as streamed frames with the model's own text alongside. History
 travels as ChatML turns inside the session `instructions`. A second `transcription` session reports what the user said.
-`AssistantResponder` (`responders/assistant.py`) is that responder with vaice's skills attached:
+`Assistant` (`assistant.py`) is that session with vaice's skills attached:
 
 ```
 audio ─▶ realtime session ─▶ speech frames ─▶ fastrtc
@@ -93,7 +92,7 @@ atomically, so two clicks cannot both run it.
 **Run** executes the stored call (never what the model says afterwards), records the result on the asking turn and then
 has a fresh realtime session speak the outcome: a session with no tools whose input is a text message
 (`The approved action is finished. Result: ... In one short sentence, tell the user what happened.`), so the model phrases it in its own voice. Its frames go to the
-`Outbox` (`app.build_stream` creates it, passes it to the handler and calls the responder's `attach_outbox`), followed by
+`Outbox` (`app.build_stream` creates it, passes it to the handler and calls the assistant's `attach_outbox`), followed by
 one marker that appends the spoken text to the asking turn (`Turn.append_assistant_text`, the one write a closed turn
 accepts), so a barge-in that clears the outbox leaves the text unrecorded too. The handler's idle `emit()` (no pause, no
 reply generator, the user not talking) serves the outbox **paced**: fastrtc's playback queue is unbounded, so the next
@@ -159,7 +158,7 @@ All under `VAICE_DATA_DIR` (default `~/.vaice`, files `0600`; empty means nothin
 ## Testing and measuring
 
 Unit tests use fakes for the server and the model; a fake `/v1/realtime` server (`tests/fake_realtime.py`) exercises
-the responder end to end, and `tests/threads.py` reproduces fastrtc's real threading. Nothing automated hears a real
+the assistant end to end, and `tests/threads.py` reproduces fastrtc's real threading. Nothing automated hears a real
 model or the browser microphone. Claims about model behavior come from the **live eval** in `evals/`, run by hand with
 repeats per build and quantization; only its scoring is unit-tested. See
 [Development](development.md).
@@ -168,11 +167,11 @@ repeats per build and quantization; only its scoring is unit-tested. See
 
 ```
 src/vaice/
-  app.py            CLI + Gradio/WebRTC UI; wraps the responder, logs time to first audio, transcript + reset, the panels
+  app.py            CLI + Gradio/WebRTC UI; wraps the assistant, logs time to first audio, transcript + reset, the panels
   interruptible.py  ReplyOnPause subclass fixing fastrtc 0.0.34 barge-in races, VAD tuning, pre-roll buffer, reset silencing, idle CPU polling, and serving the outbox
   outbox.py         Outbox: audio + markers for speech with no reply in flight (a Run click's or a browser task's outcome), drained by the idle emit()
   server.py         `vaice up`: reuse a running llama-server or start one (log in the data dir), wait for /health, stop it at exit
-  lifecycle.py      Stop signal handler: Ctrl+C asks the app and its responders to abandon in-flight calls
+  lifecycle.py      Stop signal handler: Ctrl+C asks the app and the assistant to abandon in-flight calls
   config.py         Environment-driven settings (.env.example lists them with defaults) and the removed/renamed names it warns about
   conversation.py   Turn / Conversation: history windowing, barge-in trimming, atomic JSON persistence, error notes
   skills.py         The skills (read-only answers, plus open/quit app, volume, mute), the Skills registry and the flat tool definitions
@@ -184,13 +183,11 @@ src/vaice/
   browse.py         Opt-in: PiAgent drives the Pi coding agent (`pi --mode rpc`) with a goal, through chrome-devtools-mcp; its config directory, child process, abort/kill handling and the cleanup of Chrome processes on its profile
   browse_task.py    Opt-in: the `browse`, `browser_status` and `stop_browsing` skill definitions and the pure pieces (fixed lines, step questions, result text, the status record)
   browse_gate.ts    The Pi extension browse.py loads: the approval policy for the browser's tools (read-only run, page-changing ask, the rest ask); shipped in the package
-  audio.py          Mic frame → mono PCM16 at the model's rate (resampled via scipy) and back to float32
-  responders/
-    base.py         Responder protocol (audio + history in → audio chunks out; reports transcript and spoken text)
-    llamacpp.py     llama-server /v1/realtime: the reply session (tool rounds, repetition breaker), the parallel transcription session, text-input speech (`speak`), startup check
-    assistant.py    AssistantResponder: the llama-server responder with the skills as tools, the per-reply executor, Run/Cancel, and the browser task thread
+  audio.py          Mic frame → mono PCM16 at the model's rate (resampled via scipy) and back to float32; the `AudioFrame` type
+  realtime.py       llama-server /v1/realtime: `RealtimeResponder` (the reply session: tool rounds, repetition breaker), the parallel transcription session, text-input speech (`speak`), `spoken_part`, startup check
+  assistant.py      `Assistant`: a `RealtimeResponder` with the skills as tools, the per-reply executor, Run/Cancel, and the browser task thread
 tests/
-  fake_realtime.py  Fake /v1/realtime WebSocket + HTTP server for testing the responders end to end
+  fake_realtime.py  Fake /v1/realtime WebSocket + HTTP server for testing the assistant end to end
   threads.py        fastrtc's real threading (a fresh thread per resume) for generator tests
   fixtures/fake_pi.py  A fake `pi --mode rpc` (scripted scenarios, records the commands it gets) for tests/test_browse.py
 evals/

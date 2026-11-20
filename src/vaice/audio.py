@@ -4,6 +4,10 @@ import math
 import numpy as np
 from scipy.signal import resample_poly
 
+# fastrtc audio: (sample_rate, samples). Input is int16 shaped (channels, n); output we yield is float32 at the
+# model's own rate.
+AudioFrame = tuple[int, np.ndarray]
+
 
 def to_mono_float(samples: np.ndarray) -> np.ndarray:
     """fastrtc int16 (channels, n) or (n,) → float32 mono in [-1, 1]."""

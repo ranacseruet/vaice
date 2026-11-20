@@ -2,12 +2,12 @@
 
 audio -> realtime session (/v1/realtime: text and speech out) <-> skills (tool calls, run by vaice) -> audio frames
 
-`AssistantResponder` runs a `LlamaCppResponder` (see there for the session and the threading) whose tools are the
+`Assistant` runs a `RealtimeResponder` (see there for the session and the threading) whose tools are the
 skills and whose per-reply executor is `_Executor`: it runs the model's calls on the session thread and returns what
 the model reads. A skill that cannot be undone (`kind="confirm"`) does not run when the model asks: the call becomes
 one request in `confirm.Confirmations`, on the screen at once, and the model is told that only the Run button runs it.
 Run executes the stored call and the outcome is spoken through the `Outbox` that the handler's idle emit() serves, by a
-session whose input is a text message (`llamacpp.speak`); Cancel only drops the request. The `browse` skill
+session whose input is a text message (`realtime.speak`); Cancel only drops the request. The `browse` skill
 (`VAICE_BROWSE`) is a task that outlives the reply: the call returns at once, a browser agent works on a daemon thread
 (`_browse`), says nothing until a step needs the Run button or it has finished, and its outcome is spoken the same way.
 A new utterance does not stop it: `browser_status` / `stop_browsing` and the Stop button are how the user asks about it
@@ -21,13 +21,13 @@ from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 
 from vaice import browse_task, config, lifecycle
+from vaice.audio import AudioFrame
 from vaice.browse import BrowseAgent, BrowseDeclined, BrowseError, BrowseStopped
 from vaice.confirm import Confirmations, Pending, Waiter
 from vaice.conversation import WAITING_FOR_CONFIRMATION, Message, Turn
 from vaice.memory import REFUSED_AFTER_TOOL, Memory
 from vaice.outbox import Outbox
-from vaice.responders.base import AudioFrame
-from vaice.responders.llamacpp import LlamaCppResponder, speak
+from vaice.realtime import RealtimeResponder, speak
 from vaice.skills import Question, Skill, SkillResult, Skills, Started, default_skills
 
 log = logging.getLogger(__name__)
@@ -52,7 +52,7 @@ def _notes_block(notes: Sequence[str]) -> str:
 
 
 class _Executor:
-    """Runs one reply's tool calls on the session thread (`llamacpp._converse`); never raises, and returns what the
+    """Runs one reply's tool calls on the session thread (`realtime._converse`); never raises, and returns what the
     model reads as each call's result. Records each call on `turn` for the Tool activity panel.
 
     A `direct_only` skill (`remember`) is refused once any other skill was called earlier in this reply: what the
@@ -196,7 +196,7 @@ def _browse(agent: BrowseAgent, confirmations: Confirmations, turn: Turn, name: 
         done()
 
 
-class AssistantResponder:
+class Assistant:
     """Answers each question in one speech-to-speech session whose tools are the skills (see the module docstring).
 
     Nothing here is bound to the thread that resumes the generator; the session's thread is a daemon of its own.
@@ -235,7 +235,7 @@ class AssistantResponder:
         self._runs: set[threading.Event] = set()  # per click-approved run: set by `clear_pending` to stop it
         self._runs_lock = threading.Lock()
         self._outbox: Outbox | None = None  # where outcomes are spoken (see `attach_outbox`)
-        self._realtime = LlamaCppResponder(
+        self._realtime = RealtimeResponder(
             url, prompt, timeout, max_output_tokens, tools=self.skills.definitions(),
             executor_for=lambda turn, stop: _Executor(self.skills, self._confirmations, self._start_browse, turn, stop),
             prompt_extra=lambda: _notes_block(self.memory.notes()) if self.memory is not None else "")
@@ -250,7 +250,7 @@ class AssistantResponder:
 
     def _say(self, turn: Turn, request: str, stop: Callable[[], bool] = lifecycle.stopping.is_set,
              generation: int | None = None) -> None:
-        """Speak `request` and record it on `turn` (see `llamacpp.speak`); nothing without an outbox."""
+        """Speak `request` and record it on `turn` (see `realtime.speak`); nothing without an outbox."""
         if self._outbox is not None:
             speak(self._url, self._timeout, self._max_output_tokens, self._outbox, turn, request, stop, generation)
 

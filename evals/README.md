@@ -4,7 +4,7 @@ A live harness that measures how reliably spoken commands turn into the right sk
 
 ## What it measures
 
-Each case is a spoken sentence and an expectation (see [Cases](#cases)). Every case runs `--repeats` times on the app's own path: `AssistantResponder` sends the audio over `/v1/realtime` with the real skill definitions declared as the session's tools, the model answers in text and audio, and its calls go through the real executor. The skills are stubs with canned results (`disk_space` says `160 gigabytes free of 460 gigabytes`, and so on; nothing is executed on this machine). A skill that needs the Run button (`quit_app`, `run_shell`, `forget_everything`) creates its request as in the app and answers the model "not done yet, press Run": nothing runs, and the call counts as the call. `browse` starts no browser task (the harness has no agent); it answers `Working in the browser.` and the call counts. The calls are read back from the turn's tool events, and the spoken answer is the text the model's audio carried.
+Each case is a spoken sentence and an expectation (see [Cases](#cases)). Every case runs `--repeats` times on the app's own path: `Assistant` sends the audio over `/v1/realtime` with the real skill definitions declared as the session's tools, the model answers in text and audio, and its calls go through the real executor. The skills are stubs with canned results (`disk_space` says `160 gigabytes free of 460 gigabytes`, and so on; nothing is executed on this machine). A skill that needs the Run button (`quit_app`, `run_shell`, `forget_everything`) creates its request as in the app and answers the model "not done yet, press Run": nothing runs, and the call counts as the call. `browse` starts no browser task (the harness has no agent); it answers `Working in the browser.` and the call counts. The calls are read back from the turn's tool events, and the spoken answer is the text the model's audio carried.
 
 Recorded per run: the calls, the transcript (from the parallel transcription session), the answer text, the time to first audio and the seconds of audio. The summary prints the median and max time to first audio, the median audio length and how many replies had under 0.5 s of audio (a spoken-nothing reply).
 
@@ -99,7 +99,7 @@ To add a case: append an entry with a unique `id` (a slug, also the recording's 
 
 ## Real-mic recordings
 
-Synthesized speech is clean; a real microphone is not, and the two can differ a lot. To test with your own voice, record the sentence in the case file and save it as `evals/recordings/<case id>.wav`: 16-bit PCM WAV, mono, any sample rate (the responder resamples). When a recording exists it is used instead of `say`. A partial set is fine: the other cases still use `say`.
+Synthesized speech is clean; a real microphone is not, and the two can differ a lot. To test with your own voice, record the sentence in the case file and save it as `evals/recordings/<case id>.wav`: 16-bit PCM WAV, mono, any sample rate (the assistant resamples). When a recording exists it is used instead of `say`. A partial set is fine: the other cases still use `say`.
 
 ## Caveats
 
