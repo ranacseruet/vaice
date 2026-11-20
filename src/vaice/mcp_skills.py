@@ -1,4 +1,4 @@
-"""MCP (Model Context Protocol) tools as skills (`VAICE_MCP_CONFIG`, assistant mode only).
+"""MCP (Model Context Protocol) tools as skills (`VAICE_MCP_CONFIG`).
 
 A JSON file in Claude Desktop's `mcpServers` shape names stdio servers for vaice to start and, per server, the
 tools to offer and how each is approved:
@@ -9,11 +9,11 @@ tools to offer and how each is approved:
 Each listed tool becomes a skill called `<server>__<tool>`. Only listed tools are offered: a server can offer
 anything, and vaice cannot tell what a tool does (a server's own annotations such as `readOnlyHint` are claims, not
 facts, and change nothing). The policy is the user's, and there are two: `run` (a `read` skill: runs at once) and
-`click` (a `confirm` skill only the Run button approves, the default; a spoken yes never does). The confirmation
+`click` (a `confirm` skill only the Run button approves, the default). The confirmation
 question names the tool and the server, never the arguments, which come from the model.
 
-What a server sends is untrusted, like any tool output: a tool's description (which the brain reads) is cleaned and
-capped, and a result reaches the brain only as a `tool` message. `remember` refuses once such a skill has run in the
+What a server sends is untrusted, like any tool output: a tool's description (which the model reads) is cleaned and
+capped, and a result reaches the model only as a tool output. `remember` refuses once such a skill has run in the
 reply (see `memory.py`).
 
 Servers run in one asyncio loop on a daemon thread (`vaice-mcp`): each server's client is entered inside a task of
@@ -39,7 +39,6 @@ from pathlib import Path
 from typing import Any, TextIO
 
 from vaice import config
-from vaice.confirm import NO, YES
 from vaice.skills import Question, Skill, SkillError, SkillResult
 
 log = logging.getLogger(__name__)
@@ -51,8 +50,8 @@ REMOVED_POLICIES = ("voice", "auto")
 DEFAULT_POLICY = "click"  # a tool can do anything: the user opts into anything looser, tool by tool
 MAX_NAME = 64  # a skill name is an OpenAI function name: [A-Za-z0-9_-], at most 64
 MAX_SERVER_NAME = 32  # leaves room for the tool in `<server>__<tool>`
-MAX_DESCRIPTION = 300  # characters of a server-supplied description the brain gets
-MCP_OUTPUT_CHARS = 2000  # characters of a result the brain gets (the whole text stays in the panel's detail)
+MAX_DESCRIPTION = 300  # characters of a server-supplied description the model gets
+MCP_OUTPUT_CHARS = 2000  # characters of a result the model gets (the whole text stays in the panel's detail)
 DETAIL_CHARS = 20000  # characters of a result kept for the panel
 ERROR_CHARS = 300  # characters of a tool's own error message that are spoken
 POLL_SECONDS = 0.05  # how often a running call is checked against `stop()` and the deadline
@@ -66,14 +65,11 @@ INSTALL_HINT = ("vaice: VAICE_MCP_CONFIG is set, but the MCP package (mcp 2.3 or
                 "Install it with: uv sync --extra mcp")
 
 ASK_CLICK = "I would use {tool} from {server}. The details are on the screen; click Run to allow the call."
-# For a name that holds a word the user answers with ("stop_timer"): speaker echo could say yes to it
 ASK_CLICK_GENERIC = ("I would use one of the connected tools. The details are on the screen; "
-                     "click Run to allow the call.")
+                     "click Run to allow the call.")  # for a tool or server name with nothing speakable in it
 
 _NAME = re.compile(rf"[A-Za-z0-9_-]{{1,{MAX_SERVER_NAME}}}")
 _SERVER_KEYS = ("type", "command", "args", "env", "cwd", "tools")
-# every word of every yes and no phrase, as `confirm` compares them ("don't" is "dont")
-_ANSWER_WORDS = frozenset(word for phrase in YES | NO for word in re.sub(r"[^\w\s]", "", phrase.casefold()).split())
 
 
 def _bad(message: str) -> SystemExit:
@@ -174,7 +170,7 @@ def load_config(path: Path) -> list[ServerConfig]:
     return [_server_config(name, entry) for name, entry in servers.items()]
 
 
-# --- what the brain and the user see of a tool
+# --- what the model and the user see of a tool
 
 
 def skill_name(server: str, tool: str) -> str:
@@ -190,7 +186,7 @@ def _one_line(text: str, limit: int) -> str:
 
 
 def _describe(server: str, tool: Any) -> str:
-    """The skill's description for the brain: the server's text (untrusted: tool-description poisoning is a real
+    """The skill's description for the model: the server's text (untrusted: tool-description poisoning is a real
     attack) cleaned to one capped line, behind the server's name."""
     text = ""
     for candidate in (tool.description, tool.title, tool.annotations.title if tool.annotations else None, tool.name):
@@ -202,7 +198,7 @@ def _describe(server: str, tool: Any) -> str:
 
 def _clean_schema(node: Any) -> Any:
     """`node` (a JSON schema) with every `description` string cleaned like a tool's: the schema is what the
-    server validates against, so it is passed on, but its descriptions are text the brain reads too."""
+    server validates against, so it is passed on, but its descriptions are text the model reads too."""
     if isinstance(node, dict):
         return {key: _one_line(value, MAX_DESCRIPTION) if key == "description" and isinstance(value, str)
                 else _clean_schema(value) for key, value in node.items()}
@@ -230,12 +226,11 @@ def _speakable(name: str) -> str:
 
 def question(server: str, tool: str) -> Question:
     """What is asked before a `click` tool runs: a fixed sentence that names the tool and the server, never the
-    arguments. A name that holds a word the user answers with gets a sentence without names (see `confirm.py`)."""
+    arguments."""
     tool_words, server_words = _speakable(tool), _speakable(server)
-    named = tool_words and server_words and not _ANSWER_WORDS & set(f"{tool_words} {server_words}".casefold().split())
-    if named:
-        return Question(ASK_CLICK.format(tool=tool_words, server=server_words), voice=False)
-    return Question(ASK_CLICK_GENERIC, voice=False)
+    if tool_words and server_words:
+        return Question(ASK_CLICK.format(tool=tool_words, server=server_words))
+    return Question(ASK_CLICK_GENERIC)
 
 
 def _result_text(content: list) -> str:

@@ -17,3 +17,7 @@
   `vaice` is a single-user demo (`concurrency_limit=1`). Normal page reloads close the old WebRTC connection immediately and reconnect within milliseconds. However, if a browser tab crashes or is force-closed without sending a WebRTC goodbye, the server holds the slot for ~30 seconds until ICE consent checks expire. Wait ~30 seconds and try again.
 - **`AbortError: BodyStreamBuffer was aborted` / `Connection errored out` in the browser console on reload:**
   Harmless message from Gradio's frontend client when page navigation cuts its open `queue/data` SSE stream.
+- **The assistant answers about your computer from its head instead of calling a skill, or says it did something it did not:**
+  The 2B model decides whether to call a skill, and it sometimes does not (the call rate is measured with the live eval, `evals/README.md`). Keep the "use the tool again" sentence of `VAICE_PROMPT` if you replaced it, ask for the thing directly ("check my battery"), and check the *Tool activity* panel: a call that is not listed there did not happen. Something that needs the **Run** button (quitting an app, a shell command) has not run until you press it.
+- **Startup warns that a setting "is ignored":**
+  The name is one an earlier version read (a `VAICE_BRAIN_*` variable, `VAICE_MODE`, a renamed `VAICE_ASSISTANT_*` one). See [Configuration](configuration.md#removed-and-renamed-settings) for what replaced it.

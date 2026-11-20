@@ -236,17 +236,18 @@ def skill(run, name="demo", required=()):
     return Skill(name, "Do the demo.", schema, run)
 
 
-def test_definitions_use_the_chat_completions_tool_shape():
+def test_definitions_use_the_flat_responses_tool_shape():
     definitions = default_skills().definitions()
 
-    assert [d["function"]["name"] for d in definitions] == [
+    assert [d["name"] for d in definitions] == [
         "disk_space", "battery_status", "system_info", "top_processes", "find_files",
         "open_app", "quit_app", "set_volume", "volume_up", "volume_down", "mute_sound"]
     for definition in definitions:
         assert definition["type"] == "function"
-        assert definition["function"]["description"].endswith(".")
-        assert definition["function"]["parameters"]["type"] == "object"
-    by_name = {d["function"]["name"]: d["function"]["parameters"] for d in definitions}
+        assert "function" not in definition  # the chat-completions nesting is rejected by the realtime session
+        assert definition["description"].endswith(".")
+        assert definition["parameters"]["type"] == "object"
+    by_name = {d["name"]: d["parameters"] for d in definitions}
     assert by_name["find_files"]["required"] == ["name"]
     assert by_name["find_files"]["properties"]["folder"]["enum"] == ["home", "desktop", "documents", "downloads"]
     assert by_name["top_processes"]["properties"]["by"]["enum"] == ["memory", "cpu"]

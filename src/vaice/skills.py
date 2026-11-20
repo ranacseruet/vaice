@@ -1,16 +1,16 @@
-"""Skills: small checks of and actions on this Mac that the assistant path runs itself.
+"""Skills: small checks of and actions on this Mac that the assistant runs itself.
 
-The brain (a chat model) asks for a skill by name; vaice runs it with vaice's own permissions and hands
-the model a short plain-text result to answer from. A skill never goes through a shell (argv lists
+The realtime session's model asks for a skill by name (a tool call); vaice runs it with vaice's own permissions and
+hands the model a short plain-text result to answer from. A skill never goes through a shell (argv lists
 only; `run_shell`, see `shell.py`, is the opt-in exception) and never raises: whatever goes wrong comes back as a
 `SkillResult` that says so in plain words, which is what the model then tells the user. macOS only, except
 `disk_space`.
 
 A skill has a `kind`: `read` checks something, `action` changes something that is easy to undo (an app
 opens, the volume moves) and runs at once, `confirm` changes something that is not (an app quits) and runs
-only after the user approved the question its `ask` built, which vaice holds (see `confirm.py`). The result
-of an action names its object ("opened Safari"): history replays past calls without their arguments, so a
-follow-up such as "now close it" can only be answered from the result's text.
+only after the user pressed Run on the request its `ask` built, which vaice holds (see `confirm.py`). The result
+of an action names its object ("opened Safari"): the next reply sees only what was said, not what ran, so a
+follow-up such as "now close it" can only be answered from the spoken words.
 """
 import json
 import logging
@@ -43,22 +43,18 @@ VOLUME_STEP = 10  # points for volume_up / volume_down
 @dataclass(frozen=True)
 class SkillResult:
     """`speech`: short plain text for the model to answer from (no paths, no raw tables).
-    `detail`: what the UI's Tool activity panel shows (paths, raw output); empty means show `speech`.
-    `answer`: when set, the reply ends with exactly this sentence and the model is not asked again (see
-    `SkillError`)."""
+    `detail`: what the UI's Tool activity panel shows (paths, raw output); empty means show `speech`."""
 
     speech: str
     detail: str = ""
-    answer: str = ""
 
 
 @dataclass(frozen=True)
 class Question:
-    """What to ask the user before a `confirm` skill runs: built only from the skill's validated arguments.
-    `voice`: whether a spoken yes may approve it; False means only the UI's Run button can."""
+    """What the panel asks the user before a `confirm` skill runs: built only from the skill's validated arguments.
+    Only the UI's Run button approves it."""
 
     text: str
-    voice: bool = True
 
 
 @dataclass(frozen=True)
@@ -75,35 +71,27 @@ class Skill:
     description: str  # one sentence: when to use it
     parameters: dict  # JSON schema of the arguments
     run: Callable[[dict], SkillResult]
-    # "read" | "action" (runs at once, easy to undo) | "confirm" (asks first) | "background" (the reply says a fixed
-    # line and ends; the work goes on after it and its result comes back to the brain later, see `Started`)
+    # "read" | "action" (runs at once, easy to undo) | "confirm" (asks first) | "background" (the call starts a task
+    # and returns at once; its outcome is spoken later, see `Started`)
     kind: str = "read"
-    # confirm only: validates the arguments and returns the question to speak, or raises SkillError. The
-    # question must not hold a word the user answers with (see confirm.py): the speakers' echo can reach the mic.
-    # A `str` is a question a spoken yes may approve; a `Question` says so itself. background: validates the arguments
-    # and returns the sentence to say now (a `str`), or raises SkillError.
+    # confirm only: validates the arguments and returns the question the panel shows, or raises SkillError.
+    # background: validates the arguments and returns the sentence the model gets as the call's result (a `str`), or
+    # raises SkillError.
     ask: Callable[[dict], str | Question] | None = None
     # A skill that can be stopped (barge-in, the app ending) takes the reply's `stop` callable: `Skills.run` calls
     # this in place of `run` when it has one. `run` stays the fallback that cannot be stopped.
     run_stoppable: Callable[[dict, Callable[[], bool]], SkillResult] | None = None
     # A skill that must not act on what a tool reported (it stores text the model chose, e.g. `remember`): the
-    # reply loop refuses it once another skill has run in the same reply. See `responders.assistant.decide`.
+    # executor refuses it once another skill has run in the same reply. See `responders.assistant._Executor`.
     direct_only: bool = False
 
 
 class SkillError(Exception):
-    """A skill could not do its job for a reason worth saying aloud (the message is spoken).
-
-    `answer`: a fixed sentence that ends the reply instead of the model's paraphrase of the failure, for a
-    refusal the model was seen misreporting (a refused reminder announced as "I've noted it")."""
-
-    def __init__(self, message: str, *, answer: str = ""):
-        super().__init__(message)
-        self.answer = answer
+    """A skill could not do its job for a reason worth saying aloud (the message is the result the model reads)."""
 
 
 class Skills:
-    """A set of skills: their chat-completions tool definitions, and a `run` that never raises."""
+    """A set of skills: their tool definitions, and a `run` that never raises."""
 
     def __init__(self, skills: Sequence[Skill]):
         self.skills = tuple(skills)
@@ -114,9 +102,9 @@ class Skills:
         return [skill.name for skill in self.skills]
 
     def definitions(self) -> list[dict]:
-        """The skills as `tools` for POST /v1/chat/completions."""
-        return [{"type": "function",
-                 "function": {"name": s.name, "description": s.description, "parameters": s.parameters}}
+        """The skills as the realtime session's `tools`: the Responses API's flat format (the chat-completions
+        nesting, `{"function": {...}}`, is rejected by llama-server's /v1/realtime)."""
+        return [{"type": "function", "name": s.name, "description": s.description, "parameters": s.parameters}
                 for s in self.skills]
 
     def direct_only(self, name: str) -> bool:
@@ -162,7 +150,7 @@ class Skills:
             return asked if isinstance(asked, Question) else Question(asked)
         except SkillError as exc:
             log.warning("skill %s cannot be asked about: %s", name, exc)
-            return SkillResult(f"{label} failed: {exc}", answer=exc.answer)
+            return SkillResult(f"{label} failed: {exc}")
         except Exception as exc:
             log.exception("skill %s could not be asked about", name)
             return SkillResult(f"{label} failed: {type(exc).__name__}: {exc}")
@@ -180,7 +168,7 @@ class Skills:
             return skill.run(args)
         except SkillError as exc:
             log.warning("skill %s failed: %s", name, exc)
-            return SkillResult(f"{label} failed: {exc}", answer=exc.answer)
+            return SkillResult(f"{label} failed: {exc}")
         except Exception as exc:
             log.exception("skill %s failed", name)
             return SkillResult(f"{label} failed: {type(exc).__name__}: {exc}")
@@ -530,8 +518,8 @@ def _mute_sound(args: dict) -> SkillResult:
 def default_skills(shell: bool = False, memory: "Memory | None" = None, vision: Skill | None = None,
                    extra: Sequence[Skill] = (), browse: bool = False,
                    browse_skills: Sequence[Skill] = ()) -> Skills:
-    """The skills the assistant path offers: five read-only checks, then the actions, with `shell`
-    (`VAICE_ASSISTANT_SHELL`) `run_shell`, which asks first, with a `memory` (`VAICE_ASSISTANT_MEMORY`) the
+    """The skills the assistant offers: five read-only checks, then the actions, with `shell`
+    (`VAICE_SHELL`) `run_shell`, which asks first, with a `memory` (`VAICE_MEMORY`) the
     skills that keep and forget notes (see `memory.py`), with `browse` (`VAICE_BROWSE`) the background `browse` skill
     (see `browse_task.py`; `browse_skills` replaces it with the set the responder builds: `browse` with its busy
     check, `browser_status` and `stop_browsing`), with a `vision` skill (`VAICE_VISION_URL`, built by

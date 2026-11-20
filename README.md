@@ -15,8 +15,8 @@ more, asking before it does anything it cannot undo. The goal is a real-life Jar
 
 - **Natural conversation.** Streaming spoken replies, barge-in (talk over it and it stops), and a conversation that
   carries over between questions and survives a restart.
-- **Gets things done** (assistant mode): disk space, battery, running processes, finding files, opening and quitting
-  apps, volume. Anything that cannot be undone asks first, by voice or with a button.
+- **Gets things done:** disk space, battery, running processes, finding files, opening and quitting apps, volume.
+  Anything that cannot be undone waits for you to press **Run**.
 - **Opt-in power:** approved shell commands, long-term memory of facts you ask it to keep, looking at your screen,
   tools from any [MCP](https://modelcontextprotocol.io) server, and web
   tasks in a browser window that asks before it changes a page.
@@ -28,15 +28,14 @@ more, asking before it does anything it cannot undo. The goal is a real-life Jar
 ## How it works
 
 ```
-browser mic ─WebRTC─▶ fastrtc (VAD) ─▶ ears ─text─▶ brain ◀──▶ skills (run in vaice, gated by confirmation)
-                                                      │ text
-                                                      ▼
-                                          voice writer ─▶ streamed speech ─▶ speaker
+browser mic ─WebRTC─▶ fastrtc (VAD) ─▶ one speech-to-speech session ◀──▶ skills (run in vaice, gated by Run)
+                                              │
+                                              ▼
+                                  streamed speech ─▶ speaker
 ```
 
-Two modes share the same front end. **Chat** (the default) lets one speech-to-speech model hear you and answer
-directly; **assistant** (`VAICE_MODE=assistant`) transcribes, lets a brain call skills that vaice itself runs, and
-speaks the answer sentence by sentence. Details: [architecture](docs/architecture.md).
+One model hears you and answers out loud. When you ask about your computer, it calls a skill that vaice itself runs
+and speaks the result. Details: [architecture](docs/architecture.md).
 
 ## Quickstart
 
@@ -52,13 +51,7 @@ uv sync --extra dev
 ```
 
 The first run downloads about 2.4 GB of model weights (LFM3-Omni-2B, 8-bit; about 4 GB of memory once loaded).
-In the browser, allow the microphone, click **Record**, ask a question and pause. To use the assistant instead of plain chat:
-
-```bash
-VAICE_MODE=assistant .venv/bin/vaice up
-```
-
-Then try "How much battery do I have left?" or "Open Safari". More options (running `llama-server` yourself,
+In the browser, allow the microphone, click **Record**, ask a question and pause. Then try "How much battery do I have left?" or "Open Safari". More options (running `llama-server` yourself,
 requirements, every setting): [Installation](docs/installation.md) and [Configuration](docs/configuration.md).
 
 ## Documentation
@@ -70,7 +63,7 @@ Start at the [documentation index](docs/README.md). The main pages:
 | [Vision](docs/vision.md) | Where this is going, and the principles it is built on |
 | [Architecture](docs/architecture.md) | How the pieces fit, and the code layout |
 | [Installation](docs/installation.md) · [Configuration](docs/configuration.md) | Setup, requirements, every `VAICE_*` setting |
-| [Assistant mode](docs/assistant-mode.md) | Skills, confirmation, shell commands, memory |
+| [The assistant](docs/assistant-mode.md) | Skills, confirmation, shell commands, memory |
 | [Screen vision](docs/screen-vision.md) · [MCP tools](docs/mcp-tools.md) · [Browser tasks](docs/browser-tasks.md) | The opt-in extensions |
 | [Privacy](docs/privacy.md) · [Troubleshooting](docs/troubleshooting.md) | What leaves your machine; fixing common problems |
 

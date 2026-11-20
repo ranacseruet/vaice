@@ -8,7 +8,7 @@ everything else.
 | Page | What it covers |
 |---|---|
 | [Vision](vision.md) | The north star (a Jarvis-style assistant that gets things done on your computer), the principles, where the project is today and what comes next |
-| [Architecture](architecture.md) | The processes, the two modes, the pipeline of an assistant reply, the safety model, threading, state on disk, and the code map |
+| [Architecture](architecture.md) | The processes, how a reply works, the safety model, threading, state on disk, and the code map |
 
 ## Setting up and running
 
@@ -24,8 +24,7 @@ everything else.
 
 | Page | What it covers |
 |---|---|
-| [Chat mode](chat-mode.md) | The default speech-to-speech mode and the model's built-in tools |
-| [Assistant mode](assistant-mode.md) | Skills, spoken progress, confirmation, shell commands and memory |
+| [The assistant](assistant-mode.md) | Skills, confirmation, shell commands and memory |
 | [Screen vision](screen-vision.md) | The `look_at_screen` skill and its vision model |
 | [MCP tools](mcp-tools.md) | Offer tools from MCP servers as skills, with a per-tool approval policy |
 | [Browser tasks](browser-tasks.md) | The `browse` skill: a Chrome window driven by the Pi agent in the background, asking before it changes a page |

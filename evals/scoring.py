@@ -169,10 +169,10 @@ def _percent(count: int, total: int) -> float:
 
 
 def aggregate(records: list[dict]) -> dict:
-    """Summary numbers for the runs of one path.
+    """Summary numbers for a set of runs.
 
     A record has `error` (text or None), `score` (the `score` result, absent for an errored run) and
-    `latency_s` (seconds to the first audio or to the decision; may be None). Percentages are of all
+    `latency_s` (seconds to the first audio; may be None). Percentages are of all
     runs, errors included; latency covers the runs that produced one. `answer_faithful` and `command_ok`
     (`check_answer`) are added when some run was asked for them: `{"ok": k, "of": N}` over completed runs.
     """

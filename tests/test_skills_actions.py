@@ -5,7 +5,6 @@ import json
 import pytest
 
 from vaice import skills as skills_module
-from vaice.confirm import NO, YES
 from vaice.skills import Question, Skill, SkillError, SkillResult, Skills, default_skills
 
 LSAPPINFO = """ 1) "loginwindow" ASN:0x0-0x3003:
@@ -199,15 +198,6 @@ def test_quit_app_refuses_bad_names_before_looking_at_anything(apps, name):
     assert skills.prepare("quit_app", json.dumps({"name": name})).speech.startswith("the quit app skill failed: ")
     assert skills.run("quit_app", json.dumps({"name": name})).speech.startswith("the quit app skill failed: ")
     assert apps.ran == []
-
-
-def test_the_question_holds_no_word_the_user_answers_with(apps):
-    answers = {word for phrase in YES | NO for word in phrase.replace("'", "").split()}
-
-    for name in ("Safari", "Google Chrome", "Finder"):
-        question = default_skills().prepare("quit_app", json.dumps({"name": name})).text
-        words = set(question.lower().replace("?", "").replace("'", "").split())
-        assert not words & answers, question
 
 
 # -- set_volume

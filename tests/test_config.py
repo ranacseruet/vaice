@@ -19,13 +19,13 @@ def test_number_default_and_override(monkeypatch):
 
 
 def test_env_default_and_override(monkeypatch):
-    monkeypatch.delenv("VAICE_LLAMACPP_PROMPT", raising=False)
-    assert config._env("VAICE_LLAMACPP_PROMPT", default="be brief") == "be brief"
-    monkeypatch.setenv("VAICE_LLAMACPP_PROMPT", "be terse")
-    assert config._env("VAICE_LLAMACPP_PROMPT", default="be brief") == "be terse"
-    monkeypatch.setenv("VAICE_LLAMACPP_PROMPT", "")
+    monkeypatch.delenv("VAICE_PROMPT", raising=False)
+    assert config._env("VAICE_PROMPT", default="be brief") == "be brief"
+    monkeypatch.setenv("VAICE_PROMPT", "be terse")
+    assert config._env("VAICE_PROMPT", default="be brief") == "be terse"
+    monkeypatch.setenv("VAICE_PROMPT", "")
     # an empty prompt is a choice, not "unset"
-    assert config._env("VAICE_LLAMACPP_PROMPT", default="be brief") == ""
+    assert config._env("VAICE_PROMPT", default="be brief") == ""
 
 
 @pytest.mark.parametrize(
@@ -67,22 +67,6 @@ def test_a_bad_flag_is_a_clean_error_not_a_traceback(monkeypatch):
         config._flag("VAICE_CAN_INTERRUPT", default=True)
 
 
-def test_tools_are_off_when_the_variable_is_unset(monkeypatch):
-    monkeypatch.delenv("VAICE_LLAMACPP_TOOLS", raising=False)
-    assert config._tools("VAICE_LLAMACPP_TOOLS") is None
-
-
-def test_tools_builtin_means_every_tool_the_server_advertises(monkeypatch):
-    monkeypatch.setenv("VAICE_LLAMACPP_TOOLS", "builtin")
-    assert config._tools("VAICE_LLAMACPP_TOOLS") is True
-
-
-def test_a_tool_list_is_rejected_the_set_is_the_server_s_decision(monkeypatch):
-    monkeypatch.setenv("VAICE_LLAMACPP_TOOLS", "get_info, read_file")
-    with pytest.raises(SystemExit, match="start llama-server with --tools"):
-        config._tools("VAICE_LLAMACPP_TOOLS")
-
-
 def test_flag_default_and_override(monkeypatch):
     monkeypatch.delenv("VAICE_CAN_INTERRUPT", raising=False)
     assert config._flag("VAICE_CAN_INTERRUPT", default=True) is True
@@ -109,13 +93,13 @@ def test_a_dotenv_in_the_working_directory_fills_unset_variables(monkeypatch, tm
 
 def test_the_settings_are_read_from_the_environment_at_import(monkeypatch):
     monkeypatch.setenv("VAICE_LLAMACPP_URL", "http://box:9000/v1")
-    monkeypatch.setenv("VAICE_LLAMACPP_PROMPT", "custom prompt")
+    monkeypatch.setenv("VAICE_PROMPT", "custom prompt")
     monkeypatch.setenv("VAICE_LLAMACPP_TIMEOUT", "7")
     monkeypatch.setenv("VAICE_VAD_THRESHOLD", "0.8")
     monkeypatch.setenv("VAICE_CAN_INTERRUPT", "0")
     try:
         reloaded = importlib.reload(config)
-        assert (reloaded.LLAMACPP_URL, reloaded.LLAMACPP_PROMPT, reloaded.LLAMACPP_TIMEOUT) == (
+        assert (reloaded.LLAMACPP_URL, reloaded.PROMPT, reloaded.LLAMACPP_TIMEOUT) == (
             "http://box:9000",
             "custom prompt",
             7.0,
@@ -225,60 +209,33 @@ def test_server_args_that_shlex_cannot_parse_name_the_variable(monkeypatch):
         importlib.reload(config)
 
 
-def test_the_mode_is_chat_unless_set_and_the_assistant_settings_have_defaults(monkeypatch):
-    for name in ("VAICE_MODE", "VAICE_ASSISTANT_PROMPT", "VAICE_VOICE"):
-        monkeypatch.delenv(name, raising=False)
+def test_the_prompt_has_a_default_and_can_be_overridden(monkeypatch):
+    monkeypatch.delenv("VAICE_PROMPT", raising=False)
     try:
         reloaded = importlib.reload(config)
-        assert reloaded.MODE == "chat"
-        assert reloaded.VOICE == "female"
-        assert reloaded.ASSISTANT_PROMPT.startswith("You are a voice assistant on the user's Mac.")
-        assert "Use a tool only when the question is about this computer" in reloaded.ASSISTANT_PROMPT
-        assert "use the tool again" in reloaded.ASSISTANT_PROMPT  # live eval: follow-ups are not answered from history
+        assert reloaded.PROMPT.startswith("You are a voice assistant on the user's Mac.")
+        assert "Use a tool only when the question is about this computer" in reloaded.PROMPT
+        assert "use the tool again" in reloaded.PROMPT  # live eval: follow-ups are not answered from history
+        monkeypatch.setenv("VAICE_PROMPT", "Be terse.")
+        assert importlib.reload(config).PROMPT == "Be terse."
     finally:
         monkeypatch.undo()
         importlib.reload(config)
 
 
-def test_shell_commands_are_off_unless_asked_for(monkeypatch):
-    monkeypatch.delenv("VAICE_ASSISTANT_SHELL", raising=False)
+@pytest.mark.parametrize(("name", "attribute"), [("VAICE_SHELL", "SHELL"), ("VAICE_MEMORY", "MEMORY")])
+def test_shell_commands_and_memory_are_off_unless_asked_for(monkeypatch, name, attribute):
+    monkeypatch.delenv(name, raising=False)
     try:
-        assert importlib.reload(config).ASSISTANT_SHELL is False
+        assert getattr(importlib.reload(config), attribute) is False
         for raw in ("1", "true", "on"):
-            monkeypatch.setenv("VAICE_ASSISTANT_SHELL", raw)
-            assert importlib.reload(config).ASSISTANT_SHELL is True
-        monkeypatch.setenv("VAICE_ASSISTANT_SHELL", "off")
-        assert importlib.reload(config).ASSISTANT_SHELL is False
-        monkeypatch.setenv("VAICE_ASSISTANT_SHELL", "maybe")
-        with pytest.raises(SystemExit, match="VAICE_ASSISTANT_SHELL must be a boolean"):
-            importlib.reload(config)
-    finally:
-        monkeypatch.undo()
-        importlib.reload(config)
-
-
-def test_the_assistant_settings_can_be_overridden(monkeypatch):
-    monkeypatch.setenv("VAICE_MODE", "assistant")
-    monkeypatch.setenv("VAICE_ASSISTANT_PROMPT", "Be terse.")
-    monkeypatch.setenv("VAICE_VOICE", "male")
-    try:
-        reloaded = importlib.reload(config)
-        assert (reloaded.MODE, reloaded.ASSISTANT_PROMPT, reloaded.VOICE) == ("assistant", "Be terse.", "male")
-    finally:
-        monkeypatch.undo()
-        importlib.reload(config)
-
-
-@pytest.mark.parametrize(("name", "value", "choices"), [
-    ("VAICE_MODE", "voice", "chat or assistant"),
-    ("VAICE_MODE", "", "chat or assistant"),
-    ("VAICE_MODE", "Assistant", "chat or assistant"),
-    ("VAICE_VOICE", "robot", "female or male"),
-])
-def test_a_bad_choice_names_the_variable_and_the_values(monkeypatch, name, value, choices):
-    monkeypatch.setenv(name, value)
-    try:
-        with pytest.raises(SystemExit, match=f"vaice: {name} must be {choices}, got {value!r}"):
+            monkeypatch.setenv(name, raw)
+            assert getattr(importlib.reload(config), attribute) is True
+        for raw in ("0", "false", "off"):
+            monkeypatch.setenv(name, raw)
+            assert getattr(importlib.reload(config), attribute) is False
+        monkeypatch.setenv(name, "maybe")
+        with pytest.raises(SystemExit, match=f"{name} must be a boolean"):
             importlib.reload(config)
     finally:
         monkeypatch.undo()
@@ -402,78 +359,6 @@ def test_a_bad_vision_timeout_is_a_clean_error(monkeypatch, value):
     monkeypatch.setenv("VAICE_VISION_TIMEOUT", value)
     try:
         with pytest.raises(SystemExit, match="VAICE_VISION_TIMEOUT must be"):
-            importlib.reload(config)
-    finally:
-        monkeypatch.undo()
-        importlib.reload(config)
-
-
-def test_spoken_progress_is_on_after_two_and_a_half_seconds_and_can_be_turned_off(monkeypatch):
-    monkeypatch.delenv("VAICE_ASSISTANT_PROGRESS_SECONDS", raising=False)
-    try:
-        assert importlib.reload(config).ASSISTANT_PROGRESS_SECONDS == 2.5
-        monkeypatch.setenv("VAICE_ASSISTANT_PROGRESS_SECONDS", "0")
-        assert importlib.reload(config).ASSISTANT_PROGRESS_SECONDS == 0
-        monkeypatch.setenv("VAICE_ASSISTANT_PROGRESS_SECONDS", "4.5")
-        assert importlib.reload(config).ASSISTANT_PROGRESS_SECONDS == 4.5
-    finally:
-        monkeypatch.undo()
-        importlib.reload(config)
-
-
-@pytest.mark.parametrize("value", ["-1", "soon", "nan"])
-def test_a_bad_progress_setting_is_a_clean_error(monkeypatch, value):
-    monkeypatch.setenv("VAICE_ASSISTANT_PROGRESS_SECONDS", value)
-    try:
-        with pytest.raises(SystemExit, match="VAICE_ASSISTANT_PROGRESS_SECONDS must be"):
-            importlib.reload(config)
-    finally:
-        monkeypatch.undo()
-        importlib.reload(config)
-
-
-def test_a_task_gets_ten_brain_calls_and_two_minutes_by_default_and_both_can_be_changed(monkeypatch):
-    monkeypatch.delenv("VAICE_ASSISTANT_MAX_STEPS", raising=False)
-    monkeypatch.delenv("VAICE_ASSISTANT_TASK_SECONDS", raising=False)
-    try:
-        reloaded = importlib.reload(config)
-        assert (reloaded.ASSISTANT_MAX_STEPS, reloaded.ASSISTANT_TASK_SECONDS) == (10, 120)
-        monkeypatch.setenv("VAICE_ASSISTANT_MAX_STEPS", "2")
-        monkeypatch.setenv("VAICE_ASSISTANT_TASK_SECONDS", "45.5")
-        reloaded = importlib.reload(config)
-        assert (reloaded.ASSISTANT_MAX_STEPS, reloaded.ASSISTANT_TASK_SECONDS) == (2, 45.5)
-    finally:
-        monkeypatch.undo()
-        importlib.reload(config)
-
-
-@pytest.mark.parametrize(("name", "value"), [
-    ("VAICE_ASSISTANT_MAX_STEPS", "1"), ("VAICE_ASSISTANT_MAX_STEPS", "0"), ("VAICE_ASSISTANT_MAX_STEPS", "abc"),
-    ("VAICE_ASSISTANT_MAX_STEPS", "2.5"),
-    ("VAICE_ASSISTANT_TASK_SECONDS", "0"), ("VAICE_ASSISTANT_TASK_SECONDS", "-5"),
-    ("VAICE_ASSISTANT_TASK_SECONDS", "soon"), ("VAICE_ASSISTANT_TASK_SECONDS", "nan"),
-])
-def test_a_bad_task_budget_is_a_clean_error(monkeypatch, name, value):
-    monkeypatch.setenv(name, value)
-    try:
-        with pytest.raises(SystemExit, match=f"{name} must be"):
-            importlib.reload(config)
-    finally:
-        monkeypatch.undo()
-        importlib.reload(config)
-
-
-def test_assistant_memory_is_off_unless_switched_on(monkeypatch):
-    monkeypatch.delenv("VAICE_ASSISTANT_MEMORY", raising=False)
-    try:
-        assert importlib.reload(config).ASSISTANT_MEMORY is False
-        monkeypatch.setenv("VAICE_ASSISTANT_MEMORY", "true")
-        assert importlib.reload(config).ASSISTANT_MEMORY is True
-        for raw in ("0", "false", "off"):
-            monkeypatch.setenv("VAICE_ASSISTANT_MEMORY", raw)
-            assert importlib.reload(config).ASSISTANT_MEMORY is False
-        monkeypatch.setenv("VAICE_ASSISTANT_MEMORY", "maybe")
-        with pytest.raises(SystemExit, match="VAICE_ASSISTANT_MEMORY must be a boolean"):
             importlib.reload(config)
     finally:
         monkeypatch.undo()
@@ -633,6 +518,46 @@ def test_a_removed_setting_that_is_set_is_reported_by_name_and_reason(monkeypatc
     assert all(reason for _, reason in found)
 
 
+@pytest.mark.parametrize(("name", "reason"), [
+    ("VAICE_ASSISTANT_PROMPT", "renamed to VAICE_PROMPT"),
+    ("VAICE_LLAMACPP_PROMPT", "renamed to VAICE_PROMPT"),
+    ("VAICE_ASSISTANT_SHELL", "renamed to VAICE_SHELL"),
+    ("VAICE_ASSISTANT_MEMORY", "renamed to VAICE_MEMORY"),
+    ("VAICE_MODE", "there is one mode"),
+    ("VAICE_LLAMACPP_TOOLS", "llama-server's own tools"),
+    ("VAICE_VOICE", "no separate text-to-speech"),
+    ("VAICE_ASSISTANT_PROGRESS_SECONDS", "no spoken progress"),
+    ("VAICE_ASSISTANT_MAX_STEPS", "at most two tool rounds"),
+    ("VAICE_ASSISTANT_TASK_SECONDS", "at most two tool rounds"),
+])
+def test_the_removed_and_renamed_settings_are_warned_about_and_not_honoured(monkeypatch, name, reason):
+    for other in config.REMOVED:
+        monkeypatch.delenv(other, raising=False)
+    monkeypatch.setenv(name, "x")
+
+    ((found, why),) = config.removed_settings()
+
+    assert found == name and reason in why
+    try:
+        importlib.reload(config)  # no value here is read, so none can break the start
+    finally:
+        monkeypatch.undo()
+        importlib.reload(config)
+
+
+def test_an_old_name_does_not_change_the_new_setting(monkeypatch):
+    monkeypatch.delenv("VAICE_PROMPT", raising=False)
+    monkeypatch.setenv("VAICE_ASSISTANT_PROMPT", "old prompt")
+    monkeypatch.setenv("VAICE_ASSISTANT_SHELL", "1")
+    monkeypatch.setenv("VAICE_ASSISTANT_MEMORY", "1")
+    try:
+        reloaded = importlib.reload(config)
+        assert reloaded.PROMPT != "old prompt" and reloaded.SHELL is False and reloaded.MEMORY is False
+    finally:
+        monkeypatch.undo()
+        importlib.reload(config)
+
+
 def test_no_removed_setting_is_reported_when_none_is_set(monkeypatch):
     for name in config.REMOVED:
         monkeypatch.delenv(name, raising=False)
@@ -643,6 +568,7 @@ def test_no_removed_setting_is_reported_when_none_is_set(monkeypatch):
 def test_a_removed_setting_does_not_stop_the_config_from_loading(monkeypatch):
     monkeypatch.setenv("VAICE_BRAIN_TIMEOUT", "soon")  # it used to be a startup error; now it is ignored
     monkeypatch.setenv("VAICE_ASSISTANT_AUTO_SECONDS", "-1")
+    monkeypatch.setenv("VAICE_ASSISTANT_MAX_STEPS", "abc")
     try:
         importlib.reload(config)
     finally:

@@ -513,226 +513,23 @@ def test_a_capped_output_is_capped_only_once():
     assert turn.tool_events[1]["output"] == once  # the marker is not doubled
 
 
-# --- tool results in the history (responders with `tool_history`)
+# --- tool events stay out of the history
+
+SAFARI = '{"name": "Safari"}'
 
 
-def exchange_with_tools(c, user, assistant, *events, finish=True):
-    turn = c.start_turn()
-    turn.set_user_text(user)
-    for name, output in events:
-        turn.add_tool_event(name, "{}", output)
-    turn.set_assistant_text(assistant)
-    if finish:
-        turn.finish()
-    return turn
-
-
-def test_history_without_tools_is_what_it_always_was_even_when_turns_have_tool_events():
-    c = Conversation()
-    exchange_with_tools(c, "memory?", "48 gigabytes.", ("system_info", "48 gigabytes of memory"))
-
-    expected = [("user", "memory?"), ("assistant", "48 gigabytes.")]
-    assert c.history(before=c.start_turn()) == expected
-    assert c.history(before=c.start_turn(), tools=False) == expected
-
-
-def test_history_with_tools_puts_each_result_between_the_user_and_assistant_messages():
-    c = Conversation()
-    exchange_with_tools(c, "up and memory?", "Three days, 48 gigabytes.",
-                        ("system_info", "up 3 days"), ("system_info", "48 gigabytes of memory"))
-    exchange(c, "thanks", "You are welcome.")
-
-    assert c.history(before=c.start_turn(), tools=True) == [
-        ("user", "up and memory?"),
-        ("tool", "system_info: up 3 days"),
-        ("tool", "system_info: 48 gigabytes of memory"),
-        ("assistant", "Three days, 48 gigabytes."),
-        ("user", "thanks"),
-        ("assistant", "You are welcome."),
-    ]
-
-
-def test_a_tool_result_in_history_is_capped_at_300_characters():
-    c = Conversation()
-    exchange_with_tools(c, "q", "a", ("find_files", "x" * 500))
-
-    history = c.history(before=c.start_turn(), tools=True)
-
-    role, text = history[1]
-    assert role == "tool"
-    assert len(text) == len("find_files: ") + 300
-    assert text.endswith("... (truncated)")
-
-
-def test_tool_results_follow_the_same_windowing_and_dropping_rules_as_the_turns():
-    c = Conversation(window=2)  # blocks of 2 turns
-    exchange_with_tools(c, "q0", "a0", ("disk_space", "r0"))
-    exchange_with_tools(c, "q1", "a1", ("disk_space", "r1"))
-    exchange_with_tools(c, "q2", "a2", ("disk_space", "r2"))
-    c.start_turn()  # its transcript never arrives: dropped
-    probe = c.start_turn()
-
-    assert c.history(before=probe, tools=True) == [
-        ("user", "q2"), ("tool", "disk_space: r2"), ("assistant", "a2")]
-
-
-def test_an_interrupted_turn_with_no_spoken_text_carries_no_tool_messages():
-    c = Conversation()
-    exchange_with_tools(c, "q", "", ("disk_space", "160 gigabytes free"), finish=False)
-
-    assert c.history(before=c.start_turn(), tools=True) == [("user", "q")]
-
-
-def test_tool_results_survive_a_reload_from_disk(tmp_path):
-    path = tmp_path / "c.json"
-    c = Conversation(path)
-    exchange_with_tools(c, "q", "a", ("battery_status", "80 percent"))
-    c.start_turn()
-
-    loaded = Conversation(path)
-
-    assert loaded.history(before=loaded.start_turn(), tools=True)[:3] == [
-        ("user", "q"), ("tool", "battery_status: 80 percent"), ("assistant", "a")]
-
-
-# --- a replayed call carries its real arguments (carrier: a JSON object `{"name", "arguments", "output"}`)
-
-
-def history_of(*events):
-    """The tool entries `Conversation.history(tools=True)` gives for one answered turn with these events."""
+def test_history_is_the_spoken_words_only_even_when_turns_have_tool_events():
     c = Conversation()
     turn = c.start_turn()
-    turn.set_user_text("q")
-    for name, arguments, output in events:
-        turn.add_tool_event(name, arguments, output)
-    turn.set_assistant_text("a")
+    turn.set_user_text("memory?")
+    turn.add_tool_event("system_info", "{}", "48 gigabytes of memory")
+    turn.set_assistant_text("48 gigabytes.")
     turn.finish()
-    return [text for role, text in c.history(before=c.start_turn(), tools=True) if role == "tool"]
+
+    assert c.history(before=c.start_turn()) == [("user", "memory?"), ("assistant", "48 gigabytes.")]
 
 
-def replayed(*events):
-    """(name, arguments, content) of every call `build_messages` makes from these stored events."""
-    from vaice.responders.assistant import build_messages
-
-    c = Conversation()
-    turn = c.start_turn()
-    turn.set_user_text("q")
-    for name, arguments, output in events:
-        turn.add_tool_event(name, arguments, output)
-    turn.set_assistant_text("a")
-    turn.finish()
-    messages = build_messages("p", c.history(before=c.start_turn(), tools=True), "next")
-    calls = [call for m in messages for call in m.get("tool_calls", [])]
-    contents = [m["content"] for m in messages if m["role"] == "tool"]
-    return [(call["function"]["name"], call["function"]["arguments"], content)
-            for call, content in zip(calls, contents, strict=True)]
-
-
-def test_a_replayed_call_carries_the_arguments_it_was_made_with():
-    snapshot = ("chrome__take_snapshot", '{"pageId": 1, "verbose": true}', "uid=1_0 RootWebArea")
-
-    assert replayed(snapshot) == [("chrome__take_snapshot", '{"pageId":1,"verbose":true}', "uid=1_0 RootWebArea")]
-
-
-def test_arguments_with_spaces_after_colons_and_an_output_holding_colons_still_split_correctly():
-    out = replayed(("notes__add", '{"title": "a: b", "text": "x"}', 'said: "hello": world'))
-
-    assert out == [("notes__add", '{"title":"a: b","text":"x"}', 'said: "hello": world')]
-
-
-def test_arguments_that_are_not_a_json_object_replay_as_an_empty_object():
-    for bad in ('{"pageId": 1', "[1, 2]", '"text"', "null", "42", ""):
-        assert replayed(("chrome__take_snapshot", bad, "ok")) == [("chrome__take_snapshot", "{}", "ok")], bad
-
-
-def test_arguments_longer_than_the_cap_replay_as_an_empty_object_and_are_never_truncated():
-    from vaice.conversation import TOOL_HISTORY_ARGUMENT_CHARS
-
-    assert TOOL_HISTORY_ARGUMENT_CHARS == 300
-    at_cap = json.dumps({"q": "x" * (TOOL_HISTORY_ARGUMENT_CHARS - len('{"q":""}'))}, separators=(",", ":"))
-    assert len(at_cap) == TOOL_HISTORY_ARGUMENT_CHARS
-
-    assert replayed(("look_at_screen", at_cap, "r")) == [("look_at_screen", at_cap, "r")]
-    assert replayed(("look_at_screen", json.dumps({"q": "x" * 400}), "r")) == [("look_at_screen", "{}", "r")]
-
-
-def test_the_cap_counts_the_compact_form_not_the_stored_spacing():
-    spaced = '{ "q" :  "' + "x" * 290 + '"   }'  # over 300 as stored, 298 compact
-    assert len(spaced) > 300
-
-    assert replayed(("look_at_screen", spaced, "r"))[0][1] == json.dumps({"q": "x" * 290}, separators=(",", ":"))
-
-
-def test_unicode_argument_values_survive_unescaped():
-    assert replayed(("notes__add", '{"text": "caf\\u00e9 \\u65e5\\u672c"}', "ok"))[0][1] == '{"text":"café 日本"}'
-
-
-def test_an_event_without_arguments_or_with_empty_ones_stays_a_plain_entry():
-    assert history_of(("battery_status", "{}", "80 percent"), ("disk_space", "", "160 free")) == [
-        "battery_status: 80 percent", "disk_space: 160 free"]
-    assert replayed(("disk_space", "", "160 free")) == [("disk_space", "{}", "160 free")]
-
-
-def test_a_legacy_entry_replays_as_an_empty_object():
-    from vaice.responders.assistant import build_messages
-
-    messages = build_messages("p", [("user", "q"), ("tool", "disk_space: a: b"), ("assistant", "a")], "next")
-
-    call = messages[2]["tool_calls"][0]["function"]
-    assert call == {"name": "disk_space", "arguments": "{}"}
-    assert messages[3]["content"] == "a: b"
-
-
-def test_a_brace_entry_that_is_not_a_valid_carrier_is_read_as_a_plain_entry():
-    from vaice.conversation import parse_tool_entry
-
-    assert parse_tool_entry('{not json: out') == ("{not json", "{}", "out")
-    assert parse_tool_entry('{"name": "x"}') == ('{"name"', "{}", '"x"}')  # no output key: not a carrier
-
-
-# --- a call that waited for confirmation is replayed once, with its final event
-
-SAFARI = '{"name":"Safari"}'
-
-
-def test_a_call_that_waited_and_then_finished_replays_once_with_its_result():
-    assert replayed(("quit_app", SAFARI, "waiting for confirmation"),
-                    ("quit_app", SAFARI, "quit Safari")) == [("quit_app", SAFARI, "quit Safari")]
-    for final in ("cancelled", "not confirmed", "expired"):
-        assert replayed(("quit_app", SAFARI, "waiting for confirmation"),
-                        ("quit_app", SAFARI, final)) == [("quit_app", SAFARI, final)]
-
-
-def test_a_call_still_waiting_keeps_its_single_entry():
-    assert replayed(("quit_app", SAFARI, "waiting for confirmation")) == [
-        ("quit_app", SAFARI, "waiting for confirmation")]
-
-
-def test_a_later_event_with_other_arguments_or_another_name_does_not_hide_the_waiting_one():
-    waiting = ("quit_app", SAFARI, "waiting for confirmation")
-
-    assert replayed(waiting, ("quit_app", '{"name":"Mail"}', "quit Mail")) == [
-        ("quit_app", SAFARI, "waiting for confirmation"), ("quit_app", '{"name":"Mail"}', "quit Mail")]
-    assert replayed(waiting, ("open_app", SAFARI, "opened Safari")) == [
-        ("quit_app", SAFARI, "waiting for confirmation"), ("open_app", SAFARI, "opened Safari")]
-
-
-def test_an_earlier_event_does_not_hide_a_later_waiting_one():
-    assert replayed(("quit_app", SAFARI, "quit Safari"), ("quit_app", SAFARI, "waiting for confirmation")) == [
-        ("quit_app", SAFARI, "quit Safari"), ("quit_app", SAFARI, "waiting for confirmation")]
-
-
-def test_two_identical_calls_in_one_turn_each_replay_their_result_only():
-    assert replayed(("quit_app", SAFARI, "waiting for confirmation"), ("quit_app", SAFARI, "quit Safari"),
-                    ("quit_app", SAFARI, "waiting for confirmation"), ("quit_app", SAFARI, "cancelled")) == [
-        ("quit_app", SAFARI, "quit Safari"), ("quit_app", SAFARI, "cancelled")]
-    # the second one is still waiting: only the first has a later match
-    assert replayed(("quit_app", SAFARI, "waiting for confirmation"), ("quit_app", SAFARI, "quit Safari"),
-                    ("quit_app", SAFARI, "waiting for confirmation")) == [
-        ("quit_app", SAFARI, "quit Safari"), ("quit_app", SAFARI, "waiting for confirmation")]
-
-
-def test_the_stored_events_and_the_activity_panel_still_hold_both_events():
+def test_the_stored_events_and_the_activity_panel_hold_a_call_that_waited_and_its_result():
     c = Conversation()
     turn = c.start_turn()
     turn.set_user_text("q")
@@ -745,7 +542,6 @@ def test_the_stored_events_and_the_activity_panel_still_hold_both_events():
     assert [e["output"] for e in turn.to_dict()["tools"]] == ["waiting for confirmation", "quit Safari"]
     activity = c.tool_activity_for_ui()
     assert "waiting for confirmation" in activity and "quit Safari" in activity
-    assert len(history_of(*[(e["name"], e["arguments"], e["output"]) for e in turn.tool_events])) == 1
 
 
 # --- append_assistant_text: the outcome of a click-approved call, joined to the question the turn asked

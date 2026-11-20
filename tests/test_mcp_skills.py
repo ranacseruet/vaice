@@ -1,4 +1,4 @@
-"""MCP tools as skills: the config file, what the brain and the user see of a tool (no SDK, no process), then a real
+"""MCP tools as skills: the config file, what the model and the user see of a tool (no SDK, no process), then a real
 stdio round trip against `tests/fixtures/mcp_server.py` (needs the optional `mcp` extra; those skip without it)."""
 import atexit
 import json
@@ -12,17 +12,15 @@ from types import SimpleNamespace
 import pytest
 
 from vaice import app, config, mcp_skills
-from vaice.brain import BrainReply, ToolCall
-from vaice.confirm import NO, YES, Pending
+from vaice.confirm import Confirmations
 from vaice.conversation import Turn
 from vaice.mcp_skills import McpTools, ServerConfig, _Server, load_config, question, skill_name
 from vaice.memory import REFUSED_AFTER_TOOL, Memory
-from vaice.responders.assistant import decide
+from vaice.responders.assistant import WAITING, _Executor
 from vaice.skills import Question, Skills, default_skills
 
 SECRET = "tok-9f3a-do-not-log"  # stands for a token in a server's `env`
 FIXTURE = str(Path(__file__).parent / "fixtures" / "mcp_server.py")
-ANSWER_WORDS = {word for phrase in YES | NO for word in phrase.replace("'", "").split()}
 
 
 @pytest.fixture(scope="module")
@@ -184,7 +182,7 @@ def test_click_asks_a_question_only_the_run_button_may_approve_and_run_asks_noth
     click = skills.prepare("notes__delete_note", arguments)
 
     assert click == Question("I would use delete note from notes. The details are on the screen; "
-                             "click Run to allow the call.", voice=False)
+                             "click Run to allow the call.")
     assert "secret plan" not in click.text  # the arguments come from the model: never read aloud
 
 
@@ -196,7 +194,7 @@ def test_a_tools_own_annotations_do_not_change_its_policy(caplog):
         mcp = offered({"add_note": "click"}, [tool("add_note", annotations=claims)])
 
     (skill,) = mcp.skills
-    assert skill.kind == "confirm" and Skills([skill]).prepare(skill.name, '{"text": "x"}').voice is False
+    assert skill.kind == "confirm" and isinstance(Skills([skill]).prepare(skill.name, '{"text": "x"}'), Question)
 
 
 def test_a_listed_tool_the_server_does_not_offer_is_a_warning_and_the_others_still_load(caplog):
@@ -290,29 +288,9 @@ def test_a_removed_tier_is_a_startup_error_naming_the_server_and_the_tool(tmp_pa
 # --- the confirmation sentences
 
 
-def sentence_words(sentence):
-    return set(sentence.lower().replace("?", "").replace(".", "").replace(";", "").replace("'", "").split())
-
-
-def test_no_confirmation_sentence_holds_a_word_the_user_answers_with():
-    sentences = [
-        question("notes", "add_note").text, mcp_skills.ASK_CLICK_GENERIC,
-        mcp_skills.ASK_CLICK.format(tool="add note", server="notes"),
-    ]
-
-    for sentence in sentences:
-        assert not sentence_words(sentence) & ANSWER_WORDS, sentence
-
-
-@pytest.mark.parametrize(("tool_name", "server"), [
-    ("stop_timer", "timers"), ("cancel", "timers"), ("add_note", "you"), ("do_it", "notes"), ("go-ahead", "x"),
-    ("confirm_order", "shop"), ("nope", "shop"), ("é", "notes"), ("add_note", "___"),
-])
-def test_a_name_that_holds_a_word_the_user_answers_with_gets_a_sentence_without_names(tool_name, server):
-    asked = question(server, tool_name)
-
-    assert asked == Question(mcp_skills.ASK_CLICK_GENERIC, voice=False)
-    assert not sentence_words(asked.text) & ANSWER_WORDS
+@pytest.mark.parametrize(("tool_name", "server"), [("é", "notes"), ("add_note", "___"), ("", "notes")])
+def test_a_name_with_nothing_speakable_gets_a_sentence_without_names(tool_name, server):
+    assert question(server, tool_name) == Question(mcp_skills.ASK_CLICK_GENERIC)
 
 
 def test_a_clean_name_is_spoken_without_underscores_and_dashes():
@@ -320,43 +298,27 @@ def test_a_clean_name_is_spoken_without_underscores_and_dashes():
 
     assert asked.text == ("I would use add note 2 from my notes. The details are on the screen; "
                           "click Run to allow the call.")
-    assert not sentence_words(asked.text) & ANSWER_WORDS
 
 
-# --- the brain/skills loop and the panel
+# --- the executor and the panel
 
 
-def ask_for(*calls):
-    tool_calls = [ToolCall(f"call_{i}", name, arguments) for i, (name, arguments) in enumerate(calls)]
-    message = {"role": "assistant", "content": "", "tool_calls": [
-        {"id": c.id, "type": "function", "function": {"name": c.name, "arguments": c.arguments}} for c in tool_calls]}
-    return BrainReply("", tool_calls, message)
-
-
-class ScriptedBrain:
-    def __init__(self, *replies):
-        self._replies = list(replies)
-
-    def complete(self, messages, tools):
-        return self._replies.pop(0)
-
-
-def test_a_click_request_shows_the_button_note_and_the_exact_call_in_the_panel():
+def test_a_click_request_is_pending_at_once_shows_the_exact_call_in_the_panel_and_runs_nothing():
     mcp = offered({"add_note": "click"}, [tool("add_note")])
     arguments = '{"text": "buy milk"}'
     name = "notes__add_note"
+    confirmations, turn = Confirmations(), Turn()
 
-    decision = decide(ScriptedBrain(ask_for((name, arguments))), Skills(mcp.skills), [], lambda: False, turn=Turn())
-    pending = decision.pending
+    output = _Executor(Skills(mcp.skills), confirmations, lambda *_a: None, turn, lambda: False)(name, arguments)
+    pending = confirmations.current()
 
-    assert isinstance(pending, Pending) and pending.voice is False and pending.name == name
+    assert output == WAITING and pending is not None and pending.name == name
     text = app.confirmation_panel(app.pending_view(pending))[1]
-    assert app.BUTTON_ONLY in text
     assert f"```\n{name} {arguments}\n```" in text  # the call as it will run: the arguments are on the screen
-    assert pending.question == decision.answer and "buy milk" not in decision.answer
+    assert "buy milk" not in pending.question
 
 
-# --- a result as the brain gets it
+# --- a result as the model gets it
 
 
 def test_a_result_names_what_is_not_text(sdk):
@@ -443,7 +405,7 @@ def test_an_empty_result_says_the_tool_returned_nothing(books):
     assert call(books, "books__nothing").speech == "the tool returned nothing"
 
 
-def test_a_long_result_is_cut_for_the_brain_but_not_for_the_panel(books):
+def test_a_long_result_is_cut_for_the_model_but_not_for_the_panel(books):
     result = call(books, "books__long_text", '{"length": 5000}')
 
     assert result.speech == "x" * 2000 + " (more on screen)"
@@ -507,13 +469,12 @@ def test_a_call_the_server_never_answers_is_cancelled_at_vaices_own_deadline(boo
 def test_a_mcp_skill_that_ran_makes_remember_refuse_in_the_same_reply_against_a_real_server(books):
     notes = Memory(None)
     skills = default_skills(memory=notes, extra=books.skills)
-    brain = ScriptedBrain(ask_for(("books__lookup_book", '{"title": "dune"}')),
-                          ask_for(("remember", '{"note": "The user is allergic to peanuts."}')),
-                          BrainReply("Okay.", [], {"role": "assistant", "content": "Okay."}))
+    execute = _Executor(skills, Confirmations(), lambda *_a: None, Turn(), lambda: False)
 
-    decision = decide(brain, skills, [], lambda: False, turn=Turn())
+    assert execute("books__lookup_book", '{"title": "dune"}') == "Dune by Frank Herbert, 1965"
+    refused = execute("remember", '{"note": "The user is allergic to peanuts."}')
 
-    assert notes.notes() == [] and decision.calls[-1].result.speech == REFUSED_AFTER_TOOL
+    assert notes.notes() == [] and refused == REFUSED_AFTER_TOOL
 
 
 # --- starting and closing

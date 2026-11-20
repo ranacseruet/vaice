@@ -13,11 +13,9 @@ from urllib.parse import urlsplit
 
 import gradio as gr
 import numpy as np
-import requests
 from fastrtc import AdditionalOutputs, Stream
 
 from vaice import config, mcp_skills
-from vaice.brain import ChatBrain
 from vaice.browse import (
     API_KEY_ENV,
     GATE_POLICY,
@@ -35,12 +33,11 @@ from vaice.lifecycle import install_stop_handler, request_stop
 from vaice.memory import Memory
 from vaice.outbox import Outbox
 from vaice.responders.assistant import AssistantResponder
-from vaice.responders.base import Responder
-from vaice.responders.llamacpp import LlamaCppResponder, check_server, fetch_tools, write_capable_tools
+from vaice.responders.llamacpp import check_server
 from vaice.server import ensure_server
 from vaice.shell import RUN_SHELL
 from vaice.skills import Skill
-from vaice.vision import vision_skill
+from vaice.vision import VisionClient, vision_skill
 
 log = logging.getLogger(__name__)
 
@@ -49,15 +46,10 @@ VIEW_REFRESH_SECONDS = 1.0  # how often the chatbot re-checks the conversation (
 ERROR_TEXT_LIMIT = 200  # characters of a failure shown in the UI; the traceback goes to the log
 CHATBOT_HEIGHT = 500  # pixels; the default (400) leaves the transcript cramped next to the mic
 UI_TITLE = "vaice"  # the heading above the mic
-BUTTON_ONLY = "Only the Run button can approve this one; saying yes will not."
+UI_SUBTITLE = "llama-server · assistant"  # the line under it names the voice service
 NOTHING_REMEMBERED = "Nothing remembered."
 BROWSE_ASK_EXTRA_SECONDS = 30.0  # a browser question waits this much longer than the confirmation's own expiry
 _MARKDOWN_PUNCTUATION = re.compile(r"([!-/:-@\[-`{-~])")  # every ASCII punctuation character
-
-
-def _subtitle() -> str:
-    """The line under the heading names the voice service."""
-    return "llama-server · assistant" if config.MODE == "assistant" else "llama-server · speech-to-speech"
 
 
 def _error_text(exc: Exception) -> str:
@@ -68,8 +60,7 @@ def pending_view(pending: Pending | None) -> dict | None:
     """What the confirmation panel shows of a waiting request (None: nothing waits)."""
     if pending is None:
         return None
-    return {"id": pending.id, "question": pending.question, "name": pending.name, "arguments": pending.arguments,
-            "voice": pending.voice}
+    return {"id": pending.id, "question": pending.question, "name": pending.name, "arguments": pending.arguments}
 
 
 def _fence(text: str) -> str:
@@ -91,15 +82,14 @@ def confirmation_panel(view: dict | None) -> tuple:
     the visibility of its button row (*Run* / *Cancel*).
 
     The text holds the question and, in a code block, the skill and its arguments exactly as they will run
-    (for a shell command the command line itself). A request a spoken yes cannot approve says so."""
+    (for a shell command the command line itself). Only the buttons answer it."""
     if view is None:
         return gr.update(visible=False), "", "", gr.update(visible=False)
     command = _shell_command(view) if view["name"] == RUN_SHELL else None
     if command is None:
         command = f"{view['name']} {view['arguments']}".rstrip()
     fence = _fence(command)
-    notice = "" if view.get("voice", True) else f"{BUTTON_ONLY}\n\n"
-    return (gr.update(visible=True), f"{view['question']}\n\n{notice}{fence}\n{command}\n{fence}", view["id"],
+    return (gr.update(visible=True), f"{view['question']}\n\n{fence}\n{command}\n{fence}", view["id"],
             gr.update(visible=True))
 
 
@@ -111,32 +101,25 @@ def memory_markdown(notes: list[str]) -> str:
     return "\n".join("- " + _MARKDOWN_PUNCTUATION.sub(lambda m: "\\" + m.group(1), note) for note in notes)
 
 
-def refresh_view(conversation: Conversation, known: str, pending: Callable[[], Pending | None] | None = None,
-                 memory: Callable[[], list[str]] | None = None,
-                 browsing: Callable[[], bool] | None = None) -> tuple:
+def refresh_view(conversation: Conversation, known: str, pending: Callable[[], Pending | None],
+                 browsing: Callable[[], bool], memory: Callable[[], list[str]] | None = None) -> tuple:
     """The timer's tick: the chatbot's and tool panel's new views when the conversation changed.
 
     The reply can finish before its parallel transcription session reports the transcript, so
     without this the "…" would sit in the chatbot until the next exchange or a page reload. Views
     are compared as JSON so an unchanged transcript is never re-rendered.
 
-    With `pending` (a responder that asks for confirmation) the confirmation panel is part of the view:
-    its visibility, text, the request's id (which the buttons pass back) and its button row's visibility
-    come after the two views.
-    With `browsing` (assistant mode with a browser: whether a browser task runs) the visibility of the task's *Stop*
-    row comes after those.
-    With `memory` (the notes, in assistant mode with memory on) the Memory panel's text comes after those.
+    The confirmation panel (`pending`: the request waiting for the user) is part of the view: its visibility, text,
+    the request's id (which the buttons pass back) and its button row's visibility come after the two views.
+    `browsing` (whether a browser task runs) gives the visibility of the task's *Stop* row, after those.
+    With `memory` (the notes, with memory on) the Memory panel's text comes after those.
     """
-    view = (conversation.messages_for_ui(), conversation.tool_activity_for_ui())
-    components = view
-    if pending is not None:
-        asked = pending_view(pending())
-        view += (asked,)
-        components += confirmation_panel(asked)
-    if browsing is not None:
-        running = browsing()
-        view += (running,)
-        components += (gr.update(visible=running),)
+    asked = pending_view(pending())
+    view = (conversation.messages_for_ui(), conversation.tool_activity_for_ui(), asked)
+    components = (*view[:2], *confirmation_panel(asked))
+    running = browsing()
+    view += (running,)
+    components += (gr.update(visible=running),)
     if memory is not None:
         notes = memory()
         view += (notes,)
@@ -147,21 +130,19 @@ def refresh_view(conversation: Conversation, known: str, pending: Callable[[], P
     return (*components, rendered)
 
 
-def make_handler(responder: Responder, conversation: Conversation):
+def make_handler(responder: AssistantResponder, conversation: Conversation):
     def reply(audio: tuple[int, np.ndarray]):
         """Called by ReplyOnPause when the speaker stops; streams audio back as it is produced."""
         start = time.perf_counter()  # before history(): waiting for the last transcript counts as latency
         turn: Turn | None = None
         try:
             turn = conversation.start_turn()
-            history = conversation.history(before=turn, tools=getattr(responder, "tool_history", False))
+            history = conversation.history(before=turn)
             first = True
             for chunk in responder.respond(audio, history, turn):
                 if first:
                     log.info("[%s] time to first audio: %.2fs", responder.name, time.perf_counter() - start)
                     first = False
-                # Assistant mode's spoken progress ("One moment.") is handed out here too, though it is not part of
-                # the recorded reply: a barge-in then trims the text a little less than it should.
                 turn.audio_handed_out(len(chunk[1]) / chunk[0])
                 yield chunk
             log.info("[%s] reply finished in %.2fs", responder.name, time.perf_counter() - start)
@@ -200,14 +181,12 @@ def make_handler(responder: Responder, conversation: Conversation):
     return reply
 
 
-def build_stream(responder: Responder, conversation: Conversation) -> Stream:
+def build_stream(responder: AssistantResponder, conversation: Conversation) -> Stream:
     chatbot = gr.Chatbot(type="messages", label="Conversation", height=CHATBOT_HEIGHT, allow_tags=False)
-    # a responder that can speak with no reply in flight (assistant mode: the outcome of a click-approved call) gets the
-    # outbox the audio handler drains; chat mode has no `attach_outbox`, so no outbox either
-    attach_outbox = getattr(responder, "attach_outbox", None)
-    outbox = Outbox() if attach_outbox is not None else None
-    if attach_outbox is not None:
-        attach_outbox(outbox)
+    # what the responder says with no reply in flight (the outcome of a Run click, a browser task) goes to the outbox
+    # the audio handler drains
+    outbox = Outbox()
+    responder.attach_outbox(outbox)
     stream = Stream(
         handler=InterruptSafeReplyOnPause(make_handler(responder, conversation), can_interrupt=config.CAN_INTERRUPT,
                                           outbox=outbox),
@@ -215,7 +194,7 @@ def build_stream(responder: Responder, conversation: Conversation) -> Stream:
         mode="send-receive",
         additional_outputs=[chatbot],
         additional_outputs_handler=lambda old, new: new,
-        ui_args={"title": UI_TITLE, "subtitle": _subtitle()},
+        ui_args={"title": UI_TITLE, "subtitle": UI_SUBTITLE},
     )
     with stream.ui:
         stream.ui.load(conversation.messages_for_ui, outputs=chatbot)  # show the stored conversation on every page load
@@ -223,31 +202,23 @@ def build_stream(responder: Responder, conversation: Conversation) -> Stream:
         # refresh_view's backstop (the timer below) catches conversation changes no reply update covered
         # (a late transcript, a barge-in's trimmed text, a tool round); seen holds the views it last rendered
         seen = gr.State("")
-        # Assistant mode: a request waiting for the user's yes (the responder's `pending`, see Responder)
-        # shows here, above the tool panel; chat mode has no such panel
-        pending = getattr(responder, "pending", None)
-        confirm_outputs: list = []
-        if pending is not None:
-            with gr.Column(visible=False) as confirm_panel:
-                confirm_text = gr.Markdown()
-                with gr.Row(visible=False) as run_row:
-                    run_button = gr.Button("Run", variant="primary")
-                    cancel_button = gr.Button("Cancel")
-            pending_id = gr.State("")  # the request the panel shows: a click can only settle that one
-            confirm_outputs = [confirm_panel, confirm_text, pending_id, run_row]
-        # Assistant mode with a browser: a Stop button while a browser task runs (the 1 s timer shows and hides it)
-        browsing = getattr(responder, "browsing", None) if hasattr(responder, "stop_task") else None
-        browse_outputs: list = []
-        if browsing is not None:
-            with gr.Row(visible=False) as browse_row:
-                browse_stop_button = gr.Button("Stop the browser task", variant="stop")
-            browse_outputs = [browse_row]
+        # A request waiting for the user's click (the responder's `pending`) shows here, above the tool panel
+        with gr.Column(visible=False) as confirm_panel:
+            confirm_text = gr.Markdown()
+            with gr.Row(visible=False) as run_row:
+                run_button = gr.Button("Run", variant="primary")
+                cancel_button = gr.Button("Cancel")
+        pending_id = gr.State("")  # the request the panel shows: a click can only settle that one
+        confirm_outputs = [confirm_panel, confirm_text, pending_id, run_row]
+        # A Stop button while a browser task runs (the 1 s timer shows and hides it)
+        with gr.Row(visible=False) as browse_row:
+            browse_stop_button = gr.Button("Stop the browser task", variant="stop")
         # Tool calls and their results, kept out of the conversation: collapsed by default, and the
         # 1 s timer (below) fills it when a tool round lands
         with gr.Accordion("Tool activity", open=False):
             tool_panel = gr.Markdown()
-        # Assistant mode with memory on: the notes it keeps about you; "New conversation" leaves them alone
-        memory = getattr(responder, "memory", None)
+        # With memory on: the notes it keeps about you; "New conversation" leaves them alone
+        memory = responder.memory
         memory_outputs: list = []
         if memory is not None:
             with gr.Accordion("Memory", open=False):
@@ -258,36 +229,32 @@ def build_stream(responder: Responder, conversation: Conversation) -> Stream:
             for handler in list(getattr(stream, "handlers", {}).values()):  # per-connection handler copies
                 stop_playing_reply(handler)  # silence a reply in flight; its turn is detached below
             conversation.reset()
-            clear_pending = getattr(responder, "clear_pending", None)
-            if clear_pending is not None:  # a request from the old conversation must not be approvable
-                clear_pending()
+            responder.clear_pending()  # a request from the old conversation must not be approvable
             return [], ""
 
         new_conversation.click(reset, outputs=[chatbot, tool_panel])
         chatbot.clear(reset)  # the chatbot's own trash icon would otherwise only clear the view
 
-        if pending is not None:
-            def settle(settle_request: Callable[[str], object], request_id: str) -> tuple:
-                settle_request(request_id)  # a stale id settles nothing
-                # hide at once; the blank `seen` makes the next tick draw whatever is pending now
-                return gr.update(visible=False), "", ""
+        def settle(settle_request: Callable[[str], object], request_id: str) -> tuple:
+            settle_request(request_id)  # a stale id settles nothing
+            # hide at once; the blank `seen` makes the next tick draw whatever is pending now
+            return gr.update(visible=False), "", ""
 
-            run_button.click(partial(settle, responder.approve), inputs=[pending_id],
-                             outputs=[confirm_panel, pending_id, seen])
-            cancel_button.click(partial(settle, responder.cancel), inputs=[pending_id],
-                                outputs=[confirm_panel, pending_id, seen])
+        run_button.click(partial(settle, responder.approve), inputs=[pending_id],
+                         outputs=[confirm_panel, pending_id, seen])
+        cancel_button.click(partial(settle, responder.cancel), inputs=[pending_id],
+                            outputs=[confirm_panel, pending_id, seen])
 
-        if browsing is not None:
-            def stop_browsing() -> tuple:
-                responder.stop_task()
-                return gr.update(visible=False), ""  # hide at once; the blank `seen` redraws on the next tick
+        def stop_browsing() -> tuple:
+            responder.stop_task()
+            return gr.update(visible=False), ""  # hide at once; the blank `seen` redraws on the next tick
 
-            browse_stop_button.click(stop_browsing, outputs=[browse_row, seen])
+        browse_stop_button.click(stop_browsing, outputs=[browse_row, seen])
 
         gr.Timer(VIEW_REFRESH_SECONDS).tick(
-            partial(refresh_view, conversation, pending=pending, memory=None if memory is None else memory.notes,
-                    browsing=browsing),
-            inputs=[seen], outputs=[chatbot, tool_panel, *confirm_outputs, *browse_outputs, *memory_outputs, seen])
+            partial(refresh_view, conversation, pending=responder.pending, browsing=responder.browsing,
+                    memory=None if memory is None else memory.notes),
+            inputs=[seen], outputs=[chatbot, tool_panel, *confirm_outputs, browse_row, *memory_outputs, seen])
     return stream
 
 
@@ -299,41 +266,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def _chat_responder() -> LlamaCppResponder:
-    """Chat mode: the interleaved responder, with llama-server's built-in tools when VAICE_LLAMACPP_TOOLS asks."""
-    tools: list[dict] = []
-    if config.LLAMACPP_TOOLS:
-        try:
-            tools = fetch_tools(config.LLAMACPP_URL)
-        except requests.RequestException as exc:
-            log.warning("tools requested, but llama-server's /tools is unavailable (%s); continuing without", exc)
-        if tools:
-            log.info("tools enabled: %s", ", ".join(str(tool.get("name")) for tool in tools))
-            try:
-                risky = write_capable_tools(config.LLAMACPP_URL)
-            except (requests.RequestException, ValueError, AttributeError, TypeError) as exc:
-                log.warning("could not check whether the advertised tools can modify this machine (%s)", exc)
-            else:
-                if risky:
-                    log.warning(
-                        "llama-server advertises tools that can change this machine (%s); they run with "
-                        "the server's permissions. Start llama-server with a read-only set, e.g. "
-                        "--tools get_info,read_file", ", ".join(risky))
-        else:
-            log.warning(
-                "tools requested (VAICE_LLAMACPP_TOOLS), but llama-server advertises none; start it with "
-                "--tools (see docs/chat-mode.md)"
-            )
-    return LlamaCppResponder(tools=tools or None)
-
-
 def _announce_vision() -> None:
-    """Assistant mode: say which vision model looks at the screen. A host off this machine gets a warning that a
+    """Say which vision model looks at the screen. A host off this machine gets a warning that a
     screenshot is sent to it; nothing here touches the API key, which is never logged (not even its length)."""
     if not config.VISION_URL:
         return
     parts = urlsplit(config.VISION_URL)
-    log.info("assistant vision (look_at_screen): %s, model %s", parts.netloc, config.VISION_MODEL or "(none set)")
+    log.info("vision (look_at_screen): %s, model %s", parts.netloc, config.VISION_MODEL or "(none set)")
     if not config.VISION_MODEL:
         log.warning("VAICE_VISION_MODEL is empty: most hosted endpoints require a model name")
     if parts.hostname not in config.LOCAL_HOSTS:
@@ -343,19 +282,19 @@ def _announce_vision() -> None:
 
 
 def _vision_skill() -> Skill | None:
-    """Assistant mode: `look_at_screen` over the configured vision endpoint (None when VAICE_VISION_URL is unset)."""
+    """`look_at_screen` over the configured vision endpoint (None when VAICE_VISION_URL is unset)."""
     if not config.VISION_URL:
         return None
-    brain = ChatBrain.helper(config.VISION_URL, config.VISION_TIMEOUT, config.VISION_MODEL, config.VISION_API_KEY,
-                             max_tokens=config.VISION_MAX_TOKENS or None)
-    return vision_skill(brain, f"{urlsplit(config.VISION_URL).netloc}, model {config.VISION_MODEL or '(none set)'}")
+    client = VisionClient(config.VISION_URL, config.VISION_TIMEOUT, config.VISION_MODEL, config.VISION_API_KEY,
+                          max_tokens=config.VISION_MAX_TOKENS or None)
+    return vision_skill(client, f"{urlsplit(config.VISION_URL).netloc}, model {config.VISION_MODEL or '(none set)'}")
 
 
 def _open_memory() -> Memory | None:
-    """Assistant mode: the notes it keeps (None when VAICE_ASSISTANT_MEMORY is off). The notes' text is never logged
-    here, only how many there are and where."""
-    if not config.ASSISTANT_MEMORY:
-        log.info("assistant memory is off (VAICE_ASSISTANT_MEMORY): no notes are kept or used")
+    """The notes the assistant keeps (None when VAICE_MEMORY is off). The notes' text is never logged here, only how
+    many there are and where."""
+    if not config.MEMORY:
+        log.info("assistant memory is off (VAICE_MEMORY): no notes are kept or used")
         return None
     memory = Memory(config.MEMORY_FILE)
     if config.MEMORY_FILE is None:
@@ -366,7 +305,7 @@ def _open_memory() -> Memory | None:
 
 
 def _open_browse() -> PiAgent | None:
-    """Assistant mode: the browser agent for the `browse` skill (None when VAICE_BROWSE is off, or when it cannot be
+    """The browser agent for the `browse` skill (None when VAICE_BROWSE is off, or when it cannot be
     used: the reason is a warning, and the skill is then not offered). Needs its own endpoint (VAICE_BROWSE_URL: Pi
     uses that, with its key, which goes to the child's environment only and is never logged) and the `pi` command,
     which the user installs: its presence and version are checked, nothing is installed."""
@@ -409,7 +348,7 @@ def _open_browse() -> PiAgent | None:
     log.warning("browse: pages' text and what the browser agent does go to %s; %s",
                 urlsplit(config.BROWSE_URL).netloc,
                 "VAICE_BROWSE_CONFIRM=off: the agent clicks, types and submits forms without asking" if ungated else
-                "a step that changes a page needs a spoken yes or the Run button, but navigation and reading do not")
+                "a step that changes a page needs the Run button, but navigation and reading do not")
     env = {API_KEY_ENV: config.BROWSE_API_KEY} if config.BROWSE_API_KEY else None
     return PiAgent(base / "pi", log_path=base / "pi.log", env=env,
                    ask_timeout_s=CONFIRM_SECONDS + BROWSE_ASK_EXTRA_SECONDS, chrome_profile=profile,
@@ -417,7 +356,7 @@ def _open_browse() -> PiAgent | None:
 
 
 def _open_mcp() -> mcp_skills.McpTools | None:
-    """Assistant mode: start the MCP servers in VAICE_MCP_CONFIG (None when it is unset) and say what each offers:
+    """Start the MCP servers in VAICE_MCP_CONFIG (None when it is unset) and say what each offers:
     tool names only, never the file's `env` values."""
     if config.MCP_CONFIG is None:
         return None
@@ -442,34 +381,21 @@ def main() -> None:
     _warn_removed_settings()
     install_stop_handler()  # Ctrl+C: the responders give up, gradio closes the server
     managed = None  # the llama-server `vaice up` started, if any
-    mcp_tools = None  # the MCP servers started for assistant mode, if any
-    browse_agent = None  # the browser agent for assistant mode's `browse` skill, if any
+    mcp_tools = None  # the MCP servers started, if any
+    browse_agent = None  # the browser agent for the `browse` skill, if any
     try:
         if up:
             managed = ensure_server()
         check_server()
-        if config.MODE == "assistant":
-            if config.LLAMACPP_TOOLS:
-                log.warning("VAICE_LLAMACPP_TOOLS is ignored in assistant mode: the skills run in vaice, "
-                            "not on llama-server")
-            browse_agent = _open_browse()
-            mcp_tools = _open_mcp()
-            responder = AssistantResponder(memory=_open_memory(), vision=_vision_skill(),
-                                           extra_skills=mcp_tools.skills if mcp_tools else (), browse=browse_agent)
-            _announce_vision()
-            if config.ASSISTANT_SHELL:
-                log.warning("VAICE_ASSISTANT_SHELL is on: after you approve it, a shell command the assistant "
-                            "proposes runs with vaice's own permissions (harmless ones by voice or click, "
-                            "all others only by the Run button)")
-            log.info("assistant mode: skills %s", ", ".join(responder.skills.names))
-        else:
-            if config.VISION_URL:
-                log.warning("VAICE_VISION_URL is ignored in chat mode: the screen skill is for assistant mode only")
-            if config.MCP_CONFIG is not None:
-                log.warning("VAICE_MCP_CONFIG is ignored in chat mode: MCP tools are for assistant mode only")
-            if config.BROWSE != "off":
-                log.warning("VAICE_BROWSE is ignored in chat mode: the browser skill is for assistant mode only")
-            responder = _chat_responder()
+        browse_agent = _open_browse()
+        mcp_tools = _open_mcp()
+        responder = AssistantResponder(memory=_open_memory(), vision=_vision_skill(),
+                                       extra_skills=mcp_tools.skills if mcp_tools else (), browse=browse_agent)
+        _announce_vision()
+        if config.SHELL:
+            log.warning("VAICE_SHELL is on: after you approve it with the Run button, a shell command the assistant "
+                        "proposes runs with vaice's own permissions")
+        log.info("assistant skills: %s", ", ".join(responder.skills.names))
         log.info("using llama-server at %s", config.LLAMACPP_URL)
 
         if config.CONVERSATION_FILE is None:  # VAICE_DATA_DIR="": the conversation is in memory only
