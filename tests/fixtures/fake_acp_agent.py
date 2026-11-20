@@ -17,7 +17,8 @@ Steps (each is an object):
   {"text": "..."}                       an agent_message_chunk
   {"tool": "name", "args": {...}}       a tool_call (title = name, rawInput = args)
   {"permission": {"title": "...", "raw": {...}}}   a session/request_permission with pi-acp's two options; the answer
-                                        is recorded. Options: "kinds" overrides them (a list of kinds)
+                                        is recorded. Options: "kinds" overrides them (a list of kinds); "raw" may be
+                                        any JSON value; "content" (texts) and "locations" (paths) are sent with it
   {"sleep": 0.2}                        wait (a cancel received meanwhile ends the prompt as "cancelled")
   {"exit": 3}                           the process exits at once (mid-task)
   {"fail": "text"}                      the prompt fails with a JSON-RPC error carrying `text`
@@ -34,6 +35,7 @@ from acp import PROTOCOL_VERSION, RequestError, run_agent
 from acp.schema import (
     AgentCapabilities,
     AgentMessageChunk,
+    ContentToolCallContent,
     Implementation,
     InitializeResponse,
     NewSessionResponse,
@@ -42,6 +44,7 @@ from acp.schema import (
     SessionCapabilities,
     SessionCloseCapabilities,
     TextContentBlock,
+    ToolCallLocation,
     ToolCallStart,
     ToolCallUpdate,
 )
@@ -135,11 +138,15 @@ class FakeAgent:
             raw = ask.get("raw", {"method": "confirm", "title": ask.get("title"), "message": ask.get("message")})
             response = await self.conn.request_permission(
                 session_id=session_id, options=options,
-                tool_call=ToolCallUpdate(tool_call_id="pi-ui-1", title=ask.get("title", "tool"), kind="other",
-                                         status="pending", raw_input=raw))
+                tool_call=ToolCallUpdate(
+                    tool_call_id="pi-ui-1", title=ask.get("title", "tool"), kind="other", status="pending",
+                    raw_input=raw,
+                    content=[ContentToolCallContent(type="content", content=TextContentBlock(type="text", text=text))
+                             for text in ask.get("content", [])] or None,
+                    locations=[ToolCallLocation(path=path) for path in ask.get("locations", [])] or None))
             outcome = response.outcome
             note(permission={"outcome": outcome.outcome, "option": getattr(outcome, "option_id", None),
-                             "message": raw.get("message")})
+                             "message": raw.get("message") if isinstance(raw, dict) else None})
             if outcome.outcome == "cancelled":  # a cancelled question ends the turn (an agent may do that)
                 self.cancelled.set()
         elif "sleep" in step:

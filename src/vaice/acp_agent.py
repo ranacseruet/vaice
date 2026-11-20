@@ -154,6 +154,20 @@ class _Task:
             _call(self.on_progress, update.title, update.raw_input if isinstance(update.raw_input, dict) else {})
 
 
+def _details(tool_call: ToolCallUpdate, pi_dialogs: bool) -> str:
+    """What a permission request asks to run, for the Run panel: whole, since Run approves all of it. Pi's dialog
+    envelope (exactly `{method: confirm, title, message}`, with `pi_dialogs`) is unwrapped: the gate's message is the
+    tool's arguments as JSON. Anything else is its raw input as sent (any JSON value; for another agent a `message`
+    is one argument among others), with the request's `content` and `locations` beside it when it has them."""
+    raw = tool_call.raw_input
+    if (pi_dialogs and isinstance(raw, dict) and raw.get("method") == "confirm"
+            and isinstance(raw.get("message"), str) and set(raw) <= {"method", "title", "message"}):
+        return raw["message"]
+    extra = {name: [item.model_dump(mode="json", by_alias=True, exclude_none=True) for item in items]
+             for name, items in (("content", tool_call.content), ("locations", tool_call.locations)) if items}
+    return json.dumps({"rawInput": raw, **extra} if extra else raw, default=str)
+
+
 def _call(callback: Callable | None, *args: Any) -> None:
     if callback is None:
         return
@@ -259,13 +273,7 @@ class _Client:
         if self._agent.permissions == "allow":
             return _selected(allow)
         title = tool_call.title or ""
-        raw = tool_call.raw_input if isinstance(tool_call.raw_input, dict) else {}
-        # whole: the panel must show everything the agent will run with. Only Pi's dialog envelope is unwrapped (the
-        # gate's message is the arguments' JSON); for any other agent a `message` is one argument among others
-        pi_dialog = (self._agent.pi_dialogs and raw.get("method") == "confirm" and isinstance(raw.get("message"), str)
-                     and set(raw) <= {"method", "title", "message"})
-        message = raw["message"] if pi_dialog else json.dumps(raw, default=str)
-        decision = await self._ask(state, title, message)
+        decision = await self._ask(state, title, _details(tool_call, self._agent.pi_dialogs))
         if decision is None:  # stopped, out of time or closed: not a no; the task ends for what ended it
             state.interrupt("abort")
             return CANCELLED

@@ -216,6 +216,21 @@ def test_a_long_question_reaches_the_panel_whole(harness):
     assert json.loads(h.asked[1][1]) == {"function": script}
 
 
+def test_a_question_carries_a_raw_input_that_is_not_an_object_and_the_requests_content_and_locations(harness):
+    h = harness({"steps": [{"permission": {"title": "run", "raw": "rm -rf ~/Documents"}},
+                           {"permission": {"title": "edit", "raw": ["a", "b"], "content": ["delete the file"],
+                                           "locations": ["/tmp/notes.txt"]}},
+                           {"permission": {"title": "nothing", "raw": None}},
+                           {"text": "ok"}]}, pi_dialogs=True)
+    h.run()
+    assert json.loads(h.asked[0][1]) == "rm -rf ~/Documents"
+    assert json.loads(h.asked[1][1]) == {"rawInput": ["a", "b"],
+                                         "content": [{"type": "content",
+                                                      "content": {"type": "text", "text": "delete the file"}}],
+                                         "locations": [{"path": "/tmp/notes.txt"}]}
+    assert json.loads(h.asked[2][1]) is None
+
+
 @pytest.mark.parametrize("pi_dialogs", [False, True])
 def test_a_message_argument_does_not_hide_the_other_arguments(harness, pi_dialogs):
     # another agent's tool can take a `message` next to what matters (a recipient); so can a Pi-shaped request with
