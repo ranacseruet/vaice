@@ -360,7 +360,9 @@ def test_a_command_that_cannot_be_started_is_a_clean_error(tmp_path):
 
 
 def test_an_agent_that_does_not_answer_initialize_is_ended_and_is_an_error(tmp_path, monkeypatch):
-    monkeypatch.setattr(browse, "START_TIMEOUT", 0.4)
+    # long enough for the fake to start and record its pid on a slow CI runner (~0.3 s locally, 2x on CI), far
+    # shorter than its 30 s delay
+    monkeypatch.setattr(browse, "START_TIMEOUT", 3.0)
     h = Harness(tmp_path, env={"FAKE_ACP_INIT_DELAY": "30"})
     try:
         with pytest.raises(BrowseError, match="did not answer") as caught:
