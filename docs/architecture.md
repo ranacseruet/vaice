@@ -87,7 +87,8 @@ A `confirm` skill (`quit_app`, `run_shell`, `forget_everything`, an MCP tool wit
 the model asks for it. `confirm.py` holds one pending request, shown in the UI at once with the skill and its exact
 arguments; **only the Run button settles it**, and nothing a user says does. It expires 60 s after it was made; a
 newer request replaces it, and a stale panel's buttons carry the old id and settle nothing. A pending request is taken
-atomically, so two clicks cannot both run it.
+atomically, so two clicks cannot both run it. A request, a browser task or a step from a reply that began before *New conversation*
+is refused (`Confirmations.epoch`), and outcomes and heads-ups are spoken one at a time, never interleaved.
 
 **Run** executes the stored call (never what the model says afterwards), records the result on the asking turn and then
 has a fresh realtime session speak the outcome: a session with no tools whose input is a text message

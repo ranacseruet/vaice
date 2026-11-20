@@ -64,13 +64,26 @@ class Confirmations:
         self._clock = clock
         self._lock = threading.Lock()
         self._pending: Pending | None = None
+        self._epoch = 0  # how many times `clear` ran ("New conversation")
 
-    def ask(self, pending: Pending) -> None:
-        """Hold `pending`, replacing any earlier request (a replaced waiter is answered no)."""
+    @property
+    def epoch(self) -> int:
+        """Changes with every `clear`: an asker takes it when it begins and passes it to `ask`."""
         with self._lock:
+            return self._epoch
+
+    def ask(self, pending: Pending, epoch: int | None = None) -> bool:
+        """Hold `pending`, replacing any earlier request (a replaced waiter is answered no). With `epoch` (the
+        `epoch` the asker saw when it began), refused when a `clear` came since: a reply or a task that "New
+        conversation" abandoned must not leave a request that Run would still run. False when refused."""
+        with self._lock:
+            if epoch is not None and epoch != self._epoch:
+                _refuse(pending)
+                return False
             replaced, self._pending = self._pending, pending
             pending.asked_at = self._clock()
             _refuse(replaced)
+            return True
 
     def current(self) -> Pending | None:
         """The request, unless it expired `CONFIRM_SECONDS` after it was asked (then it is dropped)."""
@@ -102,6 +115,7 @@ class Confirmations:
 
     def clear(self) -> None:
         with self._lock:
+            self._epoch += 1
             replaced, self._pending = self._pending, None
             _refuse(replaced)
 

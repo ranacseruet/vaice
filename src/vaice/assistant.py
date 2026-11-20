@@ -43,6 +43,8 @@ REPORT = "Tell the user in one or two short sentences: {text}"  # an outcome, in
 # "Sure, here's your request: quit Calculator." and invented advice on a failure; this one said what happened
 APPROVED = "The approved action is finished. Result: {text}. In one short sentence, tell the user what happened."
 APPROVAL = "{question} Press Run to allow it, or Cancel."  # the heads-up of a browser step that needs the button
+# What the model reads when "New conversation" came while its call was being prepared: no request was made
+DROPPED = "not done: the conversation was started over, so nothing was asked"
 
 
 def _notes_block(notes: Sequence[str]) -> str:
@@ -59,10 +61,13 @@ class _Executor:
     user dictates never needs a tool first, so a call after one acts on what a tool reported (a file name, a page,
     a command's output). It runs nothing and its result says so."""
 
-    def __init__(self, skills: Skills, confirmations: Confirmations, start_browse: Callable[[Turn, str, str], None],
-                 turn: Turn, stop: Callable[[], bool]):
+    def __init__(self, skills: Skills, confirmations: Confirmations,
+                 start_browse: Callable[[Turn, str, str, int], None], turn: Turn, stop: Callable[[], bool]):
         self._skills, self._confirmations, self._start_browse = skills, confirmations, start_browse
         self._turn, self._stop = turn, stop
+        # "New conversation" after this reply began (a `clear`) refuses its request and its browser task: the reply
+        # may still be preparing a call (`quit_app` asks `lsappinfo`) when the user starts over
+        self._epoch = confirmations.epoch
         self._tainted = False  # a skill other than a `direct_only` one was called in this reply
 
     def __call__(self, name: str, arguments: str) -> str:
@@ -75,11 +80,13 @@ class _Executor:
         self._tainted = True
         prepared = self._skills.prepare(name, arguments)
         if isinstance(prepared, Question):
-            self._confirmations.ask(Pending(name, arguments, prepared.text, self._turn))
+            if not self._confirmations.ask(Pending(name, arguments, prepared.text, self._turn), self._epoch):
+                log.info("assistant dropped %s: a new conversation began while it was prepared", name)
+                return self._record(name, arguments, SkillResult(DROPPED))
             self._turn.add_tool_event(name, arguments, WAITING_FOR_CONFIRMATION)
             return WAITING
         if isinstance(prepared, Started):
-            self._start_browse(self._turn, name, arguments)
+            self._start_browse(self._turn, name, arguments, self._epoch)
             return self._record(name, arguments, SkillResult(prepared.text))
         if prepared is None:
             prepared = self._skills.run(name, arguments, self._stop)
@@ -110,8 +117,9 @@ class _BrowseHooks:
     button is announced, through `say`."""
 
     def __init__(self, confirmations: Confirmations, say: Callable[[str], None], status: browse_task.BrowseStatus,
-                 stop: Callable[[], bool]):
+                 stop: Callable[[], bool], epoch: int):
         self._confirmations, self._say, self._status, self._stop = confirmations, say, status, stop
+        self._epoch = epoch  # the asking reply's (`_Executor`): a step asked after "New conversation" is a no
         self._host: str | None = None  # the page most recently opened: a step's question names it
 
     def progress(self, tool: str, args: dict) -> None:
@@ -139,7 +147,8 @@ class _BrowseHooks:
         pending = Pending(title, message, question, Turn(), waiter=waiter)  # a Turn of its own: not the conversation's
         self._status.asking(title)
         try:
-            self._confirmations.ask(pending)
+            if not self._confirmations.ask(pending, self._epoch):
+                return False
             threading.Thread(target=self._say, args=(SAY.format(text=APPROVAL.format(question=question)),),
                              name="vaice-assistant-speech", daemon=True).start()
             while True:
@@ -156,7 +165,7 @@ class _BrowseHooks:
 
 def _browse(agent: BrowseAgent, confirmations: Confirmations, turn: Turn, name: str, arguments: str, seconds: float,
             cancelled: threading.Event, status: browse_task.BrowseStatus,
-            say: Callable[[str, Callable[[], bool]], None], done: Callable[[], None]) -> None:
+            say: Callable[[str, Callable[[], bool]], None], done: Callable[[], None], epoch: int) -> None:
     """Daemon thread: a `browse` task, started by the reply whose call returned `WORKING`. The agent works for at most
     `seconds`, quietly (`_BrowseHooks`); a new utterance does not stop it. Every end is recorded on the asking turn,
     however many turns came since, and spoken once through `say(request, stop)`: the answer in the model's words, a
@@ -166,7 +175,7 @@ def _browse(agent: BrowseAgent, confirmations: Confirmations, turn: Turn, name: 
     def stop() -> bool:
         return cancelled.is_set() or lifecycle.stopping.is_set()
 
-    hooks = _BrowseHooks(confirmations, lambda request: say(request, stop), status, stop)
+    hooks = _BrowseHooks(confirmations, lambda request: say(request, stop), status, stop, epoch)
     begun = time.monotonic()
     try:
         try:
@@ -235,6 +244,9 @@ class Assistant:
         self._runs: set[threading.Event] = set()  # per click-approved run: set by `clear_pending` to stop it
         self._runs_lock = threading.Lock()
         self._outbox: Outbox | None = None  # where outcomes are spoken (see `attach_outbox`)
+        # One utterance at a time: a Run outcome, a step's heads-up and a task's outcome come from different threads,
+        # and two `speak` sessions writing frames to one outbox at once would interleave them
+        self._speech_lock = threading.Lock()
         self._realtime = RealtimeResponder(
             url, prompt, timeout, max_output_tokens, tools=self.skills.definitions(),
             executor_for=lambda turn, stop: _Executor(self.skills, self._confirmations, self._start_browse, turn, stop),
@@ -250,8 +262,14 @@ class Assistant:
 
     def _say(self, turn: Turn, request: str, stop: Callable[[], bool] = lifecycle.stopping.is_set,
              generation: int | None = None) -> None:
-        """Speak `request` and record it on `turn` (see `realtime.speak`); nothing without an outbox."""
-        if self._outbox is not None:
+        """Speak `request` and record it on `turn` (see `realtime.speak`), after any utterance already being spoken;
+        nothing without an outbox. The outbox generation is taken before the wait, so a clear while waiting (the user
+        spoke, "New conversation", Stop) still cancels it."""
+        if self._outbox is None:
+            return
+        if generation is None:
+            generation = self._outbox.generation
+        with self._speech_lock:
             speak(self._url, self._timeout, self._max_output_tokens, self._outbox, turn, request, stop, generation)
 
     # The UI's side of a confirmation. These run on the caller's thread (a Gradio worker), not on a reply's: there is
@@ -315,16 +333,17 @@ class Assistant:
 
     # The browser task: one at a time, with a registration of its own; an utterance does not touch it.
 
-    def _start_browse(self, turn: Turn, name: str, arguments: str) -> None:
+    def _start_browse(self, turn: Turn, name: str, arguments: str, epoch: int) -> None:
         """Start the `browse` task the model's call asked for (`turn` asked; a call while one runs was refused
         before this, see `browse_task.browse_skill`). An earlier task whose agent is done but whose outcome is still
-        being spoken is cancelled: the newest wins."""
+        being spoken is cancelled: the newest wins. Nothing starts when "New conversation" came since the asking
+        reply began (`epoch`, see `_Executor`)."""
         if self._browse_agent is None:
             return
         cancelled = threading.Event()
         status = browse_task.BrowseStatus(browse_task.goal_of(arguments))
         with self._task_lock:
-            if lifecycle.stopping.is_set():
+            if lifecycle.stopping.is_set() or epoch != self._confirmations.epoch:
                 return
             if self._browse is not None:
                 self._browse.cancelled.set()
@@ -336,7 +355,7 @@ class Assistant:
         threading.Thread(
             target=_browse,
             args=(self._browse_agent, self._confirmations, turn, name, arguments, self._browse_seconds, cancelled,
-                  status, say, lambda: self._browse_done(run)),
+                  status, say, lambda: self._browse_done(run), epoch),
             name="vaice-assistant-browse",
             daemon=True,
         ).start()
