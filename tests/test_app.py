@@ -3,8 +3,10 @@ import importlib
 import itertools
 import json
 import logging
+import os
 import signal
 import sys
+import types
 from types import SimpleNamespace
 from typing import ClassVar
 
@@ -1330,33 +1332,52 @@ def test_the_responder_gets_the_outbox_the_handler_serves():
 BROWSE_KEY = "sk-fake-browse-key-456"
 
 
-class FakePiAgent:
+class FakeAgent:
+    """What `pi_agent` and `acp_agent` return in these tests: it records how it was built."""
+
     closed = 0
     made: ClassVar[list] = []
 
-    def __init__(self, pi_home, **kwargs):
-        self.pi_home, self.kwargs = pi_home, kwargs
+    def __init__(self, *args, **kwargs):
+        self.args, self.kwargs = args, kwargs
         type(self).made.append(self)
 
     def close(self):
         type(self).closed += 1
 
 
+def fake_factory(*args, **kwargs):
+    return FakeAgent(*args, **kwargs)
+
+
 @pytest.fixture
 def browse_on(monkeypatch, tmp_path):
-    """VAICE_BROWSE=pi with an endpoint of its own, a `pi` that is found and prints 1.5.2, and
-    PiAgent faked."""
-    FakePiAgent.made, FakePiAgent.closed = [], 0
+    """VAICE_BROWSE=pi with an endpoint of its own, `pi` and `npx` found, `pi --version` printing 1.5.2, the ACP SDK
+    importable, a gate check that passes and the agent factories faked."""
+    FakeAgent.made, FakeAgent.closed = [], 0
     monkeypatch.setattr(app.config, "BROWSE", "pi")
+    monkeypatch.setattr(app.config, "BROWSE_AGENT", "")
     monkeypatch.setattr(app.config, "BROWSE_URL", "https://llm.example.com/v1")
     monkeypatch.setattr(app.config, "BROWSE_MODEL", "some-model")
     monkeypatch.setattr(app.config, "BROWSE_API_KEY", BROWSE_KEY)
     monkeypatch.setattr(app.config, "BROWSE_HEADLESS", False)
     monkeypatch.setattr(app.config, "BROWSE_CONFIRM", "ask")
-    monkeypatch.setattr(app.shutil, "which", lambda name: "/usr/bin/pi")
+    monkeypatch.setattr(app.shutil, "which", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(app, "pi_version", lambda: (1, 5, 2))
-    monkeypatch.setattr(app, "PiAgent", FakePiAgent)
+    monkeypatch.setattr(app, "check_gate", lambda *args, **kwargs: True)
+    monkeypatch.setitem(sys.modules, "acp", types.ModuleType("acp"))  # `import acp` succeeds without the extra
+    monkeypatch.setattr(app, "pi_agent", fake_factory)
+    monkeypatch.setattr(app, "acp_agent", fake_factory)
     monkeypatch.setattr(app.config, "DATA_DIR", tmp_path / "data")
+
+
+@pytest.fixture
+def acp_on(browse_on, monkeypatch):
+    """VAICE_BROWSE=acp with `opencode acp` as the agent."""
+    monkeypatch.setattr(app.config, "BROWSE", "acp")
+    monkeypatch.setattr(app.config, "BROWSE_AGENT", "opencode acp")
+    for name in ("BROWSE_URL", "BROWSE_MODEL", "BROWSE_API_KEY"):
+        monkeypatch.setattr(app.config, name, "")
 
 
 def test_browse_is_off_by_default_and_builds_nothing(monkeypatch):
@@ -1368,17 +1389,32 @@ def test_browse_is_off_by_default_and_builds_nothing(monkeypatch):
 
 @pytest.mark.parametrize(("setting", "value", "warning"), [
     (app.config, ("BROWSE_URL", ""), "needs VAICE_BROWSE_URL"),
-    (app.shutil, ("which", lambda name: None), "not on PATH"),
+    (app.shutil, ("which", lambda name: None if name == "pi" else "/usr/bin/npx"), "`pi` command is not on PATH"),
+    (app.shutil, ("which", lambda name: None if name == "npx" else "/usr/bin/pi"), "needs `npx` on PATH"),
     (app, ("pi_version", lambda: (1, 5, 1)), "is version 1.5.1, browse needs 1.5.2")])
-def test_browse_needs_its_endpoint_the_pi_command_and_a_recent_enough_version(browse_on, monkeypatch, caplog, setting,
-                                                                         value, warning):
+def test_browse_needs_its_endpoint_the_pi_command_npx_and_a_recent_enough_version(browse_on, monkeypatch, caplog,
+                                                                                 setting, value, warning):
     monkeypatch.setattr(setting, *value)
 
     with caplog.at_level(logging.WARNING, logger="vaice.app"):
         assert app._open_browse() is None
 
     assert warning in caplog.text and "browse is not offered" in caplog.text
-    assert FakePiAgent.made == []
+    assert FakeAgent.made == []
+
+
+def test_a_missing_acp_sdk_is_a_warning_naming_the_extra_and_browse_is_not_offered(browse_on, monkeypatch, caplog):
+    monkeypatch.setitem(sys.modules, "acp", None)  # `import acp` raises ImportError
+
+    for mode, agent in (("pi", ""), ("acp", "opencode acp")):
+        monkeypatch.setattr(app.config, "BROWSE", mode)
+        monkeypatch.setattr(app.config, "BROWSE_AGENT", agent)
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger="vaice.app"):
+            assert app._open_browse() is None
+
+        assert "uv sync --extra browse" in caplog.text and "browse is not offered" in caplog.text
+    assert FakeAgent.made == []
 
 
 def test_an_unreadable_version_warns_and_goes_on(browse_on, monkeypatch, caplog):
@@ -1387,55 +1423,79 @@ def test_an_unreadable_version_warns_and_goes_on(browse_on, monkeypatch, caplog)
     with caplog.at_level(logging.WARNING, logger="vaice.app"):
         agent = app._open_browse()
 
-    assert isinstance(agent, FakePiAgent) and "could not read the version" in caplog.text
+    assert isinstance(agent, FakeAgent) and "could not read the version" in caplog.text
 
 
-def test_browse_writes_pi_home_under_the_data_dir_and_gives_the_key_to_the_child_only(browse_on, tmp_path, caplog):
+def test_browse_writes_pi_home_and_the_launcher_under_the_data_dir_and_gives_the_key_to_the_agent_only(
+        browse_on, tmp_path, caplog):
     with caplog.at_level(logging.INFO, logger="vaice.app"):
         agent = app._open_browse()
 
     base = tmp_path / "data" / "browse"
-    assert agent.pi_home == base / "pi" and agent.kwargs["log_path"] == base / "pi.log"
-    assert agent.kwargs["env"] == {"VAICE_PI_API_KEY": BROWSE_KEY}  # the child's environment, nowhere else
+    home = base / "pi"
+    assert agent.args == (home,) and agent.kwargs["log_path"] == base / "pi.log"
+    env = agent.kwargs["env"]
+    assert env["VAICE_PI_API_KEY"] == BROWSE_KEY and env["PI_CODING_AGENT_DIR"] == str(home)  # the agent's environment
+    assert env["VAICE_GATE_NONCE"] == agent.kwargs["nonce"] and len(agent.kwargs["nonce"]) >= 16
+    assert json.loads(env["VAICE_GATE_POLICY"]) == app.GATE_POLICY
     assert agent.kwargs["chrome_profile"] == base / "chrome-profile"
     assert agent.kwargs["ask_timeout_s"] == app.CONFIRM_SECONDS + app.BROWSE_ASK_EXTRA_SECONDS
-    mcp = json.loads((base / "pi" / "mcp.json").read_text())["mcpServers"]["chrome"]["args"]
+    assert os.access(home / "launch-pi", os.X_OK)
+    mcp = json.loads((home / "mcp.json").read_text())["mcpServers"]["chrome"]["args"]
     assert f"--userDataDir={base / 'chrome-profile'}" in mcp and "--headless" not in mcp
-    models = json.loads((base / "pi" / "models.json").read_text())["providers"]["vaice"]
+    models = json.loads((home / "models.json").read_text())["providers"]["vaice"]
     assert models["baseUrl"] == "https://llm.example.com/v1" and models["apiKey"] == "$VAICE_PI_API_KEY"
-    for path in (base / "pi").rglob("*"):  # the key is in no file and no log line
+    for path in home.rglob("*"):  # the key is in no file and no log line
         assert not path.is_file() or BROWSE_KEY not in path.read_text()
     assert BROWSE_KEY not in caplog.text and "llm.example.com" in caplog.text and "some-model" in caplog.text
     assert models["models"][0]["id"] == "some-model"
+
+
+def test_browse_runs_the_gate_check_against_the_same_home_and_environment_before_offering_the_skill(
+        browse_on, monkeypatch, caplog):
+    seen = []
+
+    def check(home, env, *, log_path=None):
+        seen.append((home, env, log_path))
+        return False
+
+    monkeypatch.setattr(app, "check_gate", check)
+    with caplog.at_level(logging.WARNING, logger="vaice.app"):
+        assert app._open_browse() is None
+
+    (home, env, log_path), = seen
+    assert env["VAICE_GATE_NONCE"] and log_path == home.parent / "pi.log"
+    assert "did not report vaice's tool gate" in caplog.text and "browse is not offered" in caplog.text
+    assert BROWSE_KEY not in caplog.text and FakeAgent.made == []
 
 
 def test_an_empty_browse_model_warns_naming_the_browse_variable(browse_on, monkeypatch, caplog):
     monkeypatch.setattr(app.config, "BROWSE_MODEL", "")
 
     with caplog.at_level(logging.WARNING, logger="vaice.app"):
-        assert isinstance(app._open_browse(), FakePiAgent)
+        assert isinstance(app._open_browse(), FakeAgent)
 
     assert "VAICE_BROWSE_MODEL is empty" in caplog.text
 
 
 def test_browse_asks_for_page_changing_steps_unless_the_user_turned_that_off(browse_on, monkeypatch, caplog):
-    assert app._open_browse().kwargs["gate_policy"] == app.GATE_POLICY
+    assert json.loads(app._open_browse().kwargs["env"]["VAICE_GATE_POLICY"]) == app.GATE_POLICY
 
     monkeypatch.setattr(app.config, "BROWSE_CONFIRM", "off")
     with caplog.at_level(logging.WARNING, logger="vaice.app"):
         agent = app._open_browse()
 
-    assert agent.kwargs["gate_policy"] == app.UNGATED_POLICY
+    assert json.loads(agent.kwargs["env"]["VAICE_GATE_POLICY"]) == app.UNGATED_POLICY
     assert "without asking" in caplog.text
 
 
-def test_headless_adds_the_flag_and_no_key_means_no_environment(browse_on, monkeypatch, tmp_path):
+def test_headless_adds_the_flag_and_no_key_means_no_key_variable(browse_on, monkeypatch, tmp_path):
     monkeypatch.setattr(app.config, "BROWSE_HEADLESS", True)
     monkeypatch.setattr(app.config, "BROWSE_API_KEY", "")
 
     agent = app._open_browse()
 
-    assert agent.kwargs["env"] is None
+    assert "VAICE_PI_API_KEY" not in agent.kwargs["env"]
     mcp = json.loads((tmp_path / "data" / "browse" / "pi" / "mcp.json").read_text())["mcpServers"]["chrome"]["args"]
     assert "--headless" in mcp
 
@@ -1444,20 +1504,87 @@ def test_without_a_data_dir_the_browser_files_go_to_a_temp_dir(browse_on, monkey
     monkeypatch.setattr(app.config, "DATA_DIR", None)
     monkeypatch.setattr(app.tempfile, "mkdtemp", lambda prefix: str(tmp_path / "temp"))
 
-    agent = app._open_browse()
+    (home,) = app._open_browse().args
 
-    assert agent.pi_home == tmp_path / "temp" / "browse" / "pi" and agent.pi_home.is_dir()
+    assert home == tmp_path / "temp" / "browse" / "pi" and home.is_dir()
 
 
-def test_a_failed_write_of_the_pi_config_is_a_warning_and_browse_is_not_offered(browse_on, monkeypatch, caplog):
+@pytest.mark.parametrize("failing", ["write_pi_home", "write_launcher"])
+def test_a_failed_write_of_the_pi_config_is_a_warning_and_browse_is_not_offered(browse_on, monkeypatch, caplog,
+                                                                              failing):
     def refuse(*args, **kwargs):
         raise OSError("read-only")
 
-    monkeypatch.setattr(app, "write_pi_home", refuse)
+    monkeypatch.setattr(app, failing, refuse)
     with caplog.at_level(logging.WARNING, logger="vaice.app"):
         assert app._open_browse() is None
 
     assert "could not write the browser agent's configuration" in caplog.text
+
+
+def test_acp_browse_builds_the_agent_from_the_command_line_and_warns_what_vaice_cannot_gate(acp_on, tmp_path,
+                                                                                            caplog):
+    with caplog.at_level(logging.INFO, logger="vaice.app"):
+        agent = app._open_browse()
+
+    base = tmp_path / "data" / "browse"
+    assert agent.args == (["opencode", "acp"],)
+    assert agent.kwargs == {"work": base / "acp-work", "log_path": base / "acp.log",
+                            "browser_args": [f"--userDataDir={base / 'chrome-profile'}"],
+                            "ask_timeout_s": app.CONFIRM_SECONDS + app.BROWSE_ASK_EXTRA_SECONDS,
+                            "chrome_profile": base / "chrome-profile", "confirm": True}
+    assert "own tools and permission mode are set in its config" in caplog.text
+
+
+def test_acp_browse_splits_a_quoted_command_line(acp_on, monkeypatch):
+    monkeypatch.setattr(app.config, "BROWSE_AGENT", "npx -y @scope/agent --flag 'two words'")
+
+    assert app._open_browse().args == (["npx", "-y", "@scope/agent", "--flag", "two words"],)
+
+
+def test_acp_browse_with_confirmation_off_allows_each_step_and_says_so(acp_on, monkeypatch, caplog):
+    monkeypatch.setattr(app.config, "BROWSE_CONFIRM", "off")
+    monkeypatch.setattr(app.config, "BROWSE_HEADLESS", True)
+
+    with caplog.at_level(logging.WARNING, logger="vaice.app"):
+        agent = app._open_browse()
+
+    assert agent.kwargs["confirm"] is False and "--headless" in agent.kwargs["browser_args"]
+    assert "allows each without asking" in caplog.text
+
+
+@pytest.mark.parametrize(("agent", "which", "warning"), [
+    ("", lambda name: f"/usr/bin/{name}", "needs VAICE_BROWSE_AGENT"),
+    ("opencode 'acp", lambda name: f"/usr/bin/{name}", "not a command line"),
+    ("opencode acp", lambda name: None if name == "opencode" else "/usr/bin/npx", "`opencode` is not on PATH"),
+    ("opencode acp", lambda name: None if name == "npx" else "/usr/bin/opencode", "needs `npx` on PATH")])
+def test_acp_browse_needs_its_command_line_its_program_and_npx(acp_on, monkeypatch, caplog, agent, which, warning):
+    monkeypatch.setattr(app.config, "BROWSE_AGENT", agent)
+    monkeypatch.setattr(app.shutil, "which", which)
+
+    with caplog.at_level(logging.WARNING, logger="vaice.app"):
+        assert app._open_browse() is None
+
+    assert warning in caplog.text and "browse is not offered" in caplog.text
+    assert FakeAgent.made == []
+
+
+def test_acp_browse_warns_by_name_that_the_pi_settings_are_ignored(acp_on, monkeypatch, caplog):
+    monkeypatch.setattr(app.config, "BROWSE_URL", "https://llm.example.com/v1")
+    monkeypatch.setattr(app.config, "BROWSE_API_KEY", BROWSE_KEY)
+
+    with caplog.at_level(logging.WARNING, logger="vaice.app"):
+        assert isinstance(app._open_browse(), FakeAgent)
+
+    assert "VAICE_BROWSE_URL, VAICE_BROWSE_API_KEY" in caplog.text and "ignored" in caplog.text
+    assert BROWSE_KEY not in caplog.text and "llm.example.com" not in caplog.text
+
+
+def test_acp_browse_does_not_run_pi_checks(acp_on, monkeypatch):
+    monkeypatch.setattr(app, "pi_version", lambda: pytest.fail("checked pi"))
+    monkeypatch.setattr(app, "check_gate", lambda *a, **k: pytest.fail("checked the gate"))
+
+    assert isinstance(app._open_browse(), FakeAgent)
 
 
 def test_assistant_main_hands_the_agent_to_the_responder_and_closes_it_at_the_end(browse_on, monkeypatch, tmp_path):
@@ -1472,7 +1599,7 @@ def test_assistant_main_hands_the_agent_to_the_responder_and_closes_it_at_the_en
 
     assert _main_with(monkeypatch, tmp_path)
 
-    assert seen == [FakePiAgent.made[0]] and FakePiAgent.closed == 1
+    assert seen == [FakeAgent.made[0]] and FakeAgent.closed == 1
 
 
 def test_the_agent_is_closed_even_when_startup_fails_after_it(browse_on, monkeypatch, tmp_path):
@@ -1481,7 +1608,7 @@ def test_the_agent_is_closed_even_when_startup_fails_after_it(browse_on, monkeyp
     with pytest.raises(RuntimeError, match="boom"):
         _main_with(monkeypatch, tmp_path)
 
-    assert FakePiAgent.closed == 1
+    assert FakeAgent.closed == 1
 
 
 def test_the_stop_row_follows_whether_a_browser_task_runs():

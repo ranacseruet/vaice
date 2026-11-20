@@ -40,7 +40,7 @@ VAICE_MCP_CONFIG=~/.vaice/mcp.json .venv/bin/vaice
   the stored call runs and the assistant says how it went a moment later, with no new utterance from you; starting to
   talk over it stops it.
 - **Do not configure a browser server here.** For the web, use the `browse` skill
-  ([Browser tasks](browser-tasks.md)): Pi drives the browser in the background and asks before it changes a page.
+  ([Browser tasks](browser-tasks.md)): a browser agent (Pi or any ACP agent) drives the browser in the background and asks before it changes a page.
   A browser MCP server such as `chrome-devtools-mcp` in this file would give the model a second, competing
   browser path (a larger model mixed the two sets of tools), so leave it out.
 - **The question names the tool and the server, never the arguments** (they come from the model and can be long or

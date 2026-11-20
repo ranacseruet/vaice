@@ -184,13 +184,16 @@ MCP_TIMEOUT = _number("VAICE_MCP_TIMEOUT", default="30", kind=float)
 if not MCP_TIMEOUT > 0:
     raise SystemExit("vaice: VAICE_MCP_TIMEOUT must be > 0")
 
-# The `browse` skill (browse.py, browse_task.py), a task in a browser run by the Pi coding agent
-# in the background. `off` (default) or `pi` (needs the `pi` command on PATH, version 1.5.2 or newer, and
-# VAICE_BROWSE_URL: Pi has its own OpenAI-compatible endpoint, model and key). The browser is Chrome with a profile
-# of its own under VAICE_DATA_DIR, in a visible window unless VAICE_BROWSE_HEADLESS is on. A task is stopped after
-# VAICE_BROWSE_SECONDS. Pages' text and what the agent does go to that endpoint (see docs/privacy.md). The key is a
-# secret: it reaches Pi's environment only, never logged.
-BROWSE = _choice("VAICE_BROWSE", default="off", choices=("off", "pi"))
+# The `browse` skill (browse.py, acp_agent.py, browse_task.py), a task in a browser run in the background by a browser
+# agent that vaice speaks ACP to. `off` (default), `pi` (the Pi coding agent through pi-acp: needs `pi` on PATH,
+# version 1.5.2 or newer, `npx`, and VAICE_BROWSE_URL: Pi has its own OpenAI-compatible endpoint, model and key) or
+# `acp` (any ACP agent, the command line in VAICE_BROWSE_AGENT, which has its own model and login). Both need the
+# `browse` extra (`uv sync --extra browse`). The browser is Chrome with a profile of its own under VAICE_DATA_DIR, in a
+# visible window unless VAICE_BROWSE_HEADLESS is on. A task is stopped after VAICE_BROWSE_SECONDS. Pages' text and
+# what the agent does go to the agent's model endpoint (see docs/privacy.md). The Pi key is a secret: it reaches Pi's
+# environment only, never logged.
+BROWSE = _choice("VAICE_BROWSE", default="off", choices=("off", "pi", "acp"))
+BROWSE_AGENT = _env("VAICE_BROWSE_AGENT", default="").strip()
 BROWSE_URL = _endpoint_url("VAICE_BROWSE_URL")
 BROWSE_MODEL = _env("VAICE_BROWSE_MODEL", default="").strip()
 BROWSE_API_KEY = _env("VAICE_BROWSE_API_KEY", default="").strip()

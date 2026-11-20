@@ -3,6 +3,7 @@ import argparse
 import json
 import logging
 import re
+import shlex
 import shutil
 import tempfile
 import time
@@ -22,9 +23,16 @@ from vaice.browse import (
     GATE_POLICY,
     MIN_PI_VERSION,
     UNGATED_POLICY,
-    PiAgent,
+    BrowseAgent,
+    acp_agent,
+    check_gate,
     default_browser_args,
+    launcher_path,
+    new_nonce,
+    pi_agent,
+    pi_environment,
     pi_version,
+    write_launcher,
     write_pi_home,
 )
 from vaice.confirm import CONFIRM_SECONDS, Pending
@@ -304,21 +312,68 @@ def _open_memory() -> Memory | None:
     return memory
 
 
-def _open_browse() -> PiAgent | None:
-    """The browser agent for the `browse` skill (None when VAICE_BROWSE is off, or when it cannot be
-    used: the reason is a warning, and the skill is then not offered). Needs its own endpoint (VAICE_BROWSE_URL: Pi
-    uses that, with its key, which goes to the child's environment only and is never logged) and the `pi` command,
-    which the user installs: its presence and version are checked, nothing is installed."""
+def _open_browse() -> BrowseAgent | None:
+    """The browser agent for the `browse` skill (None when VAICE_BROWSE is off, or when it cannot be used: the reason
+    is a warning, and the skill is then not offered). `pi` is the Pi coding agent through pi-acp, `acp` any ACP agent
+    (VAICE_BROWSE_AGENT). Both need the ACP client SDK (the `browse` extra) and `npx` (pi-acp, the browser's
+    server); what the user installs (`pi`, the agent) is checked, nothing is installed."""
     if config.BROWSE == "off":
         return None
-    if not config.BROWSE_URL:
+    if config.BROWSE == "acp" and not config.BROWSE_AGENT:
+        log.warning("VAICE_BROWSE=acp needs VAICE_BROWSE_AGENT (the agent's command line, e.g. `opencode acp`): "
+                    "browse is not offered")
+        return None
+    if config.BROWSE == "pi" and not config.BROWSE_URL:
         log.warning("VAICE_BROWSE needs VAICE_BROWSE_URL (the browser agent has an endpoint of its own): "
                     "browse is not offered")
         return None
-    if shutil.which("pi") is None:
+    argv: list[str] = []
+    if config.BROWSE == "acp":
+        try:
+            argv = shlex.split(config.BROWSE_AGENT)
+        except ValueError:
+            argv = []
+        if not argv:
+            log.warning("VAICE_BROWSE_AGENT is not a command line (empty, or unbalanced quotes): browse is not "
+                        "offered")
+            return None
+        if shutil.which(argv[0]) is None:
+            log.warning("VAICE_BROWSE_AGENT: `%s` is not on PATH: browse is not offered", argv[0])
+            return None
+    elif shutil.which("pi") is None:
         log.warning("VAICE_BROWSE=pi, but the `pi` command is not on PATH (install the Pi coding agent, "
                     "https://pi.dev): browse is not offered")
         return None
+    if shutil.which("npx") is None:
+        log.warning("VAICE_BROWSE needs `npx` on PATH (Node.js: it starts %s and the browser's server): "
+                    "browse is not offered", "pi-acp" if config.BROWSE == "pi" else "the browser's server")
+        return None
+    try:
+        import acp  # noqa: F401 - checks the optional `browse` extra is installed
+    except ImportError:
+        log.warning("VAICE_BROWSE needs the ACP client SDK: run `uv sync --extra browse` (or `pip install "
+                    "'vaice[browse]'`): browse is not offered")
+        return None
+    if config.BROWSE == "pi":
+        return _open_pi_browse()
+    return _open_acp_browse(argv)
+
+
+def _browse_base() -> tuple[Path, Path, list[str]]:
+    """Where the browser agent's files go, the browser's own profile (logins persist there, nothing of the user's)
+    and chrome-devtools-mcp's arguments."""
+    base = (config.DATA_DIR if config.DATA_DIR is not None else Path(tempfile.mkdtemp(prefix="vaice-"))) / "browse"
+    profile = base / "chrome-profile"
+    args = default_browser_args(profile)
+    if config.BROWSE_HEADLESS:
+        args.append("--headless")
+    return base, profile, args
+
+
+def _open_pi_browse() -> BrowseAgent | None:
+    """Pi through pi-acp. Pi needs its own endpoint (VAICE_BROWSE_URL), with a key that goes to the child's
+    environment only and is never logged, and a version this was measured against. The gate extension is checked
+    against a real Pi before the skill is offered (`browse.check_gate`)."""
     wanted = ".".join(map(str, MIN_PI_VERSION))
     version = pi_version()
     if version is None:
@@ -327,32 +382,63 @@ def _open_browse() -> PiAgent | None:
         log.warning("`pi` is version %s, browse needs %s or newer: browse is not offered",
                     ".".join(map(str, version)), wanted)
         return None
-    base = (config.DATA_DIR if config.DATA_DIR is not None else Path(tempfile.mkdtemp(prefix="vaice-"))) / "browse"
-    profile = base / "chrome-profile"  # the browser's own profile: logins persist here, nothing of the user's
-    args = default_browser_args(profile)
-    if config.BROWSE_HEADLESS:
-        args.append("--headless")
+    base, profile, args = _browse_base()
+    home = base / "pi"
     try:
-        write_pi_home(base / "pi", base_url=config.BROWSE_URL, model=config.BROWSE_MODEL,
+        write_pi_home(home, base_url=config.BROWSE_URL, model=config.BROWSE_MODEL,
                       api_key_env=API_KEY_ENV if config.BROWSE_API_KEY else None, browser_args=args)
+        write_launcher(launcher_path(home))
     except OSError as exc:
         log.warning("could not write the browser agent's configuration under %s (%s): browse is not offered", base,
                     type(exc).__name__)
         return None
     if not config.BROWSE_MODEL:
         log.warning("VAICE_BROWSE_MODEL is empty: the browser agent needs a model name")
-    log.info("browse: Pi in %s with %s, model %s, browser profile %s, %s window, up to %g s a task", base / "pi",
-             urlsplit(config.BROWSE_URL).netloc, config.BROWSE_MODEL or "(none set)", profile,
-             "no" if config.BROWSE_HEADLESS else "a visible", config.BROWSE_SECONDS)
     ungated = config.BROWSE_CONFIRM == "off"
+    ask_timeout_s = CONFIRM_SECONDS + BROWSE_ASK_EXTRA_SECONDS
+    nonce = new_nonce()
+    env = pi_environment(home, ask_timeout_s=ask_timeout_s, gate_policy=UNGATED_POLICY if ungated else GATE_POLICY,
+                         nonce=nonce, api_key=config.BROWSE_API_KEY)
+    if not check_gate(home, env, log_path=base / "pi.log"):
+        log.warning("Pi did not report vaice's tool gate (see %s): without it the browser's tools would run "
+                    "unasked, so browse is not offered", base / "pi.log")
+        return None
+    log.info("browse: Pi through pi-acp in %s with %s, model %s, browser profile %s, %s window, up to %g s a task",
+             home, urlsplit(config.BROWSE_URL).netloc, config.BROWSE_MODEL or "(none set)", profile,
+             "no" if config.BROWSE_HEADLESS else "a visible", config.BROWSE_SECONDS)
     log.warning("browse: pages' text and what the browser agent does go to %s; %s",
                 urlsplit(config.BROWSE_URL).netloc,
                 "VAICE_BROWSE_CONFIRM=off: the agent clicks, types and submits forms without asking" if ungated else
                 "a step that changes a page needs the Run button, but navigation and reading do not")
-    env = {API_KEY_ENV: config.BROWSE_API_KEY} if config.BROWSE_API_KEY else None
-    return PiAgent(base / "pi", log_path=base / "pi.log", env=env,
-                   ask_timeout_s=CONFIRM_SECONDS + BROWSE_ASK_EXTRA_SECONDS, chrome_profile=profile,
-                   gate_policy=UNGATED_POLICY if ungated else GATE_POLICY)
+    return pi_agent(home, env=env, nonce=nonce, log_path=base / "pi.log", ask_timeout_s=ask_timeout_s,
+                    chrome_profile=profile)
+
+
+def _open_acp_browse(argv: list[str]) -> BrowseAgent | None:
+    """Any ACP agent (VAICE_BROWSE_AGENT). vaice can only gate what the agent asks about: its own tools and its
+    permission mode are set in its own config, which is said at start-up. The Pi settings do not apply."""
+    ignored = [name for name, value in (("VAICE_BROWSE_URL", config.BROWSE_URL), ("VAICE_BROWSE_MODEL",
+               config.BROWSE_MODEL), ("VAICE_BROWSE_API_KEY", config.BROWSE_API_KEY)) if value]
+    if ignored:
+        log.warning("%s: set, but they configure Pi only and are ignored with VAICE_BROWSE=acp (the agent has its "
+                    "own model and login)", ", ".join(ignored))
+    base, profile, args = _browse_base()
+    ungated = config.BROWSE_CONFIRM == "off"
+    try:
+        agent = acp_agent(argv, work=base / "acp-work", log_path=base / "acp.log", browser_args=args,
+                          ask_timeout_s=CONFIRM_SECONDS + BROWSE_ASK_EXTRA_SECONDS, chrome_profile=profile,
+                          confirm=not ungated)
+    except OSError as exc:
+        log.warning("could not make the browser agent's working directory under %s (%s): browse is not offered",
+                    base, type(exc).__name__)
+        return None
+    log.info("browse: the ACP agent `%s`, browser profile %s, %s window, up to %g s a task", argv[0], profile,
+             "no" if config.BROWSE_HEADLESS else "a visible", config.BROWSE_SECONDS)
+    log.warning("browse: pages' text and what the agent does go to the agent's own model endpoint; vaice asks "
+                "before every step the agent asks about%s, but the agent's own tools and permission mode are set "
+                "in its config, not by vaice",
+                " (VAICE_BROWSE_CONFIRM=off: it allows each without asking)" if ungated else "")
+    return agent
 
 
 def _open_mcp() -> mcp_skills.McpTools | None:
