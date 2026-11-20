@@ -374,7 +374,7 @@ def pi_agent(pi_home: Path, *, env: Mapping[str, str], nonce: str, log_path: Pat
 
     return AcpAgent(["npx", "-y", PI_ACP], env=env, cwd=work_dir(pi_home), log_path=log_path, permissions="ask",
                     ask_timeout_s=ask_timeout_s, marker=gate_marker(nonce), chrome_profile=chrome_profile,
-                    secrets=[env[API_KEY_ENV]] if env.get(API_KEY_ENV) else [])
+                    secrets=[env[API_KEY_ENV]] if env.get(API_KEY_ENV) else [], pi_dialogs=True)
 
 
 # --- the generic ACP preset

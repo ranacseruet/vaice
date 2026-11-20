@@ -83,7 +83,7 @@ def test_the_pi_agent_is_pi_acp_pinned_with_the_gate_marker_and_its_key_scrubbed
     agent = browse.pi_agent(tmp_path / "pi", env=env, nonce=PI_NONCE, log_path=tmp_path / "pi.log", ask_timeout_s=60)
     try:
         assert agent._argv == ["npx", "-y", browse.PI_ACP] and browse.PI_ACP == "pi-acp@0.0.34"
-        assert agent._marker == f"vaice-gate {PI_NONCE}" and agent.permissions == "ask"
+        assert agent._marker == f"vaice-gate {PI_NONCE}" and agent.permissions == "ask" and agent.pi_dialogs
         assert agent._mcp_servers == []  # pi-acp ignores them: Pi's own mcp.json holds the browser server
         assert agent._cwd == browse.work_dir(tmp_path / "pi") and agent._secrets == (KEY,)
         assert agent._scrub(f"Bearer {KEY}") == "Bearer ***"

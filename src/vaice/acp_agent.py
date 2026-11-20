@@ -260,8 +260,11 @@ class _Client:
             return _selected(allow)
         title = tool_call.title or ""
         raw = tool_call.raw_input if isinstance(tool_call.raw_input, dict) else {}
-        message = raw["message"] if isinstance(raw.get("message"), str) else json.dumps(raw, default=str)
-        # whole: the panel must show everything the agent will run with (Pi's gate message is the arguments' JSON)
+        # whole: the panel must show everything the agent will run with. Only Pi's dialog envelope is unwrapped (the
+        # gate's message is the arguments' JSON); for any other agent a `message` is one argument among others
+        pi_dialog = (self._agent.pi_dialogs and raw.get("method") == "confirm" and isinstance(raw.get("message"), str)
+                     and set(raw) <= {"method", "title", "message"})
+        message = raw["message"] if pi_dialog else json.dumps(raw, default=str)
         decision = await self._ask(state, title, message)
         if decision is None:  # stopped, out of time or closed: not a no; the task ends for what ended it
             state.interrupt("abort")
@@ -368,14 +371,16 @@ class AcpAgent:
     def __init__(self, argv: Sequence[str], *, env: Mapping[str, str], cwd: Path, log_path: Path,
                  mcp_servers: Sequence[McpServerStdio] = (), permissions: Literal["ask", "allow"] = "ask",
                  ask_timeout_s: float = 60.0, marker: str | None = None, chrome_profile: Path | None = None,
-                 secrets: Sequence[str] = ()):
+                 secrets: Sequence[str] = (), pi_dialogs: bool = False):
         """`argv` starts the agent (it speaks ACP on stdin/stdout) with exactly `env` as its environment, in `cwd`,
         its stderr appended to `log_path` (0600). `mcp_servers` go to every `session/new`. `permissions`: "ask"
         sends every permission request to `on_ask`, "allow" answers each allow-once without asking.
         `ask_timeout_s` is how long a question gets before it counts as a no. `marker` is the text of the gate's
         notification, the tripwire (see the module docstring). `chrome_profile` is the browser profile the agent's
         browser uses: what still holds it is ended before a new process starts and after `close()`. `secrets` are
-        values scrubbed from anything the agent reports."""
+        values scrubbed from anything the agent reports. `pi_dialogs`: the agent is pi-acp, whose requests from Pi's
+        `confirm` dialogs carry exactly `{method, title, message}`; the question then carries the `message` (the
+        gate puts the tool's arguments there). Every other request carries its whole raw input."""
         self._argv = list(argv)
         self._env = dict(env)
         self._cwd = cwd
@@ -386,6 +391,7 @@ class AcpAgent:
         self._marker = marker
         self._chrome_profile = chrome_profile
         self._secrets = tuple(value for value in secrets if value)
+        self.pi_dialogs = pi_dialogs
         self._proc: _Proc | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._loop_thread: threading.Thread | None = None

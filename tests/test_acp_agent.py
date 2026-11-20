@@ -192,7 +192,7 @@ ASK = {"steps": [{"tool": "mcp__chrome__click", "args": {"uid": "1_7"}},
 
 
 def test_a_yes_selects_the_allow_option_and_the_question_carries_the_agents_title_and_message(harness):
-    h = harness(ASK)
+    h = harness(ASK, pi_dialogs=True)
     assert h.run() == "Clicked it."
     assert h.asked == [("mcp__chrome__click", "{\"uid\":\"1_7\"}")]
     assert h.fact("permission") == [{"outcome": "selected", "option": "allow", "message": "{\"uid\":\"1_7\"}"}]
@@ -210,10 +210,23 @@ def test_a_long_question_reaches_the_panel_whole(harness):
     message = json.dumps({"function": script})
     h = harness({"steps": [{"permission": {"title": "mcp__chrome__evaluate_script", "message": message}},
                            {"permission": {"title": "y", "raw": {"function": script}}},
-                           {"text": "ok"}]})
+                           {"text": "ok"}]}, pi_dialogs=True)
     h.run()
     assert h.asked[0][1] == message
     assert json.loads(h.asked[1][1]) == {"function": script}
+
+
+@pytest.mark.parametrize("pi_dialogs", [False, True])
+def test_a_message_argument_does_not_hide_the_other_arguments(harness, pi_dialogs):
+    # another agent's tool can take a `message` next to what matters (a recipient); so can a Pi-shaped request with
+    # more fields than Pi's dialog has, and a pi-acp request only counts as a dialog when the agent is pi-acp
+    args = {"method": "confirm", "title": "send", "message": "hi", "to": "someone@example.test"}
+    plain = {"method": "confirm", "title": "send", "message": "hi"}
+    h = harness({"steps": [{"permission": {"title": "send", "raw": args}},
+                           {"permission": {"title": "send", "raw": plain}}, {"text": "ok"}]}, pi_dialogs=pi_dialogs)
+    h.run()
+    assert json.loads(h.asked[0][1]) == args
+    assert h.asked[1][1] == ("hi" if pi_dialogs else json.dumps(plain))
 
 
 def test_a_no_answers_with_the_reject_option_then_cancels_and_ends_as_declined(harness):
