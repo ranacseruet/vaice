@@ -68,7 +68,7 @@ def test_a_background_call_without_a_goal_fails_as_a_skill_error():
 
 
 def test_pi_is_told_to_search_with_bing_or_duckduckgo_and_never_google():
-    prompt = browse.PROMPT.format(goal="find a recipe")
+    prompt = browse.task_prompt("find a recipe")
 
     assert "Bing or DuckDuckGo" in prompt and "never Google" in prompt and prompt.endswith("Task: find a recipe")
 

@@ -34,7 +34,8 @@ the pull requests (#53 to #126).
     step); `browser_status` / `stop_browsing` and a Stop button report on and end them.
 - **`vaice up`**: one command that starts `llama-server` when none is running and opens the UI (#89).
 - **A live eval** (`evals/run.py`) that measures how reliably spoken requests become the right skill call, with repeats
-  (#88).
+  (#88); research requests in `evals/browse_cases.json`, and `evals/browse_live.py`, an opt-in check that the browser
+  agent finishes research tasks with the configured model (headless, muted, never in CI).
 - The *Tool activity* panel (#55); the current date and time in every reply's instructions (#78); a loop breaker that
   cuts a reply repeating itself (#78); a `/v1/realtime` probe and a temperature warning at startup (#47, #74, #81).
 - Settings: `VAICE_VAD_THRESHOLD`, `VAICE_VAD_MIN_SILENCE_MS`, `VAICE_VAD_SPEECH_PAD_MS`, `VAICE_CAN_INTERRUPT` (#49),
@@ -56,6 +57,9 @@ the pull requests (#53 to #126).
   `pi-acp` (pinned, started with `npx`, so Node.js is needed); a Pi extension still gates its tools, checked at startup
   and by a marker before each task's first tool call. With Pi the Chrome window now closes between tasks (`pi-acp` ends the
   previous session); the profile, and so logins, is kept.
+- **Research goes to the browser.** The `browse` description now names looking things up, research, news and prices,
+  not only opening a site: before, the assistant said it could not browse the web to most research requests (0 of 30
+  with the screen skill on). Each task's prompt also carries today's date, so "this week" means now.
 
 ### Fixed
 - The transcript and the end of every reply were reported 1 s late, waiting on a close handshake `llama-server` never

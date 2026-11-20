@@ -12,6 +12,19 @@
   {"id": "browse-weather-site", "say": "Check a weather website for Toronto and tell me the temperature.",
    "expect": {"tools": ["browse"], "args": {"browse": {"goal": {"contains": "toronto"}}}}},
 
+  {"id": "research-coffee", "say": "Can you research some coffee makers for me?",
+   "expect": {"tools": ["browse"], "args": {"browse": {"goal": {"contains": "coffee"}}}}},
+  {"id": "research-coffee-online", "say": "Research some coffee makers online.",
+   "expect": {"tools": ["browse"], "args": {"browse": {"goal": {"contains": "coffee"}}}}},
+  {"id": "research-headphones", "say": "Look up the best noise cancelling headphones on the web.",
+   "expect": {"tools": ["browse"], "args": {"browse": {"goal": {"contains": "headphone"}}}}},
+  {"id": "research-webb-news", "say": "Find out what is new with the James Webb telescope this week.",
+   "expect": {"tools": ["browse"], "args": {"browse": {"goal": {"contains": "webb"}}}}},
+  {"id": "research-kindle-reviews", "say": "Search the web for reviews of the Kindle Paperwhite.",
+   "expect": {"tools": ["browse"], "args": {"browse": {"goal": {"contains": "kindle"}}}}},
+  {"id": "research-ps5-price", "say": "Check online how much a PlayStation 5 costs right now.",
+   "expect": {"tools": ["browse"], "args": {"browse": {"goal": [{"contains": "playstation"}, {"contains": "ps5"}]}}}},
+
   {"id": "status-going", "say": "How is the browser task going?", "expect": {"tools": ["browser_status"]}},
   {"id": "status-update", "say": "Any update on the browser?", "expect": {"tools": ["browser_status"]}},
   {"id": "status-doing", "say": "What is it doing in the browser right now?", "expect": {"tools": ["browser_status"]}},
@@ -34,5 +47,6 @@
   {"id": "nobrowse-open-safari", "say": "Open Safari.",
    "expect": {"tools": ["open_app"], "args": {"open_app": {"name": "Safari"}}}},
   {"id": "nobrowse-time", "say": "What time is it?", "expect": {"tools": []}},
-  {"id": "nobrowse-sea", "say": "What colour is the sea?", "expect": {"tools": []}}
+  {"id": "nobrowse-sea", "say": "What colour is the sea?", "expect": {"tools": []}},
+  {"id": "nobrowse-french-press", "say": "What is a French press?", "expect": {"tools": []}}
 ]

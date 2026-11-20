@@ -598,7 +598,7 @@ class AcpAgent:
         client.state = state
         state.active = True
         request = proc.conn.prompt(session_id=state.session_id,
-                                   prompt=[TextContentBlock(type="text", text=browse.PROMPT.format(goal=goal))])
+                                   prompt=[TextContentBlock(type="text", text=browse.task_prompt(goal))])
         prompt = asyncio.ensure_future(request)
         prompt.add_done_callback(_consume)
         waiter = asyncio.ensure_future(state.interrupted.wait())

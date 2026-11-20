@@ -46,6 +46,7 @@ import signal
 import subprocess
 import time
 from collections.abc import Callable, Mapping, Sequence
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
@@ -97,7 +98,14 @@ _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 
 PROMPT = ("Use the chrome browser tools to do this task in the browser, then answer in plain text. To search the "
           "web use Bing or DuckDuckGo, never Google: Google shows an automated browser a bot check instead of "
-          "results. Task: {goal}")
+          "results. Today is {today}. Task: {goal}")
+
+
+def task_prompt(goal: str, now: datetime | None = None) -> str:
+    """The prompt for one task, with today's date: without it the agent's model resolved "this month" to a month of
+    its own (live, 2026-11-20: "May 20 to June 20, 2026")."""
+    moment = now or datetime.now().astimezone()
+    return PROMPT.format(goal=goal, today=moment.strftime(f"%A, %B {moment.day}, %Y"))
 CANT_START = "I couldn't start the browser agent."
 FAILED = "The browser agent ran into a problem."
 NO_ANSWER = "The browser agent did not give an answer."
