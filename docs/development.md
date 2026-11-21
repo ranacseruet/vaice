@@ -29,6 +29,10 @@ Known compatibility bounds in `pyproject.toml`:
 .venv/bin/ruff check src tests evals                     # run linter
 ```
 
+`tests/test_architecture_docs.py` checks the two architecture views (`docs/architecture.md` and
+`docs/architecture-explorer.html`) against the code: when it fails after a rename, a new module or a new thread,
+update both views as AGENTS.md ("Architecture views") describes.
+
 CI (`.github/workflows/ci.yml`) runs Ruff and `pytest --cov=vaice` with `uv sync --locked --extra dev --extra mcp --extra browse` on Python 3.12 on macOS for every push to `main` and every pull request; a newer push to a pull request cancels the older run. It can also be started by hand (`gh workflow run ci.yml --ref main`), for a push whose run never started.
 
 The unit tests never touch a real model. To measure how reliably spoken commands turn into the right tool call (with repeats), run the live eval in [`evals/`](../evals/README.md) against a real `llama-server`: `.venv/bin/python evals/run.py`. It is run by hand, not in CI.

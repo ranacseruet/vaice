@@ -1,0 +1,1194 @@
+<title>vaice Architecture Explorer</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<!--
+  The interactive companion of docs/architecture.md. Everything it shows comes from the JSON block with
+  id="architecture-data" below; tests/test_architecture_docs.py checks that every module, symbol and thread it names
+  exists in src/vaice and that it covers every module and named thread. Edit the JSON, not the renderer, when the
+  code changes (see AGENTS.md, "Architecture views"). Open this file in a browser; it needs no server and no library.
+-->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=Space+Grotesk:wght@500;600&display=swap">
+<style>
+/* Layout: a signal-path notebook. A tab bar over one working surface; the diagram on the left, the detail on the right,
+   stacked at phone width. */
+:root {
+  --paper: #f3f5f7;
+  --panel: #ffffff;
+  --ink: #16202a;
+  --muted: #586877;
+  --line: #c6d0d9;
+  --faint: #e3e8ed;
+  --accent: #1d5bd0;
+  --accent-soft: #dce7fb;
+  --incoming: #a5520f;
+  --incoming-soft: #f8e7d6;
+  --font-display: "Space Grotesk", "Helvetica Neue", Arial, sans-serif;
+  --font-body: "IBM Plex Sans", "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --paper: #0e1318; --panel: #151c23; --ink: #e5ebf1; --muted: #93a3b3; --line: #2d3a46; --faint: #1d2630;
+    --accent: #7aa7ff; --accent-soft: #1c2c4a; --incoming: #efa462; --incoming-soft: #3a2a1b; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --paper: #0e1318; --panel: #151c23; --ink: #e5ebf1; --muted: #93a3b3; --line: #2d3a46; --faint: #1d2630;
+  --accent: #7aa7ff; --accent-soft: #1c2c4a; --incoming: #efa462; --incoming-soft: #3a2a1b; color-scheme: dark;
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+body {
+  background: var(--paper); color: var(--ink); font: 15px/1.55 var(--font-body);
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 20px 40px;
+}
+.wrap { max-width: 1180px; margin: 0 auto; display: grid; gap: 18px; }
+header { display: grid; gap: 6px; }
+h1 { font: 600 28px/1.15 var(--font-display); margin: 0; letter-spacing: -0.01em; text-wrap: balance; }
+h2 { font: 600 19px/1.25 var(--font-display); margin: 0; text-wrap: balance; }
+h3 { font: 600 13px/1.3 var(--font-body); margin: 0; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
+p { margin: 0; max-width: 70ch; }
+.lede { color: var(--muted); }
+code, .mono { font-family: var(--font-mono); font-size: 0.86em; }
+a { color: var(--accent); text-underline-offset: 4px; text-decoration-thickness: 1px; }
+nav.tabs { display: flex; flex-wrap: wrap; gap: 4px; border-bottom: 1px solid var(--line); }
+nav.tabs button {
+  font: 500 14px var(--font-body); color: var(--muted); background: none; border: 0; border-bottom: 2px solid transparent;
+  padding: 8px 12px; cursor: pointer; margin-bottom: -1px;
+}
+nav.tabs button[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--accent); }
+button:focus-visible, [tabindex]:focus-visible, a:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.view { display: grid; gap: 14px; }
+.split { display: grid; grid-template-columns: minmax(0, 1.7fr) minmax(0, 1fr); gap: 16px; align-items: start; }
+.split.stack { grid-template-columns: minmax(0, 1fr); }
+@media (max-width: 880px) { .split { grid-template-columns: minmax(0, 1fr); } }
+.surface { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 14px; min-width: 0; }
+.scroll { overflow-x: auto; }
+svg { display: block; height: auto; }
+svg text { font-family: var(--font-body); fill: currentColor; }
+svg .mono { font-family: var(--font-mono); }
+.detail { display: grid; gap: 12px; position: sticky; top: env(safe-area-inset-top, 0px); }
+.detail .kicker { font: 500 12px var(--font-mono); color: var(--muted); }
+.symbols { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.symbols li { display: grid; gap: 1px; }
+.symbols code { color: var(--accent); word-break: break-word; }
+.symbols span { color: var(--muted); font-size: 13.5px; }
+.rules { margin: 0; padding-left: 18px; display: grid; gap: 4px; font-size: 14px; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip {
+  font: 500 12.5px var(--font-mono); border: 1px solid var(--line); background: var(--panel); color: var(--ink);
+  border-radius: 999px; padding: 3px 10px; cursor: pointer;
+}
+.chip.out { border-color: var(--accent); background: var(--accent-soft); }
+.chip.in { border-color: var(--incoming); background: var(--incoming-soft); }
+.chip[aria-pressed="true"] { border-color: var(--accent); background: var(--accent); color: var(--panel); }
+.legend { display: flex; flex-wrap: wrap; gap: 14px; font-size: 13px; color: var(--muted); }
+.legend i { display: inline-block; width: 18px; height: 3px; vertical-align: middle; margin-right: 6px; border-radius: 2px; }
+.search { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.search input {
+  font: 14px var(--font-mono); padding: 7px 10px; border: 1px solid var(--line); border-radius: 4px;
+  background: var(--panel); color: var(--ink); width: min(100%, 360px);
+}
+.hits { display: grid; gap: 4px; font-size: 13.5px; }
+.hits button { text-align: left; background: none; border: 0; padding: 2px 0; color: var(--ink); cursor: pointer; font: inherit; }
+.hits button code { color: var(--accent); }
+.steplist { margin: 0; padding: 0; list-style: none; display: grid; gap: 2px; counter-reset: step; }
+.steplist li button {
+  display: grid; grid-template-columns: 2.2em minmax(0, 1fr); gap: 6px; width: 100%; text-align: left; background: none;
+  border: 0; border-radius: 4px; padding: 5px 6px; cursor: pointer; color: var(--ink); font: 14px/1.45 var(--font-body);
+}
+.steplist li button[aria-current="step"] { background: var(--accent-soft); }
+.steplist .n { font: 500 12.5px/1.9 var(--font-mono); color: var(--muted); font-variant-numeric: tabular-nums; }
+.stepcard { display: grid; gap: 8px; }
+.stepcard .lane { font: 500 12.5px var(--font-mono); color: var(--accent); }
+.stepcard .why { border-left: 3px solid var(--incoming); padding-left: 10px; color: var(--muted); font-size: 14px; }
+.controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.controls button {
+  font: 500 13px var(--font-body); padding: 6px 12px; border: 1px solid var(--line); border-radius: 4px;
+  background: var(--panel); color: var(--ink); cursor: pointer;
+}
+.controls .count { font: 12.5px var(--font-mono); color: var(--muted); font-variant-numeric: tabular-nums; }
+.threads { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 340px), 1fr)); gap: 12px; }
+.thread { display: grid; gap: 8px; align-content: start; }
+.thread h2 { font-family: var(--font-mono); font-size: 15px; }
+.thread dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 3px 10px; margin: 0; font-size: 14px; }
+.thread dt { color: var(--muted); }
+.thread dd { margin: 0; min-width: 0; word-break: break-word; }
+.thread ul { margin: 0; padding-left: 18px; font-size: 14px; display: grid; gap: 2px; }
+.trans { margin: 0; padding: 0; list-style: none; display: grid; gap: 3px; font-size: 14px; }
+.trans li button {
+  display: grid; grid-template-columns: 1.8em minmax(0, 1fr); gap: 6px; width: 100%; text-align: left; background: none;
+  border: 0; border-radius: 4px; padding: 4px 6px; cursor: pointer; color: var(--ink); font: inherit;
+}
+.trans li button[aria-current="true"] { background: var(--accent-soft); }
+.trans .n { font: 500 12.5px/1.8 var(--font-mono); color: var(--muted); }
+.trans .from { font: 12.5px var(--font-mono); color: var(--muted); }
+footer { color: var(--muted); font-size: 13px; }
+@media (prefers-reduced-motion: no-preference) { .node rect, .edge path { transition: stroke 120ms, opacity 120ms; } }
+</style>
+
+<div class="wrap">
+  <header>
+    <h1>vaice architecture explorer</h1>
+    <p class="lede">The modules, threads, flows and state machines of vaice, named the way the code names them. Pick a module
+      to see its job, its key functions and the rules it keeps; step through a flow to see which thread does what, in order.</p>
+  </header>
+  <nav class="tabs" role="tablist" aria-label="Views">
+    <button role="tab" id="tab-map" aria-controls="view-map" data-view="map">Modules</button>
+    <button role="tab" id="tab-flows" aria-controls="view-flows" data-view="flows">Flows</button>
+    <button role="tab" id="tab-threads" aria-controls="view-threads" data-view="threads">Threads</button>
+    <button role="tab" id="tab-states" aria-controls="view-states" data-view="states">State machines</button>
+  </nav>
+
+  <section class="view" id="view-map" role="tabpanel" aria-labelledby="tab-map">
+    <div class="search">
+      <label for="symbol-search" class="mono">find a symbol</label>
+      <input id="symbol-search" type="search" placeholder="speak, EndReply, LEAD_SECONDS ..." autocomplete="off">
+    </div>
+    <div class="hits" id="hits" hidden></div>
+    <div class="split stack">
+      <div class="surface">
+        <div class="legend">
+          <span><i style="background: var(--accent)"></i>imports (uses)</span>
+          <span><i style="background: var(--incoming)"></i>imported by</span>
+          <span><i style="background: var(--line)"></i>other imports</span>
+        </div>
+        <div class="scroll" id="map"></div>
+      </div>
+      <aside class="surface detail" id="module-detail" aria-live="polite"></aside>
+    </div>
+  </section>
+
+  <section class="view" id="view-flows" role="tabpanel" aria-labelledby="tab-flows" hidden>
+    <div class="chips" id="flow-picker" role="group" aria-label="Flows"></div>
+    <p class="lede" id="flow-summary"></p>
+    <div class="split">
+      <div class="surface">
+        <div class="scroll" id="lanes"></div>
+        <p class="lede" style="font-size: 13px">Each row is one step, in order. An arrow runs from the lane of the step before it; pick a row for what happens there and why.</p>
+      </div>
+      <aside class="surface detail">
+        <div class="controls">
+          <button id="prev" type="button">Previous</button>
+          <button id="next" type="button">Next</button>
+          <span class="count" id="step-count"></span>
+        </div>
+        <div class="stepcard" id="step-card" aria-live="polite"></div>
+        <h3>All steps</h3>
+        <ol class="steplist" id="step-list"></ol>
+      </aside>
+    </div>
+  </section>
+
+  <section class="view" id="view-threads" role="tabpanel" aria-labelledby="tab-threads" hidden>
+    <p class="lede">Every thread vaice starts, by the name it gives it. fastrtc's and Gradio's own worker threads are not
+      vaice's: the reply generator runs on a different fastrtc worker for each chunk, so nothing in it may be bound to a thread
+      or block.</p>
+    <div class="threads" id="threads"></div>
+  </section>
+
+  <section class="view" id="view-states" role="tabpanel" aria-labelledby="tab-states" hidden>
+    <div class="chips" id="state-picker" role="group" aria-label="State machines"></div>
+    <p class="lede" id="state-summary"></p>
+    <div class="split">
+      <div class="surface"><div class="scroll" id="machine"></div></div>
+      <aside class="surface detail">
+        <h3>Transitions</h3>
+        <ol class="trans" id="trans"></ol>
+      </aside>
+    </div>
+  </section>
+
+  <footer id="footer"></footer>
+</div>
+
+<script type="application/json" id="architecture-data">
+{
+  "as_of": "2026-11-21, main after #137",
+  "repo": "https://github.com/ranacseruet/vaice/blob/main/",
+  "layers": [
+    {"id": "front", "title": "Front end"},
+    {"id": "reply", "title": "The reply"},
+    {"id": "skills", "title": "Skills"},
+    {"id": "browser", "title": "Browser task"},
+    {"id": "base", "title": "Everywhere"}
+  ],
+  "modules": [
+    {"id": "app", "file": "src/vaice/app.py", "layer": "front",
+     "summary": "The CLI, the startup checks and the Gradio page.",
+     "role": "main() builds everything once: an optional llama-server (vaice up), check_server, the browser agent, the MCP servers, the Assistant and the Conversation, then the fastrtc Stream. make_handler wraps Assistant.respond as fastrtc's reply generator: it starts the turn, gets the history, streams the chunks, counts the audio handed out and finishes the turn. build_stream wires the page: New conversation, Run and Cancel, Stop the browser task with its status line, Tool activity, Memory, and a 1 s timer.",
+     "symbols": [
+       {"ref": "app.main", "what": "Startup and shutdown: request_stop, then close the browser agent, the MCP servers and a managed llama-server."},
+       {"ref": "app.make_handler", "what": "The reply generator fastrtc drives: start_turn, history, respond, audio_handed_out, finish; catches every error."},
+       {"ref": "app.build_stream", "what": "The Outbox, the InterruptSafeReplyOnPause handler and every button and panel."},
+       {"ref": "app.build_stream.reset", "what": "New conversation: stop_playing_reply on every connection, Conversation.reset, Assistant.clear_pending."},
+       {"ref": "app.refresh_view", "what": "The 1 s timer tick: re-sends a component only when its own JSON view changed, the rest are gr.skip()."},
+       {"ref": "app.confirmation_panel", "what": "The Run/Cancel panel for the one pending request, with the exact arguments."},
+       {"ref": "app.browse_markdown", "what": "The browser task's status line: goal, time against the limit, steps, host."}
+     ],
+     "rules": [
+       "An error must never escape the reply generator: fastrtc turns it into a WebRTCError and the page stays mute until a reload. It is recorded on the turn and shown in the chat.",
+       "The chatbot sets allow_tags=False: Gradio 6 would render model text as HTML.",
+       "The status line ticks every second; the timer must not redraw the chat with it."
+     ],
+     "uses": ["assistant", "interruptible", "conversation", "server", "browse", "mcp_skills", "vision", "memory", "outbox", "realtime", "confirm", "shell", "skills", "config", "lifecycle"]},
+
+    {"id": "interruptible", "file": "src/vaice/interruptible.py", "layer": "front",
+     "summary": "fastrtc's ReplyOnPause with the barge-in races fixed, tuned VAD and the outbox served when idle.",
+     "role": "A subclass of fastrtc 0.0.34's ReplyOnPause. emit() drops the chunk a next() was still making when a barge-in replaced the generator, restores a barge-in pause that the end-of-reply reset() wiped (issue 13), waits on the pause event instead of spinning, and, when nobody talks and no reply runs, serves the Outbox paced against the estimated end of playback. receive() keeps 0.3 s of pre-roll and clears proactive speech when the user starts talking.",
+     "symbols": [
+       {"ref": "interruptible.InterruptSafeReplyOnPause", "what": "The handler fastrtc copies per connection."},
+       {"ref": "interruptible.InterruptSafeReplyOnPause.emit", "what": "Reply chunk, stale-chunk drop, the issue 13 restore, or the next outbox item."},
+       {"ref": "interruptible.InterruptSafeReplyOnPause.receive", "what": "VAD per frame, pre-roll, clears proactive speech at speech start."},
+       {"ref": "interruptible.InterruptSafeReplyOnPause._serve_outbox", "what": "Polls the Outbox only while served audio ends under LEAD_SECONDS ahead; runs markers."},
+       {"ref": "interruptible.InterruptSafeReplyOnPause.copy", "what": "Copies by keyword, so a fastrtc upgrade fails a test instead of misplacing a value."},
+       {"ref": "interruptible.stop_playing_reply", "what": "New conversation: reset, drop proactive speech, clear fastrtc's queue."},
+       {"ref": "interruptible.DEFAULT_VAD_OPTIONS", "what": "Silero options that stop room noise inflating into 600 ms of speech."},
+       {"ref": "interruptible.LEAD_SECONDS", "what": "0.4 s: how far ahead of playback the outbox may be served."},
+       {"ref": "interruptible.IDLE_WAIT_SECONDS", "what": "The idle wait: about 37 emit() calls a second instead of 32k."}
+     ],
+     "rules": [
+       "close() on the running generator fails (generator already executing); the chunk from the next() in flight is dropped by noticing receive() replaced self.generator.",
+       "The issue 13 restore runs only for emit's own end-of-reply reset, never for an explicit reset and never over newer audio.",
+       "tests/test_interruptible.py drives the real ReplyOnPause; tests/threads.py resumes on a fresh thread per chunk."
+     ],
+     "uses": ["outbox", "config"]},
+
+    {"id": "outbox", "file": "src/vaice/outbox.py", "layer": "front",
+     "summary": "Speech that no reply carries: a FIFO of audio frames and markers for the idle emit().",
+     "role": "A Run click's outcome and a browser task's heads-up and outcome are spoken when no reply generator exists, so their frames go here and the handler's idle emit() serves them. A Marker is a callback that runs when it is reached (the text was spoken, so it is recorded) or whose on_drop runs on a clear. Each clear starts a new generation and a put that names an older generation is refused.",
+     "symbols": [
+       {"ref": "outbox.Outbox", "what": "The thread-safe FIFO."},
+       {"ref": "outbox.Outbox.put", "what": "Queue a frame; refused after a clear when it names the generation it began with."},
+       {"ref": "outbox.Outbox.put_marker", "what": "Queue a callback behind the frames; on_drop runs if it never will."},
+       {"ref": "outbox.Outbox.poll", "what": "The next item when the pacing allows; clears first after STALE_SECONDS without a poll."},
+       {"ref": "outbox.Outbox.clear", "what": "Drop everything and bump the generation."},
+       {"ref": "outbox.Marker", "what": "callback plus on_drop."},
+       {"ref": "outbox.STALE_SECONDS", "what": "30 s with no connection polling: what was queued belongs to nobody."}
+     ],
+     "rules": [
+       "Served is not played: fastrtc's playback queue is unbounded, so the handler paces what it serves.",
+       "Callbacks run outside the lock, and a failing one is logged, never raised."
+     ],
+     "uses": ["audio"]},
+
+    {"id": "audio", "file": "src/vaice/audio.py", "layer": "front",
+     "summary": "Browser frames to the model's PCM16 and back.",
+     "role": "to_pcm16 turns a browser frame into mono PCM16 at the model's input rate (resampled with scipy); from_pcm16 turns the model's PCM16 into float32 for playback. Rates come from session.created, never from here.",
+     "symbols": [
+       {"ref": "audio.to_pcm16", "what": "Mic frame to mono PCM16 at a given rate."},
+       {"ref": "audio.from_pcm16", "what": "Model audio bytes to float32 samples."},
+       {"ref": "audio.AudioFrame", "what": "(sample_rate, samples), what a reply yields."}
+     ],
+     "rules": ["Sample rates are the server's (session.created), never hardcoded."],
+     "uses": []},
+
+    {"id": "server", "file": "src/vaice/server.py", "layer": "front",
+     "summary": "vaice up: reuse or start llama-server.",
+     "role": "ensure_server reuses a llama-server that already answers /health, or starts one with its log in the data dir, waits until it is ready and stops it when vaice exits.",
+     "symbols": [
+       {"ref": "server.ensure_server", "what": "Reuse or start, then wait."},
+       {"ref": "server.ManagedServer", "what": "The process vaice started, stopped at exit."},
+       {"ref": "server._wait_until_ready", "what": "Polls /health until the model is loaded."}
+     ],
+     "rules": ["Tested against llama-server b11960 and later only."],
+     "uses": ["config"]},
+
+    {"id": "assistant", "file": "src/vaice/assistant.py", "layer": "reply",
+     "summary": "The assistant: a RealtimeResponder whose tools are the skills, plus Run/Cancel and the browser task.",
+     "role": "Builds the instructions (prompt plus memory notes) and a per-reply _Executor that runs the model's tool calls on the session thread and decides by skill kind: run now, ask (one Pending, button only), or start a browser task and end the reply. Owns the UI side of confirmation (approve, cancel, clear_pending) and the browser task (one at a time, its thread, its status, the last ended task). All speech outside a reply goes through _say, one utterance at a time.",
+     "symbols": [
+       {"ref": "assistant.Assistant", "what": "Wires skills, Confirmations, the responder and the browser agent."},
+       {"ref": "assistant._Executor.__call__", "what": "One tool call: direct_only check, the same-goal guard, prepare, ask or start or run, record."},
+       {"ref": "assistant.Assistant.approve", "what": "Run: take the request by id, run the stored call, record it, speak APPROVED."},
+       {"ref": "assistant.Assistant.cancel", "what": "Cancel: take it, record cancelled, say nothing."},
+       {"ref": "assistant.Assistant.clear_pending", "what": "New conversation: clear requests, stop a click's run and the browser task, clear the outbox."},
+       {"ref": "assistant.Assistant._start_browse", "what": "Register the task, cancel an older one, say STARTED, start the task thread."},
+       {"ref": "assistant._browse", "what": "The task thread: agent.run, then record and speak how it ended."},
+       {"ref": "assistant._BrowseHooks.ask", "what": "A gated step: a Pending with a Waiter, a spoken heads-up, wait for the button."},
+       {"ref": "assistant.Assistant._browse_ended", "what": "Decides under the task lock how the task ended and whether it is the last ended one."},
+       {"ref": "assistant.Assistant._say", "what": "Speak through the outbox under the speech lock, generation taken before the wait."},
+       {"ref": "assistant.WAITING", "what": "What the model reads for a confirm call: only the Run button runs it."},
+       {"ref": "assistant.APPROVED", "what": "The Run outcome's wording (REPORT made it parrot the request)."}
+     ],
+     "rules": [
+       "The executor and every skill never raise: a failure is the result the model reads.",
+       "A confirm skill becomes ONE Pending and the model is told only Run runs it. Nothing is approved by voice: a spoken yes can come from speaker echo.",
+       "A background call that started a task returns EndReply: no further response, vaice says STARTED itself (the model used to invent results).",
+       "remember (direct_only) is refused once any other skill ran in the same reply.",
+       "Each reply's executor takes Confirmations.epoch when it begins; a request or a task from before New conversation is refused."
+     ],
+     "uses": ["realtime", "confirm", "conversation", "skills", "browse_task", "browse", "memory", "outbox", "audio", "config", "lifecycle"]},
+
+    {"id": "realtime", "file": "src/vaice/realtime.py", "layer": "reply",
+     "summary": "The llama-server /v1/realtime sessions: one per reply, one for transcription, one per spoken outcome.",
+     "role": "RealtimeResponder.respond starts a transcription thread and a session thread (_converse), then only polls a queue and yields frames. _converse opens the WebSocket, sets instructions, tools and tool_choice, sends the audio, streams text and audio back, runs tool rounds through the executor, strips model markup and cuts repetition loops. speak is the same session with a text input and no tools, writing to the Outbox. History travels as ChatML turns inside the instructions.",
+     "symbols": [
+       {"ref": "realtime.RealtimeResponder.respond", "what": "The generator: start both threads, poll the queue, yield frames, record the spoken share."},
+       {"ref": "realtime._converse", "what": "One session on its own daemon thread: tool rounds, markup stripping, loop cut."},
+       {"ref": "realtime._transcribe_into", "what": "The parallel transcription session; reports the transcript once, also on failure."},
+       {"ref": "realtime._instructions", "what": "Prompt plus context, then each past turn as a ChatML turn."},
+       {"ref": "realtime._create_response", "what": "response.create, with tool_choice auto or none after a tool round."},
+       {"ref": "realtime._speech_friendly", "what": "Compacts a tool result, because the model reads it aloud."},
+       {"ref": "realtime._MarkupStripper", "what": "Drops tool_call, think, answer and control-token markup across deltas."},
+       {"ref": "realtime._loop_trimmed", "what": "A 1 to 4 line block repeated 3 times: cut, record the answer, close."},
+       {"ref": "realtime.EndReply", "what": "A tool output that ends the reply after its round."},
+       {"ref": "realtime.speak", "what": "Text in, speech out through the Outbox, the text recorded by a marker."},
+       {"ref": "realtime.spoken_part", "what": "The words that the audio handed out so far covers."},
+       {"ref": "realtime.check_server", "what": "Startup: rejects a model without audio output; down or loading only warns."},
+       {"ref": "realtime.MAX_TOOL_ROUNDS", "what": "2 rounds after the first response."}
+     ],
+     "rules": [
+       "tool_choice is required for the first response, auto after a tool round and none at MAX_TOOL_ROUNDS (an inherited required looped).",
+       "Text before a tool result is spoken but not recorded: each round has its own accumulator and frames carry a reference to theirs.",
+       "The close handshake runs on its own daemon thread: llama-server never completes it (waiting delayed every transcript by 1 s, issue 90).",
+       "Tools are declared flat (Responses format); the chat-completions nesting is rejected.",
+       "A reply cut by max_output_tokens still says completed; only usage.output_tokens shows it."
+     ],
+     "uses": ["audio", "conversation", "outbox", "config", "lifecycle"]},
+
+    {"id": "conversation", "file": "src/vaice/conversation.py", "layer": "reply",
+     "summary": "Turns, the windowed text history and conversation.json.",
+     "role": "A Turn is one exchange, shared by the reply threads, fastrtc's workers and the UI under one lock. Conversation.history gives the model only what was said, windowed; tool events and browser reports are for the UI and the file. Turn.close trims an interrupted reply to the share that had time to play.",
+     "symbols": [
+       {"ref": "conversation.Conversation.start_turn", "what": "Closes the previous turn, starts a new one, saves."},
+       {"ref": "conversation.Conversation.history", "what": "The windowed messages before a turn; waits up to TRANSCRIPT_WAIT for the last transcript."},
+       {"ref": "conversation.to_messages", "what": "Text only; a turn without its transcript is dropped."},
+       {"ref": "conversation.window_start", "what": "Drops whole blocks of the oldest turns so the prompt prefix is stable."},
+       {"ref": "conversation.Turn.close", "what": "Freeze; keep the share of words that played (at least one)."},
+       {"ref": "conversation.Turn.append_assistant_text", "what": "The one write a closed turn accepts: speech after the reply."},
+       {"ref": "conversation.Turn.add_tool_event", "what": "A call and its output, capped, for Tool activity."},
+       {"ref": "conversation.Turn.add_report", "what": "A browser task's whole answer, for the chat only."},
+       {"ref": "conversation.write_json_atomically", "what": "Temp file plus os.replace, mode 0600."}
+     ],
+     "rules": [
+       "History is text only: a follow-up calls the skill again.",
+       "The responder reports the transcript exactly once, also on failure, so the next turn never waits forever.",
+       "A failed conversation.json write is a warning; the conversation goes on in memory."
+     ],
+     "uses": []},
+
+    {"id": "confirm", "file": "src/vaice/confirm.py", "layer": "reply",
+     "summary": "The one pending request, settled only by a button.",
+     "role": "Confirmations holds at most one Pending. ask replaces an older one and is refused for a stale epoch; take removes it atomically and only by its id; answer settles a browser step's Waiter; clear (New conversation) bumps the epoch. A request expires CONFIRM_SECONDS after it was asked. Every exit except answer is a no to a Waiter.",
+     "symbols": [
+       {"ref": "confirm.Confirmations", "what": "The holder, shared by reply threads and click handlers."},
+       {"ref": "confirm.Confirmations.ask", "what": "Hold a request; False for a stale epoch."},
+       {"ref": "confirm.Confirmations.take", "what": "Atomic and id-bound: of two clicks, one gets it."},
+       {"ref": "confirm.Confirmations.answer", "what": "Take a waiter's request and resolve it in the same step."},
+       {"ref": "confirm.Confirmations.clear", "what": "Drop it and bump the epoch."},
+       {"ref": "confirm.Pending", "what": "name, the model's raw arguments (exactly what runs), question, turn, id, waiter."},
+       {"ref": "confirm.Waiter", "what": "Where a running task's question gets its answer; the first answer wins."},
+       {"ref": "confirm.CONFIRM_SECONDS", "what": "60 s from asking."}
+     ],
+     "rules": [
+       "Run runs the STORED name and arguments, never what the model says afterwards.",
+       "A stale panel's buttons carry the old id and settle nothing."
+     ],
+     "uses": ["conversation"]},
+
+    {"id": "skills", "file": "src/vaice/skills.py", "layer": "skills",
+     "summary": "The built-in skills, the Skill kinds and the registry the model's tools come from.",
+     "role": "A Skill has a name, a one-sentence description, a JSON schema and a kind: read, action, confirm or background. Skills.definitions gives the session its flat tool list; Skills.prepare validates a confirm or background call and returns the Question or the Started sentence; Skills.run runs one and never raises. default_skills assembles the set from the settings: the checks, the actions, then shell, memory, browse, vision and the MCP tools.",
+     "symbols": [
+       {"ref": "skills.Skill", "what": "The definition, with kind, ask, run_stoppable and direct_only."},
+       {"ref": "skills.Skills.definitions", "what": "The tools in the Responses API's flat format."},
+       {"ref": "skills.Skills.prepare", "what": "Question for confirm, Started for background, else None."},
+       {"ref": "skills.Skills.run", "what": "Parse, validate, run; a failure becomes the result."},
+       {"ref": "skills.SkillResult", "what": "speech for the model, detail for the panel."},
+       {"ref": "skills.default_skills", "what": "The set offered, in order, from the settings."}
+     ],
+     "rules": [
+       "volume_up and volume_down take no arguments: as a direction argument the model guessed a level.",
+       "Results name their object (opened Safari), so the spoken answer and the record agree.",
+       "quit_app checks lsappinfo first: AppleScript's is running hangs, and quit launches a missing app."
+     ],
+     "uses": ["shell", "memory", "browse_task"]},
+
+    {"id": "shell", "file": "src/vaice/shell.py", "layer": "skills",
+     "summary": "Opt-in run_shell: always a confirm skill.",
+     "role": "run_shell shows the exact command and runs it through zsh -c only after Run, in its own process group, with a time limit and an output cap; stopping kills the group.",
+     "symbols": [
+       {"ref": "shell.shell_skill", "what": "The confirm skill and its question."},
+       {"ref": "shell.check", "what": "Validates the command before asking."},
+       {"ref": "shell.run", "what": "Runs it, polling stop and the deadline."},
+       {"ref": "shell.SHELL_TIMEOUT", "what": "30 s."}
+     ],
+     "rules": ["Off by default (VAICE_SHELL): each extra tool cost accuracy on ordinary requests."],
+     "uses": ["skills"]},
+
+    {"id": "memory", "file": "src/vaice/memory.py", "layer": "skills",
+     "summary": "Opt-in notes: remember, forget, forget_everything.",
+     "role": "Memory keeps explicit notes in memory.json; the assistant appends them to every reply's prompt behind a header that calls them facts. clean_note refuses short notes, reminders and the user's own question.",
+     "symbols": [
+       {"ref": "memory.Memory", "what": "The notes, loaded and saved atomically."},
+       {"ref": "memory.clean_note", "what": "What is allowed to become a note."},
+       {"ref": "memory.memory_skills", "what": "remember (direct_only), forget, forget_everything (confirm)."},
+       {"ref": "memory.REFUSED_AFTER_TOOL", "what": "What remember returns after another skill ran."}
+     ],
+     "rules": ["A note outlives its conversation, so tool output must never become one."],
+     "uses": ["skills", "conversation"]},
+
+    {"id": "vision", "file": "src/vaice/vision.py", "layer": "skills",
+     "summary": "Opt-in look_at_screen.",
+     "role": "One screencapture plus a sips shrink to 1024 px, asked of a vision model with a short-answer system line; the image is never kept or logged.",
+     "symbols": [
+       {"ref": "vision.vision_skill", "what": "The read skill over a vision endpoint."},
+       {"ref": "vision.capture", "what": "screencapture and sips."},
+       {"ref": "vision.VisionClient", "what": "The OpenAI-compatible endpoint."}
+     ],
+     "rules": ["1024 px and 200 max tokens: without both, answers took 4 to 9 s and timed out."],
+     "uses": ["skills", "config"]},
+
+    {"id": "mcp_skills", "file": "src/vaice/mcp_skills.py", "layer": "skills",
+     "summary": "Opt-in MCP tools as skills, each run or click.",
+     "role": "Starts the stdio servers in VAICE_MCP_CONFIG on one asyncio loop (vaice-mcp) and offers each listed tool as server__tool, with the user's policy: run (a read skill) or click (a confirm skill). A call submits to the loop and polls stop and the deadline.",
+     "symbols": [
+       {"ref": "mcp_skills.McpTools", "what": "The servers, their loop and their skills."},
+       {"ref": "mcp_skills.McpTools._call", "what": "One call from a reply or click thread."},
+       {"ref": "mcp_skills.load_config", "what": "Reads and validates the config file."},
+       {"ref": "mcp_skills.POLICIES", "what": "run to read, click to confirm."}
+     ],
+     "rules": ["A server's descriptions and results are untrusted: cleaned, capped, and only ever a tool result. env values never reach a log."],
+     "uses": ["skills", "config"]},
+
+    {"id": "browse_task", "file": "src/vaice/browse_task.py", "layer": "browser",
+     "summary": "The browse skills and the pure pieces of a task: sentences, status, results.",
+     "role": "browse is a background skill whose ask returns WORKING (or refuses while busy); browser_status reads BrowseStatus (the running task, or the last ended one); stop_browsing ends it. spoken_summary takes the agent's Summary line, or the answer with its narration dropped.",
+     "symbols": [
+       {"ref": "browse_task.browse_skills", "what": "browse, browser_status and stop_browsing, offered together."},
+       {"ref": "browse_task.BrowseStatus", "what": "What a task reported: tools, pages, words, an asking step, how it ended."},
+       {"ref": "browse_task.BrowseStatus.result", "what": "The browser_status answer, running or last ended."},
+       {"ref": "browse_task.spoken_summary", "what": "What the outcome speaks."},
+       {"ref": "browse_task.step_question", "what": "The heads-up for a gated step."},
+       {"ref": "browse_task.STARTED", "what": "The fixed sentence vaice says when a task starts."}
+     ],
+     "rules": ["Page text is page-steerable: one line, capped, and only ever a tool output."],
+     "uses": ["skills"]},
+
+    {"id": "browse", "file": "src/vaice/browse.py", "layer": "browser",
+     "summary": "The BrowseAgent protocol, the Pi and generic ACP presets, the gate check and the profile sweep.",
+     "role": "pi_agent and acp_agent build an AcpAgent: Pi through pi-acp with its own config directory, launcher, environment and gate policy, or any ACP agent. check_gate proves at startup that a real Pi lists vaice-gate. end_profile_processes ends whatever still holds the browser profile, since the agent's Chrome is in none of its process groups.",
+     "symbols": [
+       {"ref": "browse.BrowseAgent", "what": "run(goal, stop, on_progress, on_ask, deadline_s, on_text) and close()."},
+       {"ref": "browse.pi_agent", "what": "The Pi preset."},
+       {"ref": "browse.acp_agent", "what": "The generic ACP preset."},
+       {"ref": "browse.check_gate", "what": "Startup check: Pi must list the gate command."},
+       {"ref": "browse.GATE_POLICY", "what": "Read-only browser tools run, page-changing ones ask."},
+       {"ref": "browse.task_prompt", "what": "The goal plus the instructions (Bing or DuckDuckGo, never Google)."},
+       {"ref": "browse.end_profile_processes", "what": "Before a new agent process and after close()."},
+       {"ref": "browse.BrowseDeclined", "what": "A no at a step."}
+     ],
+     "rules": ["Do not configure a browser MCP server next to browse: the model mixed the two."],
+     "uses": ["acp_agent", "conversation", "browse_gate"]},
+
+    {"id": "acp_agent", "file": "src/vaice/acp_agent.py", "layer": "browser",
+     "summary": "AcpAgent: the ACP client that drives a browser agent over its stdin and stdout.",
+     "role": "One long-lived agent process and one asyncio loop thread; a fresh session/new per task. run() hands the task to the loop and polls stop and the deadline. Every permission request goes to on_ask on a thread of its own. A no is answered, then session/cancel, then BrowseDeclined. The answer is the text after the last tool call. The tripwire wants the gate's marker before the first tool call.",
+     "symbols": [
+       {"ref": "acp_agent.AcpAgent.run", "what": "One task, from the browse thread."},
+       {"ref": "acp_agent.AcpAgent._task", "what": "initialize once, session/new, the prompt."},
+       {"ref": "acp_agent.AcpAgent._settle", "what": "Ending early: let a pending answer go out, cancel, wait, end the agent if needed."},
+       {"ref": "acp_agent._Client._decide", "what": "A permission request: tripwire, ask, allow or reject."},
+       {"ref": "acp_agent._Task.update", "what": "Message chunks and tool calls, in arrival order, never awaiting."},
+       {"ref": "acp_agent._in_thread", "what": "Blocking work (on_ask, ending a process) off the loop."},
+       {"ref": "acp_agent.AcpAgent.close", "what": "Ends the process, the loop and the browser it started."}
+     ],
+     "rules": [
+       "A no must also cancel: the reject option alone makes the model route around it.",
+       "Handlers catch everything and log type names only: the SDK logs an exception's text.",
+       "pi-acp ignores mcpServers in session/new and closes the other sessions' Pi on every session/new."
+     ],
+     "uses": ["browse"]},
+
+    {"id": "browse_gate", "file": "src/vaice/browse_gate.ts", "layer": "browser",
+     "summary": "The Pi extension that gates the browser's tools.",
+     "role": "Loaded by Pi (the Pi preset points it there). For every tool call it reads VAICE_GATE_POLICY: run, ask (a confirm dialog that pi-acp turns into a permission request, so the Run button) or deny. It registers the vaice-gate command that check_gate looks for and sends the marker notification the tripwire waits for when each prompt starts.",
+     "symbols": [],
+     "rules": ["A gate that loads without hooking in leaves the tools ungated: hence both checks."],
+     "uses": []},
+
+    {"id": "config", "file": "src/vaice/config.py", "layer": "base",
+     "summary": "Every VAICE_* setting, read once from the environment and a .env.",
+     "role": "Environment-driven settings with defaults, a .env from the working directory (the environment wins), and the names of settings that no longer exist, which main() warns about once.",
+     "symbols": [
+       {"ref": "config.LLAMACPP_URL", "what": "The llama-server base URL."},
+       {"ref": "config.PROMPT", "what": "VAICE_PROMPT."},
+       {"ref": "config.BROWSE", "what": "off, pi or acp."},
+       {"ref": "config.REMOVED", "what": "Settings that no longer exist."}
+     ],
+     "rules": ["tests/conftest.py chdirs to an empty temp dir so a developer's .env cannot change a test."],
+     "uses": []},
+
+    {"id": "lifecycle", "file": "src/vaice/lifecycle.py", "layer": "base",
+     "summary": "The one stop signal.",
+     "role": "Gradio installs no SIGINT handler, so install_stop_handler does: Ctrl+C sets stopping and raises KeyboardInterrupt, which Gradio turns into a server close. Every waiting thread checks stopping.",
+     "symbols": [
+       {"ref": "lifecycle.stopping", "what": "The Event every thread polls."},
+       {"ref": "lifecycle.install_stop_handler", "what": "Ctrl+C handler."},
+       {"ref": "lifecycle.request_stop", "what": "Set it."}
+     ],
+     "rules": [],
+     "uses": []}
+  ],
+
+  "threads": [
+    {"name": "vaice-realtime", "started_by": "realtime.RealtimeResponder.respond", "runs": "realtime._converse",
+     "lifetime": "One per reply, until response.done, a stop or an error.",
+     "talks": ["queue of (rate, frame, round accumulator), round markers, exceptions and done, to the reply generator",
+               "the cancelled Event, set by the generator's finally (barge-in, New conversation)",
+               "runs every skill the model calls, through the reply's _Executor"]},
+    {"name": "vaice-realtime-asr", "started_by": "realtime.RealtimeResponder.respond", "runs": "realtime._transcribe_into",
+     "lifetime": "One per reply, until the transcript arrives.",
+     "talks": ["Turn.set_user_text, once, also on failure", "Conversation.history waits on Turn.transcribed for up to 5 s"]},
+    {"name": "vaice-realtime-close", "started_by": "realtime._open", "runs": "realtime._close",
+     "lifetime": "One per socket, up to CLOSE_TIMEOUT (1 s).",
+     "talks": ["nothing waits for it: llama-server never completes the close handshake"]},
+    {"name": "vaice-assistant-speech", "started_by": "assistant.Assistant.approve", "runs": "assistant.Assistant._say",
+     "lifetime": "One per utterance: a Run outcome, a task's STARTED (from _start_browse) or a step's heads-up (from _BrowseHooks.ask).",
+     "talks": ["the speech lock: one utterance at a time", "Outbox.put and put_marker with the generation taken before the wait"]},
+    {"name": "vaice-assistant-browse", "started_by": "assistant.Assistant._start_browse", "runs": "assistant._browse",
+     "lifetime": "One per browser task, up to VAICE_BROWSE_SECONDS (600 s).",
+     "talks": ["its cancelled Event: Stop, stop_browsing, New conversation", "AcpAgent.run, which polls stop and the deadline",
+               "speaks the outcome itself through Assistant._say, after STARTED"]},
+    {"name": "vaice-browse-loop", "started_by": "acp_agent.AcpAgent._ensure_loop", "runs": "acp_agent.AcpAgent._loop_main",
+     "lifetime": "One per AcpAgent, from the first task until close().",
+     "talks": ["run_coroutine_threadsafe from the browse thread", "the agent process's stdin and stdout"]},
+    {"name": "vaice-browse-worker", "started_by": "acp_agent._in_thread", "runs": "acp_agent._in_thread.work",
+     "lifetime": "One per permission question or process end.",
+     "talks": ["on_ask: a Pending with a Waiter in Confirmations, answered by the Run button",
+               "resolves an asyncio future back on the loop"]},
+    {"name": "vaice-mcp", "started_by": "mcp_skills.McpTools._start", "runs": "mcp_skills.McpTools._serve",
+     "lifetime": "One per app with MCP servers, until close().",
+     "talks": ["a skill call submitted from a reply or click thread, which polls stop and the deadline"]}
+  ],
+
+  "flows": [
+    {"id": "reply", "title": "One reply",
+     "summary": "From the end of an utterance to the last frame, for a reply without tool calls. The generator never blocks; both sessions run on daemon threads.",
+     "lanes": ["fastrtc worker", "handler", "generator", "session thread", "asr thread", "llama-server"],
+     "steps": [
+       {"lane": "fastrtc worker", "text": "VAD detects the pause; emit() calls the handler with the utterance's audio.", "ref": "interruptible.InterruptSafeReplyOnPause.emit"},
+       {"lane": "handler", "text": "start_turn closes the previous turn (trimming it if it was interrupted) and starts this one.", "ref": "conversation.Conversation.start_turn"},
+       {"lane": "handler", "text": "history() returns the windowed turns before this one, waiting up to 5 s for the last transcript.", "ref": "conversation.Conversation.history", "why": "The previous transcript runs off the critical path; a turn whose transcript has not arrived is dropped rather than shown as inaudible."},
+       {"lane": "generator", "text": "respond() starts the transcription thread first, so nothing the reply does can stop the question being transcribed.", "ref": "realtime.RealtimeResponder.respond"},
+       {"lane": "asr thread", "text": "A transcription session: no language pinned, the audio, commit.", "ref": "realtime._transcribe_into", "why": "Pinning en measurably repeated the passage."},
+       {"lane": "generator", "text": "Builds the instructions (prompt, notes, clock line, ChatML history) and the reply's executor, then starts the session thread.", "ref": "realtime._instructions"},
+       {"lane": "session thread", "text": "Opens the WebSocket, reads the sample rates from session.created, sends session.update with instructions, tools and tool_choice required.", "ref": "realtime._converse", "why": "With auto the model announced a check and stopped; required makes it follow a tool request through."},
+       {"lane": "llama-server", "text": "Streams output_text.delta and output_audio.delta.", "ref": "realtime._Session.receive"},
+       {"lane": "session thread", "text": "Text goes through the markup stripper and the loop detector; each audio frame goes on the queue with its round's accumulator.", "ref": "realtime._MarkupStripper"},
+       {"lane": "generator", "text": "Polls the queue every POLL_SECONDS, yields each frame and records the share of the text its audio covers.", "ref": "realtime.spoken_part", "why": "The model writes text about twice as fast as speech; recording all text would claim words the user never heard."},
+       {"lane": "fastrtc worker", "text": "Plays the frame; the handler counts the audio handed out on the turn.", "ref": "conversation.Turn.audio_handed_out"},
+       {"lane": "asr thread", "text": "The transcript arrives and is set on the turn, exactly once.", "ref": "conversation.Turn.set_user_text"},
+       {"lane": "llama-server", "text": "response.done: completed, with usage."},
+       {"lane": "session thread", "text": "Checks the status and the token cap, puts done with the final text; the socket closes on its own daemon thread.", "ref": "realtime._check_done"},
+       {"lane": "generator", "text": "Records the whole final text; its finally sets cancelled.", "ref": "realtime.RealtimeResponder.respond"},
+       {"lane": "handler", "text": "Turn.finish, then the chat is refreshed.", "ref": "conversation.Turn.finish"}
+     ]},
+
+    {"id": "tools", "title": "A tool round",
+     "summary": "What happens when response.done carries function calls. The executor runs on the session thread and never raises.",
+     "lanes": ["session thread", "executor", "skills", "confirmations", "llama-server"],
+     "steps": [
+       {"lane": "llama-server", "text": "response.done after output_item.added and argument deltas for one or more function calls."},
+       {"lane": "session thread", "text": "At MAX_TOOL_ROUNDS a call is ignored and the reply ends; otherwise a round marker goes on the queue.", "ref": "realtime.MAX_TOOL_ROUNDS", "why": "The round marker restarts the recorded text: words before a tool result are spoken but not recorded, so a wrong first pass cannot enter history."},
+       {"lane": "executor", "text": "remember after any other skill in this reply is refused.", "ref": "assistant._Executor.__call__", "why": "A file name, a page or a command's output must not become a note."},
+       {"lane": "skills", "text": "prepare: a Question for a confirm skill, Started for a background one, None for the rest.", "ref": "skills.Skills.prepare"},
+       {"lane": "confirmations", "text": "A confirm call becomes one Pending (refused for a stale epoch); the model reads WAITING.", "ref": "confirm.Confirmations.ask"},
+       {"lane": "executor", "text": "A background call starts the browser task and returns EndReply; the same goal twice in a reply is one task.", "ref": "assistant.Assistant._start_browse"},
+       {"lane": "skills", "text": "A read or action skill runs at once; a failure is the result.", "ref": "skills.Skills.run"},
+       {"lane": "executor", "text": "Every call is recorded on the turn for Tool activity.", "ref": "conversation.Turn.add_tool_event"},
+       {"lane": "session thread", "text": "Sends each result as function_call_output, compacted for speech.", "ref": "realtime._speech_friendly", "why": "The model reads a fed-back result aloud."},
+       {"lane": "session thread", "text": "With an EndReply in the round: no response.create, the reply ends (vaice says STARTED itself). Otherwise response.create with auto, or none at the cap.", "ref": "realtime._create_response", "why": "An inherited required made the model call again and loop; none forces the answer."},
+       {"lane": "llama-server", "text": "The answer, streamed like any reply."}
+     ]},
+
+    {"id": "run", "title": "A Run click",
+     "summary": "A confirm skill runs only from the button, outside any reply, and its outcome is spoken through the outbox.",
+     "lanes": ["Gradio worker", "confirmations", "skills", "speech thread", "outbox", "idle emit"],
+     "steps": [
+       {"lane": "Gradio worker", "text": "Run passes the panel's request id.", "ref": "app.build_stream.settle"},
+       {"lane": "Gradio worker", "text": "approve registers a cancel event first, so New conversation cannot miss this run.", "ref": "assistant.Assistant.approve"},
+       {"lane": "confirmations", "text": "take(id): atomic and id-bound; a stale or expired id gets nothing.", "ref": "confirm.Confirmations.take"},
+       {"lane": "skills", "text": "Runs the STORED name and arguments, stoppable by New conversation or exit.", "ref": "skills.Skills.run"},
+       {"lane": "Gradio worker", "text": "Records the result on the asking turn.", "ref": "conversation.Turn.add_tool_event"},
+       {"lane": "speech thread", "text": "Assistant._say with APPROVED, the outbox generation taken at the click; waits for the speech lock.", "ref": "assistant.Assistant._say", "why": "Two speak sessions writing to one outbox interleaved their frames."},
+       {"lane": "speech thread", "text": "realtime.speak: a text-input session with no tools; each frame is put with that generation.", "ref": "realtime.speak"},
+       {"lane": "outbox", "text": "A put after a clear (the user spoke, New conversation, Stop) is refused and the speech ends.", "ref": "outbox.Outbox.put"},
+       {"lane": "speech thread", "text": "A marker behind the last frame will append the spoken text to the asking turn.", "ref": "outbox.Outbox.put_marker"},
+       {"lane": "idle emit", "text": "While nobody talks, serves the next item only while served audio ends under LEAD_SECONDS ahead.", "ref": "interruptible.InterruptSafeReplyOnPause._serve_outbox", "why": "fastrtc's playback queue is unbounded: unpaced, the marker would record the text long before it played."},
+       {"lane": "outbox", "text": "The marker is reached: the outcome sentence joins the turn's text.", "ref": "conversation.Turn.append_assistant_text"}
+     ]},
+
+    {"id": "browse", "title": "A browser task",
+     "summary": "The reply that starts a task ends at the call; the task runs quietly on its own thread and speaks only for a gated step and at the end.",
+     "lanes": ["session thread", "browse thread", "speech thread", "ACP loop", "question thread", "agent process", "Gradio worker"],
+     "steps": [
+       {"lane": "session thread", "text": "The executor gets Started from browse's ask (WORKING, or BUSY while a task runs).", "ref": "browse_task.browse_skill"},
+       {"lane": "session thread", "text": "_start_browse: refused for a stale epoch or at exit; cancels an older task, forgets the last ended one, registers this run.", "ref": "assistant.Assistant._start_browse"},
+       {"lane": "speech thread", "text": "Says STARTED through SAY; everything else the task says waits until this was spoken or dropped.", "ref": "browse_task.STARTED", "why": "Ending the reply at the call took invented results in the start reply from 14 and 16 of 24 runs to 0."},
+       {"lane": "browse thread", "text": "agent.run with the goal, the stop, the hooks and the deadline.", "ref": "assistant._browse"},
+       {"lane": "ACP loop", "text": "initialize once per process, a fresh session/new, then session/prompt.", "ref": "acp_agent.AcpAgent._task"},
+       {"lane": "agent process", "text": "The gate's marker chunk arrives first; a tool call before it trips the wire and ends the agent.", "ref": "acp_agent._Task.update"},
+       {"lane": "agent process", "text": "Tool calls stream in; on_progress fills BrowseStatus, which browser_status and the status line read.", "ref": "browse_task.BrowseStatus.tool"},
+       {"lane": "agent process", "text": "A page-changing step sends request_permission.", "ref": "acp_agent._Client.request_permission"},
+       {"lane": "question thread", "text": "on_ask runs on a thread of its own: a Pending with a Waiter, and a spoken heads-up.", "ref": "assistant._BrowseHooks.ask"},
+       {"lane": "Gradio worker", "text": "Run answers yes; Cancel, expiry, a newer request or New conversation are a no.", "ref": "confirm.Confirmations.answer"},
+       {"lane": "ACP loop", "text": "A yes is allow_once. A no is reject_once, then session/cancel, then BrowseDeclined.", "ref": "acp_agent._Client._decide", "why": "The reject option alone made the model route around the refusal."},
+       {"lane": "agent process", "text": "The prompt ends with end_turn; the answer is the text after the last tool call.", "ref": "acp_agent._Task.answer"},
+       {"lane": "browse thread", "text": "ended(): under the task lock, a cancelled run counts as stopped; the status becomes the last ended task.", "ref": "assistant.Assistant._browse_ended"},
+       {"lane": "browse thread", "text": "The whole answer goes on the asking turn as a report; the outcome row starts with finished.", "ref": "conversation.Turn.add_report"},
+       {"lane": "browse thread", "text": "Speaks the Summary line through REPORT, after STARTED.", "ref": "browse_task.spoken_summary"}
+     ]},
+
+    {"id": "bargein", "title": "Barge-in",
+     "summary": "The user talks over a reply. fastrtc interrupts at the end of the interrupting utterance; interruptible.py closes the races around it.",
+     "lanes": ["user", "receive", "emit worker", "generator", "session thread", "conversation"],
+     "steps": [
+       {"lane": "user", "text": "Starts talking while the reply plays."},
+       {"lane": "receive", "text": "VAD collects the new utterance (with pre-roll); proactive speech, if any, is cleared at its start.", "ref": "interruptible.InterruptSafeReplyOnPause.receive"},
+       {"lane": "emit worker", "text": "Meanwhile a worker is inside next() on the reply generator.", "ref": "interruptible.InterruptSafeReplyOnPause.emit"},
+       {"lane": "user", "text": "Stops talking: the pause is detected."},
+       {"lane": "receive", "text": "fastrtc closes the generator (it fails: already executing), sets generator to None and clears the playback queue."},
+       {"lane": "generator", "text": "The next() in flight returns a chunk of the old reply."},
+       {"lane": "emit worker", "text": "The generator changed since the call began: the stale chunk is dropped.", "ref": "interruptible.InterruptSafeReplyOnPause.emit", "why": "fastrtc 0.0.34 queued it after the clear and it played."},
+       {"lane": "generator", "text": "Finalized later; its finally sets cancelled.", "ref": "realtime.RealtimeResponder.respond"},
+       {"lane": "session thread", "text": "Notices the stop at its next event and closes the socket, which cancels the reply on the server.", "ref": "realtime._converse"},
+       {"lane": "emit worker", "text": "The pause event starts the new reply.", "ref": "app.make_handler"},
+       {"lane": "conversation", "text": "start_turn closes the old turn: interrupted, keeping the share of words that had time to play.", "ref": "conversation.Turn.close"}
+     ]},
+
+    {"id": "newconv", "title": "New conversation",
+     "summary": "Everything from the old conversation must stop and nothing from it may stay approvable.",
+     "lanes": ["Gradio worker", "fastrtc handler", "conversation", "confirmations", "browser task", "outbox"],
+     "steps": [
+       {"lane": "Gradio worker", "text": "The button (or the chat's trash icon) runs reset.", "ref": "app.build_stream.reset"},
+       {"lane": "fastrtc handler", "text": "stop_playing_reply on every connection: reset, drop proactive speech, clear the playback queue.", "ref": "interruptible.stop_playing_reply"},
+       {"lane": "conversation", "text": "reset closes the last turn and forgets the turns; late updates from an old reply go nowhere.", "ref": "conversation.Conversation.reset"},
+       {"lane": "confirmations", "text": "clear drops the request and bumps the epoch, so a reply still preparing a call asks nothing.", "ref": "confirm.Confirmations.clear", "why": "quit_app asks lsappinfo before it asks the user; the epoch closes that window."},
+       {"lane": "Gradio worker", "text": "A skill a Run click is still running gets its cancel event.", "ref": "assistant.Assistant.clear_pending"},
+       {"lane": "browser task", "text": "The task's cancelled Event is set; the run and the last ended task are forgotten.", "ref": "assistant.Assistant.clear_pending"},
+       {"lane": "outbox", "text": "clear: a new generation, so speech still being generated is refused.", "ref": "outbox.Outbox.clear"}
+     ]}
+  ],
+
+  "states": [
+    {"id": "pending", "title": "A pending request", "ref": "confirm.Pending",
+     "summary": "One confirm call or one browser step, held by Confirmations. Every exit but an answer is a no to a Waiter.",
+     "nodes": [
+       {"id": "start", "label": "", "x": 0, "y": 3, "start": true},
+       {"id": "refused", "label": "Refused", "x": 1, "y": 0.6},
+       {"id": "current", "label": "Current", "x": 1.5, "y": 3},
+       {"id": "ran", "label": "Ran", "x": 3, "y": 0},
+       {"id": "cancelled", "label": "Cancelled", "x": 3, "y": 1.2},
+       {"id": "answered", "label": "Answered", "x": 3, "y": 2.4},
+       {"id": "expired", "label": "Expired", "x": 3, "y": 3.6},
+       {"id": "replaced", "label": "Replaced", "x": 3, "y": 4.8},
+       {"id": "cleared", "label": "Cleared", "x": 3, "y": 6}
+     ],
+     "edges": [
+       {"from": "start", "to": "current", "label": "Confirmations.ask: the panel shows it on the next tick", "ref": "confirm.Confirmations.ask"},
+       {"from": "start", "to": "refused", "label": "ask with a stale epoch: the reply began before New conversation"},
+       {"from": "current", "to": "ran", "label": "Run: approve takes it by id and runs the stored call, then speaks APPROVED", "ref": "assistant.Assistant.approve"},
+       {"from": "current", "to": "cancelled", "label": "Cancel: recorded as cancelled, nothing spoken", "ref": "assistant.Assistant.cancel"},
+       {"from": "current", "to": "answered", "label": "A browser step: answer resolves its Waiter yes or no", "ref": "confirm.Confirmations.answer"},
+       {"from": "current", "to": "expired", "label": "CONFIRM_SECONDS after asking, noticed by current() or take()", "ref": "confirm.Confirmations.current"},
+       {"from": "current", "to": "replaced", "label": "A newer ask replaces it"},
+       {"from": "current", "to": "cleared", "label": "New conversation: clear bumps the epoch", "ref": "confirm.Confirmations.clear"}
+     ]},
+
+    {"id": "browsetask", "title": "A browser task", "ref": "browse_task.BrowseStatus",
+     "summary": "As Assistant and BrowseStatus hold it. One task at a time; an utterance does not stop it.",
+     "nodes": [
+       {"id": "start", "label": "", "x": 0, "y": 2, "start": true},
+       {"id": "running", "label": "Running", "x": 1, "y": 2},
+       {"id": "asking", "label": "Asking", "x": 1, "y": 0.2},
+       {"id": "finished", "label": "Finished", "x": 2.4, "y": 0},
+       {"id": "declined", "label": "Declined", "x": 2.4, "y": 1.3},
+       {"id": "stopped", "label": "Stopped", "x": 2.4, "y": 2.6},
+       {"id": "failed", "label": "Failed", "x": 2.4, "y": 3.9},
+       {"id": "last", "label": "Last ended", "x": 3.7, "y": 2},
+       {"id": "gone", "label": "Forgotten", "x": 3.7, "y": 3.9}
+     ],
+     "edges": [
+       {"from": "start", "to": "running", "label": "_start_browse: cancels an older task, says STARTED, starts the thread", "ref": "assistant.Assistant._start_browse"},
+       {"from": "running", "to": "asking", "label": "A page-changing step: a Pending with a Waiter, heads-up spoken", "ref": "assistant._BrowseHooks.ask"},
+       {"from": "asking", "to": "running", "label": "Run: a yes, allow_once"},
+       {"from": "asking", "to": "declined", "label": "Cancel or expiry: reject, session/cancel, BrowseDeclined"},
+       {"from": "running", "to": "finished", "label": "The answer: report on the turn, Summary line spoken", "ref": "browse_task.spoken_summary"},
+       {"from": "running", "to": "stopped", "label": "Stop, stop_browsing, New conversation, exit (also while asking)", "ref": "assistant.Assistant.stop_task"},
+       {"from": "running", "to": "failed", "label": "An agent error, the gate tripwire, or VAICE_BROWSE_SECONDS passed"},
+       {"from": "finished", "to": "last", "label": "_browse_ended keeps it, if still the current run", "ref": "assistant.Assistant._browse_ended"},
+       {"from": "declined", "to": "last", "label": "same"},
+       {"from": "stopped", "to": "last", "label": "same; a cancelled run is stopped whatever the agent returned"},
+       {"from": "failed", "to": "last", "label": "same"},
+       {"from": "last", "to": "gone", "label": "A new task or New conversation forgets it; browser_status reads it until then", "ref": "assistant.Assistant._browser_status"}
+     ]},
+
+    {"id": "turn", "title": "A turn", "ref": "conversation.Turn",
+     "summary": "One exchange. Once closed its reply text is frozen, so a generator fastrtc finalizes late cannot change history.",
+     "nodes": [
+       {"id": "start", "label": "", "x": 0, "y": 1.5, "start": true},
+       {"id": "open", "label": "Open", "x": 1, "y": 1.5},
+       {"id": "complete", "label": "Complete", "x": 2.5, "y": 0},
+       {"id": "failed", "label": "Failed", "x": 2.5, "y": 1.5},
+       {"id": "interrupted", "label": "Interrupted", "x": 2.5, "y": 3},
+       {"id": "followup", "label": "Closed", "x": 4, "y": 1.5}
+     ],
+     "edges": [
+       {"from": "start", "to": "open", "label": "start_turn, which closes the previous turn", "ref": "conversation.Conversation.start_turn"},
+       {"from": "open", "to": "complete", "label": "finish: the generator ran out", "ref": "conversation.Turn.finish"},
+       {"from": "open", "to": "failed", "label": "fail: the error is shown in the chat, never sent to the model", "ref": "conversation.Turn.fail"},
+       {"from": "open", "to": "interrupted", "label": "close before finish (barge-in, reset): trimmed to the share that played", "ref": "conversation.Turn.close"},
+       {"from": "complete", "to": "followup", "label": "the next start_turn: close trims it too if audio was still playing"},
+       {"from": "failed", "to": "followup", "label": "fail calls finish"},
+       {"from": "interrupted", "to": "followup", "label": "frozen"},
+       {"from": "followup", "to": "followup", "label": "still accepted: the transcript, tool events, a Run or task outcome, reports", "ref": "conversation.Turn.append_assistant_text"}
+     ]}
+  ]
+}
+</script>
+
+<script>
+(() => {
+  "use strict";
+  const DATA = JSON.parse(document.getElementById("architecture-data").textContent);
+  const NS = "http://www.w3.org/2000/svg";
+  const byId = Object.fromEntries(DATA.modules.map(m => [m.id, m]));
+  const usedBy = {};
+  DATA.modules.forEach(m => m.uses.forEach(u => (usedBy[u] = usedBy[u] || []).push(m.id)));
+
+  function svg(tag, attrs = {}, parent) {
+    const el = document.createElementNS(NS, tag);
+    for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, v);
+    if (parent) parent.appendChild(el);
+    return el;
+  }
+  function html(tag, attrs = {}, text) {
+    const el = document.createElement(tag);
+    for (const [k, v] of Object.entries(attrs)) {
+      if (k === "class") el.className = v; else el.setAttribute(k, v);
+    }
+    if (text !== undefined) el.textContent = text;
+    return el;
+  }
+  function fileOf(ref) {
+    const m = byId[ref.split(".")[0]];
+    return m ? m.file : null;
+  }
+  function codeLink(ref) {
+    const file = fileOf(ref);
+    const code = html("code", {}, ref);
+    if (!file) return code;
+    const a = html("a", {href: DATA.repo + file, target: "_blank", rel: "noopener"});
+    a.appendChild(code);
+    return a;
+  }
+  function fit(root, W, floor) {
+    root.removeAttribute("width");
+    root.removeAttribute("height");
+    root.style.width = "100%";
+    root.style.maxWidth = W + "px";
+    root.style.minWidth = Math.round(W * floor) + "px";
+  }
+  function arrowDefs(root, id, color) {
+    const defs = svg("defs", {}, root);
+    const marker = svg("marker", {id, viewBox: "0 0 10 10", refX: "9", refY: "5", markerWidth: "7", markerHeight: "7",
+      orient: "auto-start-reverse"}, defs);
+    svg("path", {d: "M0,0 L10,5 L0,10 z", fill: color}, marker);
+  }
+
+  // ---- Modules: layers as columns, imports as curves; the selection colors its own edges
+  let selected = "assistant";
+  function drawMap() {
+    const host = document.getElementById("map");
+    host.textContent = "";
+    const colW = 190, boxW = 150, boxH = 30, gapY = 14, top = 40;
+    const cols = DATA.layers.map(l => DATA.modules.filter(m => m.layer === l.id));
+    const rows = Math.max(...cols.map(c => c.length));
+    const W = colW * cols.length - (colW - boxW) + 20, H = top + rows * (boxH + gapY) + 10;
+    const root = svg("svg", {viewBox: `0 0 ${W} ${H}`, width: W, height: H, role: "img",
+      "aria-label": "vaice modules in five layers, with arrows for imports"}, host);
+    fit(root, W, 0.8);
+    arrowDefs(root, "arr-out", "var(--accent)");
+    arrowDefs(root, "arr-in", "var(--incoming)");
+    const pos = {};
+    cols.forEach((col, ci) => {
+      const x = 10 + ci * colW;
+      const t = svg("text", {x: x + boxW / 2, y: 18, "text-anchor": "middle", "font-size": "12", "font-weight": "600"}, root);
+      t.textContent = DATA.layers[ci].title.toUpperCase();
+      t.setAttribute("letter-spacing", "0.06em");
+      t.style.fill = "var(--muted)";
+      col.forEach((m, ri) => (pos[m.id] = {x, y: top + ri * (boxH + gapY), col: ci}));
+    });
+    const edges = svg("g", {}, root);
+    DATA.modules.forEach(m => m.uses.forEach(u => {
+      if (u === "config" || u === "lifecycle") { if (m.id !== selected) return; }
+      const a = pos[m.id], b = pos[u];
+      const out = m.id === selected, inc = u === selected;
+      let d;
+      if (a.col === b.col) {
+        const x = a.x + boxW, y1 = a.y + boxH / 2, y2 = b.y + boxH / 2;
+        d = `M${x},${y1} C${x + 28},${y1} ${x + 28},${y2} ${x + 2},${y2}`;
+      } else {
+        const fwd = b.col > a.col;
+        const x1 = fwd ? a.x + boxW : a.x, x2 = fwd ? b.x - 2 : b.x + boxW + 2;
+        const y1 = a.y + boxH / 2, y2 = b.y + boxH / 2, mid = (x1 + x2) / 2;
+        d = `M${x1},${y1} C${mid},${y1} ${mid},${y2} ${x2},${y2}`;
+      }
+      const p = svg("path", {d, fill: "none", "stroke-width": out || inc ? "1.8" : "1",
+        stroke: out ? "var(--accent)" : inc ? "var(--incoming)" : "var(--line)"}, edges);
+      if (out) p.setAttribute("marker-end", "url(#arr-out)");
+      if (inc) p.setAttribute("marker-end", "url(#arr-in)");
+      if (!out && !inc) p.setAttribute("opacity", "0.7");
+      if (out || inc) edges.appendChild(p);  // on top of the faint ones
+    }));
+    DATA.modules.forEach(m => {
+      const {x, y} = pos[m.id];
+      const isSel = m.id === selected, out = (byId[selected].uses || []).includes(m.id),
+        inc = (usedBy[selected] || []).includes(m.id);
+      const g = svg("g", {class: "node", tabindex: "0", role: "button", "aria-label": `${m.id}: ${m.summary}`}, root);
+      g.style.cursor = "pointer";
+      svg("rect", {x, y, width: boxW, height: boxH, rx: "4",
+        fill: isSel ? "var(--accent)" : out ? "var(--accent-soft)" : inc ? "var(--incoming-soft)" : "var(--panel)",
+        stroke: isSel || out ? "var(--accent)" : inc ? "var(--incoming)" : "var(--line)", "stroke-width": isSel ? "2" : "1"}, g);
+      const t = svg("text", {x: x + boxW / 2, y: y + boxH / 2 + 4.5, "text-anchor": "middle", "font-size": "13",
+        class: "mono"}, g);
+      t.textContent = m.file.split("/").pop();
+      if (isSel) t.style.fill = "var(--panel)";
+      const pick = () => selectModule(m.id, true);
+      g.addEventListener("click", pick);
+      g.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); pick(); } });
+    });
+  }
+  function selectModule(id, keepFocus) {
+    selected = id;
+    drawMap();
+    renderModule();
+    if (keepFocus) {
+      const nodes = document.querySelectorAll("#map .node");
+      const i = DATA.modules.findIndex(m => m.id === id);
+      const order = DATA.layers.flatMap(l => DATA.modules.filter(m => m.layer === l.id)).map(m => m.id);
+      const el = nodes[order.indexOf(id)];
+      if (el && i >= 0) el.focus({preventScroll: true});
+    }
+  }
+  function renderModule() {
+    const m = byId[selected];
+    const box = document.getElementById("module-detail");
+    box.textContent = "";
+    box.appendChild(html("div", {class: "kicker"}, m.file));
+    box.appendChild(html("h2", {}, m.summary));
+    box.appendChild(html("p", {}, m.role));
+    if (m.symbols.length) {
+      box.appendChild(html("h3", {}, "Key symbols"));
+      const ul = html("ul", {class: "symbols"});
+      m.symbols.forEach(s => {
+        const li = html("li");
+        li.appendChild(codeLink(s.ref));
+        li.appendChild(html("span", {}, s.what));
+        ul.appendChild(li);
+      });
+      box.appendChild(ul);
+    }
+    if (m.rules.length) {
+      box.appendChild(html("h3", {}, "Rules it keeps"));
+      const ul = html("ul", {class: "rules"});
+      m.rules.forEach(r => ul.appendChild(html("li", {}, r)));
+      box.appendChild(ul);
+    }
+    const rel = (title, ids, cls) => {
+      if (!ids.length) return;
+      box.appendChild(html("h3", {}, title));
+      const c = html("div", {class: "chips"});
+      ids.forEach(id => {
+        const b = html("button", {class: `chip ${cls}`, type: "button"}, id);
+        b.addEventListener("click", () => selectModule(id, false));
+        c.appendChild(b);
+      });
+      box.appendChild(c);
+    };
+    rel("Uses", m.uses, "out");
+    rel("Used by", usedBy[m.id] || [], "in");
+    const threads = DATA.threads.filter(t => [t.started_by, t.runs].some(r => r.split(".")[0] === m.id));
+    if (threads.length) {
+      box.appendChild(html("h3", {}, "Threads it starts or runs"));
+      const c = html("div", {class: "chips"});
+      threads.forEach(t => {
+        const b = html("button", {class: "chip", type: "button"}, t.name);
+        b.addEventListener("click", () => { location.hash = "threads"; });
+        c.appendChild(b);
+      });
+      box.appendChild(c);
+    }
+  }
+  function setupSearch() {
+    const input = document.getElementById("symbol-search"), hits = document.getElementById("hits");
+    const index = DATA.modules.flatMap(m => m.symbols.map(s => ({m: m.id, ref: s.ref, what: s.what})));
+    input.addEventListener("input", () => {
+      const q = input.value.trim().toLowerCase();
+      hits.textContent = "";
+      if (q.length < 2) { hits.hidden = true; return; }
+      const found = index.filter(s => s.ref.toLowerCase().includes(q) || s.what.toLowerCase().includes(q)).slice(0, 12);
+      hits.hidden = false;
+      if (!found.length) { hits.appendChild(html("span", {}, "No symbol on this page matches; the code may still have it.")); return; }
+      found.forEach(s => {
+        const b = html("button", {type: "button"});
+        b.appendChild(html("code", {}, s.ref));
+        b.appendChild(document.createTextNode(" " + s.what));
+        b.addEventListener("click", () => selectModule(s.m, false));
+        hits.appendChild(b);
+      });
+    });
+  }
+
+  // ---- Flows: lanes as columns, one row per step, an arrow from the previous step's lane
+  let flow = DATA.flows[0], step = 0;
+  function drawLanes() {
+    const host = document.getElementById("lanes");
+    host.textContent = "";
+    const laneW = 104, rowH = 34, head = 52, left = 34;
+    const W = left + flow.lanes.length * laneW + 6, H = head + flow.steps.length * rowH + 12;
+    const root = svg("svg", {viewBox: `0 0 ${W} ${H}`, width: W, height: H, role: "img",
+      "aria-label": `${flow.title}: ${flow.steps.length} steps across ${flow.lanes.length} threads or actors`}, host);
+    fit(root, W, 0.85);
+    arrowDefs(root, "arr-flow", "var(--muted)");
+    arrowDefs(root, "arr-cur", "var(--accent)");
+    const cx = lane => left + flow.lanes.indexOf(lane) * laneW + laneW / 2;
+    flow.lanes.forEach(l => {
+      const x = cx(l);
+      const words = l.split(" ");
+      const lines = words.length > 1 ? [words.slice(0, Math.ceil(words.length / 2)).join(" "), words.slice(Math.ceil(words.length / 2)).join(" ")] : [l];
+      lines.forEach((ln, i) => {
+        const t = svg("text", {x, y: 18 + i * 15, "text-anchor": "middle", "font-size": "12.5", "font-weight": "600"}, root);
+        t.textContent = ln;
+      });
+      svg("line", {x1: x, y1: head - 8, x2: x, y2: H - 6, stroke: "var(--line)", "stroke-dasharray": "3 4"}, root);
+    });
+    flow.steps.forEach((s, i) => {
+      const y = head + i * rowH + rowH / 2, x = cx(s.lane), cur = i === step;
+      const g = svg("g", {tabindex: "-1"}, root);
+      g.style.cursor = "pointer";
+      if (cur) svg("rect", {x: 2, y: y - rowH / 2 + 2, width: W - 4, height: rowH - 4, rx: "4", fill: "var(--accent-soft)"}, g);
+      else svg("rect", {x: 2, y: y - rowH / 2 + 2, width: W - 4, height: rowH - 4, fill: "transparent"}, g);
+      const n = svg("text", {x: 6, y: y + 4, "font-size": "11.5", class: "mono"}, g);
+      n.textContent = String(i + 1).padStart(2, "0");
+      n.style.fill = "var(--muted)";
+      if (i > 0) {
+        const px = cx(flow.steps[i - 1].lane);
+        if (px !== x) {
+          const dir = x > px ? 1 : -1;
+          svg("line", {x1: px, y1: y, x2: x - dir * 9, y2: y, stroke: cur ? "var(--accent)" : "var(--muted)",
+            "stroke-width": cur ? "1.8" : "1.1", "marker-end": `url(#${cur ? "arr-cur" : "arr-flow"})`}, g);
+        }
+      }
+      svg("circle", {cx: x, cy: y, r: cur ? 7 : 5, fill: cur ? "var(--accent)" : "var(--panel)",
+        stroke: cur ? "var(--accent)" : "var(--muted)", "stroke-width": "1.5"}, g);
+      g.addEventListener("click", () => setStep(i));
+    });
+  }
+  function renderStep() {
+    const s = flow.steps[step];
+    document.getElementById("step-count").textContent = `step ${step + 1} of ${flow.steps.length}`;
+    document.getElementById("prev").disabled = step === 0;
+    document.getElementById("next").disabled = step === flow.steps.length - 1;
+    const card = document.getElementById("step-card");
+    card.textContent = "";
+    card.appendChild(html("div", {class: "lane"}, s.lane));
+    card.appendChild(html("p", {}, s.text));
+    if (s.ref) card.appendChild(codeLink(s.ref));
+    if (s.why) card.appendChild(html("p", {class: "why"}, s.why));
+    document.querySelectorAll("#step-list button").forEach((b, i) => {
+      if (i === step) b.setAttribute("aria-current", "step"); else b.removeAttribute("aria-current");
+    });
+  }
+  function setStep(i) {
+    step = Math.max(0, Math.min(flow.steps.length - 1, i));
+    drawLanes();
+    renderStep();
+  }
+  function setFlow(id) {
+    flow = DATA.flows.find(f => f.id === id) || DATA.flows[0];
+    step = 0;
+    document.querySelectorAll("#flow-picker .chip").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.id === flow.id)));
+    document.getElementById("flow-summary").textContent = flow.summary;
+    const list = document.getElementById("step-list");
+    list.textContent = "";
+    flow.steps.forEach((s, i) => {
+      const li = html("li"), b = html("button", {type: "button"});
+      b.appendChild(html("span", {class: "n"}, String(i + 1).padStart(2, "0")));
+      b.appendChild(html("span", {}, s.text));
+      b.addEventListener("click", () => setStep(i));
+      li.appendChild(b);
+      list.appendChild(li);
+    });
+    setStep(0);
+  }
+  function setupFlows() {
+    const picker = document.getElementById("flow-picker");
+    DATA.flows.forEach(f => {
+      const b = html("button", {class: "chip", type: "button", "aria-pressed": "false"}, f.title);
+      b.dataset.id = f.id;
+      b.addEventListener("click", () => setFlow(f.id));
+      picker.appendChild(b);
+    });
+    document.getElementById("prev").addEventListener("click", () => setStep(step - 1));
+    document.getElementById("next").addEventListener("click", () => setStep(step + 1));
+    document.addEventListener("keydown", e => {
+      if (document.getElementById("view-flows").hidden || e.target.tagName === "INPUT") return;
+      if (e.key === "ArrowRight" || e.key === "ArrowDown" && e.altKey) { setStep(step + 1); }
+      if (e.key === "ArrowLeft") { setStep(step - 1); }
+    });
+    setFlow(DATA.flows[0].id);
+  }
+
+  // ---- Threads
+  function renderThreads() {
+    const host = document.getElementById("threads");
+    DATA.threads.forEach(t => {
+      const card = html("article", {class: "surface thread"});
+      card.appendChild(html("h2", {}, t.name));
+      const dl = html("dl");
+      [["runs", t.runs], ["started by", t.started_by]].forEach(([k, v]) => {
+        dl.appendChild(html("dt", {}, k));
+        const dd = html("dd");
+        dd.appendChild(codeLink(v));
+        dl.appendChild(dd);
+      });
+      dl.appendChild(html("dt", {}, "lives"));
+      dl.appendChild(html("dd", {}, t.lifetime));
+      card.appendChild(dl);
+      card.appendChild(html("h3", {}, "Talks through"));
+      const ul = html("ul");
+      t.talks.forEach(x => ul.appendChild(html("li", {}, x)));
+      card.appendChild(ul);
+      host.appendChild(card);
+    });
+  }
+
+  // ---- State machines: nodes on a grid, numbered transitions listed beside
+  let machine = DATA.states[0], edgeSel = -1;
+  function drawMachine() {
+    const host = document.getElementById("machine");
+    host.textContent = "";
+    const gx = 150, gy = 46, w = 108, h = 30, pad = 24;
+    const maxX = Math.max(...machine.nodes.map(n => n.x)), maxY = Math.max(...machine.nodes.map(n => n.y));
+    const W = pad * 2 + maxX * gx + w, H = pad * 2 + maxY * gy + h + 26;
+    const root = svg("svg", {viewBox: `0 0 ${W} ${H}`, width: W, height: H, role: "img",
+      "aria-label": `${machine.title}: ${machine.nodes.length - 1} states, ${machine.edges.length} transitions`}, host);
+    fit(root, W, 0.8);
+    arrowDefs(root, "arr-st", "var(--muted)");
+    arrowDefs(root, "arr-sel", "var(--accent)");
+    const at = {};
+    machine.nodes.forEach(n => (at[n.id] = {cx: pad + n.x * gx + w / 2, cy: pad + n.y * gy + h / 2, start: n.start}));
+    const border = (p, toward) => {  // where the line from p's center toward a point leaves p's box (or circle)
+      const dx = toward.cx - p.cx, dy = toward.cy - p.cy;
+      if (p.start) { const d = Math.hypot(dx, dy) || 1; return {x: p.cx + dx / d * 8, y: p.cy + dy / d * 8}; }
+      const sx = Math.abs(dx) / (w / 2 + 3), sy = Math.abs(dy) / (h / 2 + 3), s = Math.max(sx, sy) || 1;
+      return {x: p.cx + dx / s, y: p.cy + dy / s};
+    };
+    machine.edges.forEach((e, i) => {
+      const a = at[e.from], b = at[e.to], sel = i === edgeSel;
+      const g = svg("g", {}, root);
+      g.style.cursor = "pointer";
+      g.addEventListener("click", () => selectEdge(i));
+      let mx, my;
+      if (e.from === e.to) {
+        const x = a.cx, y = a.cy + h / 2;
+        svg("path", {d: `M${x - 18},${y} C${x - 30},${y + 34} ${x + 30},${y + 34} ${x + 18},${y + 2}`, fill: "none",
+          stroke: sel ? "var(--accent)" : "var(--muted)", "stroke-width": sel ? "2" : "1.2",
+          "marker-end": `url(#${sel ? "arr-sel" : "arr-st"})`}, g);
+        mx = x; my = y + 26;
+      } else {
+        const p = border(a, b), q = border(b, a);
+        if (machine.edges.some(o => o.from === e.to && o.to === e.from)) {
+          const len = Math.hypot(q.x - p.x, q.y - p.y) || 1, nx = -(q.y - p.y) / len * 7, ny = (q.x - p.x) / len * 7;
+          p.x += nx; p.y += ny; q.x += nx; q.y += ny;
+        }
+        svg("line", {x1: p.x, y1: p.y, x2: q.x, y2: q.y, stroke: sel ? "var(--accent)" : "var(--muted)",
+          "stroke-width": sel ? "2" : "1.2", "marker-end": `url(#${sel ? "arr-sel" : "arr-st"})`}, g);
+        mx = p.x + (q.x - p.x) * 0.55; my = p.y + (q.y - p.y) * 0.55;
+      }
+      svg("circle", {cx: mx, cy: my, r: 9, fill: sel ? "var(--accent)" : "var(--panel)",
+        stroke: sel ? "var(--accent)" : "var(--muted)"}, g);
+      const t = svg("text", {x: mx, y: my + 4, "text-anchor": "middle", "font-size": "11", class: "mono"}, g);
+      t.textContent = String(i + 1);
+      if (sel) t.style.fill = "var(--panel)";
+    });
+    machine.nodes.forEach(n => {
+      const p = at[n.id];
+      if (n.start) { svg("circle", {cx: p.cx, cy: p.cy, r: 7, fill: "var(--ink)"}, root); return; }
+      const hit = edgeSel >= 0 && [machine.edges[edgeSel].from, machine.edges[edgeSel].to].includes(n.id);
+      svg("rect", {x: p.cx - w / 2, y: p.cy - h / 2, width: w, height: h, rx: "14",
+        fill: hit ? "var(--accent-soft)" : "var(--panel)", stroke: hit ? "var(--accent)" : "var(--ink)",
+        "stroke-width": hit ? "1.8" : "1.2"}, root);
+      const t = svg("text", {x: p.cx, y: p.cy + 4.5, "text-anchor": "middle", "font-size": "12.5", "font-weight": "500"}, root);
+      t.textContent = n.label.length > 16 ? n.label.slice(0, 15) + "…" : n.label;
+      if (n.label.length > 16) svg("title", {}, t).textContent = n.label;
+    });
+  }
+  function selectEdge(i) {
+    edgeSel = edgeSel === i ? -1 : i;
+    drawMachine();
+    document.querySelectorAll("#trans button").forEach((b, j) => b.setAttribute("aria-current", String(j === edgeSel)));
+  }
+  function setMachine(id) {
+    machine = DATA.states.find(s => s.id === id) || DATA.states[0];
+    edgeSel = -1;
+    document.querySelectorAll("#state-picker .chip").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.id === machine.id)));
+    document.getElementById("state-summary").textContent = machine.summary;
+    const label = id => (machine.nodes.find(n => n.id === id) || {}).label || "start";
+    const list = document.getElementById("trans");
+    list.textContent = "";
+    machine.edges.forEach((e, i) => {
+      const li = html("li"), b = html("button", {type: "button", "aria-current": "false"});
+      b.appendChild(html("span", {class: "n"}, String(i + 1)));
+      const body = html("span");
+      body.appendChild(html("span", {class: "from"}, `${label(e.from) || "start"} → ${label(e.to)}`));
+      body.appendChild(html("br"));
+      body.appendChild(document.createTextNode(e.label));
+      if (e.ref) { body.appendChild(html("br")); body.appendChild(codeLink(e.ref)); }
+      b.appendChild(body);
+      b.addEventListener("click", ev => { if (ev.target.closest("a")) return; selectEdge(i); });
+      li.appendChild(b);
+      list.appendChild(li);
+    });
+    drawMachine();
+  }
+  function setupStates() {
+    const picker = document.getElementById("state-picker");
+    DATA.states.forEach(s => {
+      const b = html("button", {class: "chip", type: "button", "aria-pressed": "false"}, s.title);
+      b.dataset.id = s.id;
+      b.addEventListener("click", () => setMachine(s.id));
+      picker.appendChild(b);
+    });
+    setMachine(DATA.states[0].id);
+  }
+
+  // ---- Tabs, routed on the hash
+  const VIEWS = ["map", "flows", "threads", "states"];
+  function show() {
+    const view = VIEWS.includes(location.hash.slice(1)) ? location.hash.slice(1) : "map";
+    VIEWS.forEach(v => {
+      document.getElementById("view-" + v).hidden = v !== view;
+      document.getElementById("tab-" + v).setAttribute("aria-selected", String(v === view));
+    });
+  }
+  document.querySelectorAll("nav.tabs button").forEach(b => b.addEventListener("click", () => { location.hash = b.dataset.view; }));
+  window.addEventListener("hashchange", show);
+
+  document.getElementById("footer").textContent =
+    `Data as of ${DATA.as_of}: ${DATA.modules.length} modules, ${DATA.threads.length} named threads, ${DATA.flows.length} flows, ` +
+    `${DATA.states.length} state machines. tests/test_architecture_docs.py checks every name on this page against src/vaice.`;
+  drawMap();
+  renderModule();
+  setupSearch();
+  setupFlows();
+  renderThreads();
+  setupStates();
+  show();
+})();
+</script>

@@ -13,6 +13,12 @@ approval, the MCP `auto` and `voice` policies, llama-server's built-in tools) ar
 the pull requests (#53 to #126).
 
 ### Added
+- **Architecture diagrams and an interactive explorer.** `docs/architecture.md` draws the module imports, one reply,
+  a tool round, a Run click, the outbox and `emit()`, the browser task over ACP, every named thread and barge-in in
+  Mermaid, and shows a `conversation.json` turn and the ChatML instructions. `docs/architecture-explorer.html` is the
+  same model to click through: each module's job, key symbols and rules, a step-by-step view of six flows by thread,
+  the threads and three state machines. `tests/test_architecture_docs.py` fails when either names a module, symbol
+  or thread that no longer exists or misses one.
 - **A status line while a browser task runs.** Beside *Stop the browser task*: the goal, the time run against the
   limit (`2:14 of 10:00`), the tool calls so far, the latest host it opened and "waiting for Run" while a step waits
   for approval. The 1 s timer now re-sends only the components whose own view changed, so the ticking time does not

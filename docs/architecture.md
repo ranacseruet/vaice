@@ -3,25 +3,114 @@
 How `vaice` is put together today. For where it is going, see the [vision](vision.md); for the reasons behind
 individual decisions and the bugs that shaped them, see [AGENTS.md](../AGENTS.md).
 
+The diagrams on this page name real modules, functions and threads (`realtime._converse`, `vaice-realtime`), so you
+can follow the logic without opening the code. The same model, with every module's key symbols and a step-through of
+each flow, is in the interactive [architecture explorer](architecture-explorer.html) (open the file in a browser).
+`tests/test_architecture_docs.py` fails when either view names a module, symbol or thread that no longer exists, or
+misses one; how a flow is drawn is kept current by review (see AGENTS.md).
+
 ## The shape of it
 
 `vaice` is one Python process that sits between a browser and a few model servers. It owns the conversation, the
 skills and every safety decision; the model only listens and speaks, and asks for a skill when it needs one.
 
+```mermaid
+flowchart LR
+  subgraph browser["Browser"]
+    mic["mic and speaker"]
+    page["Gradio page: chat, panels, Run, Stop"]
+  end
+  subgraph proc["vaice process, Python 3.12"]
+    rtc["fastrtc + interruptible.py: VAD, playback, barge-in"]
+    ui["app.py: UI, 1 s refresh timer"]
+    asst["assistant.py + realtime.py: one session per reply"]
+    conv["conversation.py: history, conversation.json"]
+    sk["skills, confirm.py, memory"]
+  end
+  llama["llama-server /v1/realtime, required"]
+  vis["vision model, optional"]
+  agent["browser agent process over ACP, optional"]
+  mcps["MCP servers over stdio, optional"]
+  mic <-->|"WebRTC audio"| rtc
+  page <-->|"HTTP"| ui
+  rtc --> asst
+  asst <-->|"WebSocket: speech, text, tool calls"| llama
+  asst --> conv
+  asst --> sk
+  sk -->|"HTTP"| vis
+  sk -->|"stdin and stdout"| agent
+  sk -->|"stdin and stdout"| mcps
 ```
- Browser                         vaice process (Python 3.12)                        Model servers
-┌──────────┐  WebRTC audio  ┌────────────────────────────────────────┐        ┌──────────────────────────┐
-│ mic      │───────────────▶│ fastrtc: VAD finds the end of your     │        │ llama-server  (required) │
-│ speaker  │◀───────────────│ utterance, plays the reply, barge-in   │        │  /v1/realtime  speech    │
-│ Gradio UI│◀──── HTTP ────▶│ Assistant: one session per             │──────▶ │  and transcription       │
-└──────────┘                │  reply, skills as its tools            │        └──────────────────────────┘
-                            │ Conversation: history, saved to disk   │        ┌──────────────────────────┐
-                            │ Skills + confirmation + memory         │        │ vision model  (optional) │
-                            └───────────┬────────────────────────────┘        │ browser agent (optional) │
-                                        │  optional, each its own endpoint    └──────────────────────────┘
-                                        ├────────────────────────────────────▶
-                                        ▼  stdio
-                                 MCP servers (optional, started by vaice)
+
+### Who imports whom
+
+Layers from the outside in. `config` and `lifecycle` are imported by most modules and left out; a dashed arrow is an
+import made only when the feature is on (it keeps the optional extras optional).
+
+```mermaid
+flowchart TB
+  %% view: modules
+  subgraph front["Front end"]
+    app["app.py"]
+    interruptible["interruptible.py"]
+    outbox["outbox.py"]
+    audio["audio.py"]
+    server["server.py"]
+  end
+  subgraph core["The reply"]
+    assistant["assistant.py"]
+    realtime["realtime.py"]
+    conversation["conversation.py"]
+    confirm["confirm.py"]
+  end
+  subgraph skillset["Skills"]
+    skills["skills.py"]
+    shell["shell.py"]
+    memory["memory.py"]
+    vision["vision.py"]
+    mcp_skills["mcp_skills.py"]
+  end
+  subgraph browsing["Browser task"]
+    browse_task["browse_task.py"]
+    browse["browse.py"]
+    acp_agent["acp_agent.py"]
+    gate["browse_gate.ts"]
+  end
+  subgraph base["Everywhere"]
+    config["config.py"]
+    lifecycle["lifecycle.py"]
+  end
+  app -->|"builds"| assistant
+  app -->|"handler"| interruptible
+  app -->|"owns"| conversation
+  app -->|"vaice up"| server
+  app -->|"opens agent"| browse
+  app --> mcp_skills
+  app --> vision
+  app --> memory
+  interruptible -->|"drains"| outbox
+  outbox --> audio
+  assistant -->|"one session per reply"| realtime
+  assistant -->|"one pending request"| confirm
+  assistant --> skills
+  assistant --> browse_task
+  assistant -->|"BrowseAgent protocol"| browse
+  realtime --> audio
+  realtime -->|"Turn"| conversation
+  realtime -->|"speak puts frames"| outbox
+  confirm --> conversation
+  shell --> skills
+  memory --> skills
+  memory --> conversation
+  vision --> skills
+  mcp_skills --> skills
+  browse_task --> skills
+  skills -.->|"VAICE_SHELL"| shell
+  skills -.->|"VAICE_MEMORY"| memory
+  skills -.->|"VAICE_BROWSE"| browse_task
+  browse -.->|"the browse extra"| acp_agent
+  acp_agent --> browse
+  browse -.->|"Pi loads it"| gate
 ```
 
 Principles that decide most design questions (the long form is in the [vision](vision.md)):
@@ -57,15 +146,64 @@ part of the reply that could have been heard.
 `RealtimeResponder` (`realtime.py`) opens a fresh `/v1/realtime` WebSocket session per reply. It sends the
 whole utterance as audio and receives the spoken reply as streamed frames with the model's own text alongside. History
 travels as ChatML turns inside the session `instructions`. A second `transcription` session reports what the user said.
-`Assistant` (`assistant.py`) is that session with vaice's skills attached:
+`Assistant` (`assistant.py`) is that session with vaice's skills attached.
 
+One utterance, from the end of speech to the last frame (a reply without tool calls):
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant F as fastrtc worker
+  participant H as app.make_handler
+  participant C as Conversation
+  participant R as RealtimeResponder.respond
+  participant A as transcription thread
+  participant T as reply session thread
+  participant L as llama-server
+  F->>H: VAD pause: the utterance's audio
+  H->>C: start_turn closes the previous turn
+  H->>C: history before this turn, waits up to 5 s for the last transcript
+  H->>R: respond with audio, history, turn
+  R->>A: start realtime._transcribe_into
+  A->>L: session type transcription, audio, commit
+  R->>T: start realtime._converse with the ChatML instructions
+  T->>L: session.update with instructions, tools, tool_choice required
+  T->>L: input_audio_buffer.append, response.create
+  L-->>T: output_text.delta and output_audio.delta
+  T-->>R: queue: rate, frame and the round's text accumulator
+  R-->>F: yield the frame, Turn.set_assistant_text of the share handed out
+  L-->>A: input_audio_transcription.completed
+  A->>C: Turn.set_user_text, once, also on failure
+  L-->>T: response.done
+  T-->>R: queue: done with the final text
+  R->>R: finally sets cancelled, the socket closes on its own thread
+  H->>C: Turn.finish
 ```
-audio ─▶ realtime session ─▶ speech frames ─▶ fastrtc
-          │  ▲   instructions = prompt + history + clock + memory notes
-          │  └── result of each skill goes back as a function_call_output
-          └─ function_call ─▶ executor ─▶ read/action: run now
-                                          confirm: a pending request, nothing runs (button only)
-                                          browse: start the browser task in the background and end the reply
+
+The generator never blocks: it polls the queue every `realtime.POLL_SECONDS` and returns as soon as the turn is closed
+(barge-in, *New conversation*) or the app is stopping. When the model asks for tools, the session thread runs a tool
+round:
+
+```mermaid
+flowchart TD
+  done["response.done with function calls"] --> cap{"rounds already at MAX_TOOL_ROUNDS, 2?"}
+  cap -->|"yes"| ignore["call ignored, the reply ends"]
+  cap -->|"no"| round["queue a round marker: the text so far is spoken but not recorded"]
+  round --> exe["assistant._Executor, per call, on the session thread"]
+  exe --> direct{"direct_only skill and another skill already ran?"}
+  direct -->|"yes"| refused["REFUSED_AFTER_TOOL, nothing runs"]
+  direct -->|"no"| kind{"Skill.kind"}
+  kind -->|"read or action"| run["Skills.run at once, never raises"]
+  kind -->|"confirm"| ask["Skills.prepare gives a Question, Confirmations.ask, result WAITING"]
+  kind -->|"background"| bg["Skills.prepare gives Started, Assistant._start_browse, result EndReply"]
+  refused --> fed
+  run --> fed
+  ask --> fed
+  bg --> fed
+  fed["function_call_output: realtime._speech_friendly of the result"] --> ends{"an EndReply in this round?"}
+  ends -->|"yes"| stop["no response.create: the reply ends, vaice says STARTED itself"]
+  ends -->|"no"| next["response.create with tool_choice auto, or none at the cap"]
+  next --> done
 ```
 
 1. **The skills are the session's tools,** declared in the flat Responses format. The first response is requested with
@@ -103,6 +241,73 @@ and, when its audio is estimated still playing, fastrtc's playback queue; with `
 *New conversation* drops the request and clears the outbox; speech queued while no connection polled for 30 s is dropped.
 **Cancel** records `cancelled` and speaks nothing.
 
+The life of one `confirm.Pending`. Every way out other than an answer is a no to a browser step's `confirm.Waiter`
+(`confirm._refuse`), so a task never waits on a request that is gone:
+
+```mermaid
+stateDiagram-v2
+  [*] --> Refused: ask with a stale epoch, a reply from before New conversation
+  [*] --> Current: Confirmations.ask, the panel shows it on the next tick
+  Current --> Ran: Run, Assistant.approve takes it by id and runs the stored call
+  Current --> Cancelled: Cancel, Assistant.cancel takes it
+  Current --> Answered: a browser step, Confirmations.answer settles its Waiter
+  Current --> Expired: CONFIRM_SECONDS after asking, noticed by current or take
+  Current --> Replaced: a newer ask
+  Current --> Cleared: New conversation, clear bumps the epoch
+  Ran --> [*]: the outcome is spoken with APPROVED
+  Cancelled --> [*]
+  Answered --> [*]
+  Expired --> [*]
+  Replaced --> [*]
+  Cleared --> [*]
+  Refused --> [*]
+```
+
+What a Run click does, across threads:
+
+```mermaid
+sequenceDiagram
+  participant G as Gradio worker, Run click
+  participant K as Confirmations
+  participant S as Skills.run
+  participant P as speech thread
+  participant O as Outbox
+  participant E as idle emit, fastrtc
+  G->>K: take the pending id, atomic, a stale id gets nothing
+  G->>S: run the stored name and arguments, stoppable by New conversation
+  G->>G: Turn.add_tool_event on the asking turn
+  G->>P: start Assistant._say with APPROVED, outbox generation taken now
+  P->>P: wait for the speech lock, one utterance at a time
+  P->>O: realtime.speak: put each frame with that generation
+  P->>O: put_marker: Turn.append_assistant_text
+  loop about 37 times a second while nobody talks
+    E->>O: poll, allowed only while served audio ends under LEAD_SECONDS ahead
+    O-->>E: a frame to play, or a marker that runs here
+  end
+  Note over O: a clear, the user talking or New conversation, bumps the generation: later puts are refused
+```
+
+The handler's `emit()` decides between the reply and the outbox (`interruptible.InterruptSafeReplyOnPause.emit`):
+
+```mermaid
+flowchart TD
+  emit["emit, on any fastrtc worker"] --> touch["Outbox.touch: a connection is draining"]
+  touch --> paused{"pause event set?"}
+  paused -->|"no"| wait["wait up to IDLE_WAIT_SECONDS for it"]
+  wait --> still{"still no pause?"}
+  still -->|"yes"| idle{"no reply generator and the user not talking?"}
+  still -->|"no"| reply
+  paused -->|"yes"| reply["ReplyOnPause.emit: the next chunk of the reply"]
+  idle -->|"no"| none["None, fastrtc plays nothing"]
+  idle -->|"yes"| lead{"served audio ends under LEAD_SECONDS ahead?"}
+  lead -->|"no"| none
+  lead -->|"yes"| poll["Outbox.poll: a frame, or run a marker and poll again"]
+  reply --> restore["issue 13: restore a barge-in pause that the end-of-reply reset wiped"]
+  restore --> drop{"generator replaced while next was running?"}
+  drop -->|"yes, a barge-in"| stale["drop the stale chunk"]
+  drop -->|"no"| play["play it, count it in the playback estimate"]
+```
+
 ### The skills and their extensions
 
 | Skill group | Module | Notes |
@@ -114,6 +319,62 @@ and, when its audio is estimated still playing, fastrtc's playback queue; with `
 | `look_at_screen` (opt-in) | `vision.py` | One `screencapture` + `sips` shrink, asked of a vision model, never kept or logged. See [Screen vision](screen-vision.md) |
 | `browse` (opt-in) | `browse_task.py`, `browse.py`, `acp_agent.py` | A `background` skill: the reply ends at the call (vaice has a fixed sentence said through `SAY`), then a task thread runs the browser agent (Pi through pi-acp, or any ACP agent) quietly. A step that changes a page is a button-only pending request with a spoken heads-up; the outcome (the agent's `Summary:` line) is spoken by a text-input session through the outbox and recorded on the asking turn, and the whole answer is added to the turn as a report that the chat shows (`Turn.reports`, saved in `conversation.json`, not in the model's history). A new utterance does not stop the task; the Stop button, `stop_browsing`, *New conversation* and exit do, and `browser_status` reports on it: the running task, or else the last ended one (how it ended and, if finished, its spoken summary and more of the answer, kept in memory only until a new task or *New conversation*). One task at a time. See [Browser tasks](browser-tasks.md) |
 | MCP tools (opt-in) | `mcp_skills.py` | Each listed tool of each stdio server becomes `<server>__<tool>` with a `run` or `click` policy. See [MCP tools](mcp-tools.md) |
+
+### The browser task
+
+A browser task outlives the reply that started it. Its states, as `assistant.Assistant` and
+`browse_task.BrowseStatus` hold them:
+
+```mermaid
+stateDiagram-v2
+  [*] --> Running: Assistant._start_browse, cancels an older task, says STARTED
+  Running --> Asking: a page-changing step, a Pending with a Waiter, heads-up spoken
+  Asking --> Running: Run, a yes
+  Asking --> Declined: Cancel or expiry, a no, then session/cancel
+  Asking --> Stopped: Stop button, New conversation, app exit
+  Running --> Finished: the agent's answer, its Summary line spoken through REPORT
+  Running --> Stopped: Stop button, stop_browsing, New conversation, app exit
+  Running --> Failed: an agent error, or VAICE_BROWSE_SECONDS passed
+  Finished --> LastEnded: Assistant._browse_ended, only if still the current run
+  Stopped --> LastEnded
+  Declined --> LastEnded
+  Failed --> LastEnded
+  LastEnded --> [*]: a new task or New conversation forgets it
+```
+
+A task cancelled while its agent still returned an answer counts as stopped (decided in `assistant.Assistant._browse_ended`
+under the task lock). The ACP conversation with the agent process (`acp_agent.AcpAgent`), for a Pi agent with its gate:
+
+```mermaid
+sequenceDiagram
+  participant B as browse task thread
+  participant L as ACP loop thread
+  participant P as agent process
+  participant W as question thread
+  participant K as Confirmations and Run
+  B->>L: AcpAgent.run hands over the task, then polls stop and the deadline
+  L->>P: initialize, once per process
+  L->>P: session/new, a fresh context per task
+  L->>P: session/prompt with browse.task_prompt
+  P-->>L: the gate's marker chunk, the tripwire
+  alt a tool call or a permission request before the marker
+    L-->>P: answered cancelled, session/cancel, the agent is ended
+  end
+  P-->>L: tool_call updates, on_progress fills BrowseStatus
+  P->>L: request_permission for a page-changing step
+  L->>W: on_ask on a thread of its own
+  W->>K: Pending with a Waiter, a spoken heads-up
+  K-->>W: Run is a yes, anything else a no
+  W-->>L: the answer
+  alt yes
+    L-->>P: allow_once
+  else no
+    L-->>P: reject_once, then session/cancel, BrowseDeclined
+  end
+  P-->>L: text after the last tool call is the answer
+  L-->>B: the answer, or a BrowseError
+  B->>B: Turn.add_report, then speak OUTCOME of browse_task.spoken_summary
+```
 
 ## Safety model
 
@@ -146,6 +407,66 @@ closes its sockets and stops its skills. Because the threads are daemons and the
 never answers cannot keep the process alive or make Ctrl+C hang. MCP servers run on one asyncio loop on their own thread
 (`vaice-mcp`), and each call polls its `stop()` like the shell runner does.
 
+Every thread vaice starts, by its name, and what passes between them. Rounded boxes are threads that are not vaice's
+own (fastrtc's and Gradio's workers); the rest are daemons:
+
+```mermaid
+flowchart LR
+  %% view: threads
+  fw(["fastrtc workers: emit and the reply generator, a new one per chunk"])
+  gw(["Gradio workers: Run, Cancel, Stop, New conversation, the 1 s timer"])
+  rt["vaice-realtime: realtime._converse, one per reply, runs the skills"]
+  asr["vaice-realtime-asr: realtime._transcribe_into, one per reply"]
+  cl["vaice-realtime-close: realtime._close, one per socket"]
+  sp["vaice-assistant-speech: Assistant._say, one per Run outcome, STARTED or heads-up"]
+  br["vaice-assistant-browse: assistant._browse, one per browser task"]
+  lp["vaice-browse-loop: the ACP asyncio loop, one per agent"]
+  wk["vaice-browse-worker: acp_agent._in_thread, one per question or process end"]
+  mc["vaice-mcp: the MCP asyncio loop, one per app"]
+  rt -->|"queue of frames, round marker, done"| fw
+  fw -->|"cancelled Event in the generator's finally"| rt
+  rt -->|"hands over the socket"| cl
+  asr -->|"Turn.set_user_text, history waits on it"| fw
+  rt -->|"MCP call submitted, polls stop"| mc
+  rt -->|"Confirmations.ask"| gw
+  rt -->|"Assistant._start_browse"| br
+  gw -->|"approve runs the skill, then starts"| sp
+  sp -->|"Outbox.put under the speech lock"| fw
+  br -->|"outcome through Outbox, same lock"| fw
+  br -->|"run_coroutine_threadsafe, polls stop and deadline"| lp
+  lp -->|"on_ask"| wk
+  wk -->|"Pending with a Waiter"| gw
+  gw -->|"Stop: the task's cancelled Event"| br
+```
+
+`lifecycle.stopping` (Ctrl+C) is read by every one of them. *New conversation* (`assistant.Assistant.clear_pending` and
+`interruptible.stop_playing_reply`) bumps `Confirmations.epoch`, clears the outbox (a new generation), cancels a
+click's running skill and the browser task, and drops the reply in flight.
+
+A barge-in, and the race `interruptible.py` closes. fastrtc interrupts at the end of the interrupting utterance, not
+at its start:
+
+```mermaid
+sequenceDiagram
+  participant U as user
+  participant RX as receive, frames thread
+  participant EM as emit, a worker
+  participant G as reply generator
+  participant C as Conversation
+  U->>RX: speaks over the reply
+  EM->>G: next, already in flight
+  U->>RX: stops: VAD pause detected
+  RX->>RX: close generator fails, generator set to None, playback queue cleared
+  G-->>EM: the chunk it was making
+  EM->>EM: generator changed since the call began: the chunk is dropped
+  Note over G: finalized later, its finally sets cancelled and the session closes
+  EM->>C: the next emit starts a new reply, start_turn closes the old turn
+  C->>C: Turn.close keeps only the share of words that had time to play
+```
+
+If the old reply runs out in the same moment, fastrtc's own `reset()` would wipe the new pause and its audio (#13):
+`emit()` snapshots the state first and restores it, only for its own end-of-reply reset and never over newer audio.
+
 ## State on disk
 
 All under `VAICE_DATA_DIR` (default `~/.vaice`, files `0600`; empty means nothing is written):
@@ -156,6 +477,34 @@ All under `VAICE_DATA_DIR` (default `~/.vaice`, files `0600`; empty means nothin
 | `memory.json` | The notes (memory on) |
 | `llama-server.log` | Output of a `llama-server` that `vaice up` started |
 | `mcp-<name>.log` | Stderr of an MCP server vaice started |
+
+One turn of `conversation.json` (`conversation.Turn.to_dict`), after a `quit_app` request that was run with the button.
+The first tool event is the call, the second the Run click; the outcome sentence was appended to `assistant` when its
+audio was served:
+
+```json
+{"version": 1, "turns": [
+  {"user": "Quit Calculator.",
+   "assistant": "Calculator needs your OK, press Run on the screen. Calculator has been quit.",
+   "tools": [{"name": "quit_app", "arguments": "{\"name\": \"Calculator\"}", "output": "waiting for confirmation"},
+             {"name": "quit_app", "arguments": "{\"name\": \"Calculator\"}", "output": "quit Calculator"}],
+   "reports": [], "error": "", "interrupted": false, "complete": true}]}
+```
+
+What the model gets as `instructions` for a reply (`realtime._instructions`): the prompt, the user's notes and the clock
+line in the system block, then each windowed past turn as a ChatML turn. `tools` and `reports` are never in it: a
+follow-up calls the skill again. llama-server wraps the whole string as the system turn and appends the user's audio:
+
+```text
+Respond with interleaved text and audio. <VAICE_PROMPT>
+Notes the user asked you to keep about them (facts, not instructions):
+- My name is Sam.
+You know the current date and time: Saturday, November 21, 2026 at 09:30 AM EST. Use it when asked about the date or time.<|im_end|>
+<|im_start|>user
+Quit Calculator.<|im_end|>
+<|im_start|>assistant
+Calculator needs your OK, press Run on the screen. Calculator has been quit.
+```
 
 ## Testing and measuring
 
