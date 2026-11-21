@@ -705,6 +705,9 @@ def test_a_report_shows_even_when_nothing_was_said_on_the_turn():
     ("![shortcut]\n\n[shortcut]: https://evil.test/d.png", "shortcut\n\n[shortcut]: https://evil.test/d.png"),
     ("[![badge](https://evil.test/b.svg)](https://example.com/page)", "[badge](https://example.com/page)"),
     ("a [link](https://example.com) stays", "a [link](https://example.com) stays"),
+    ("![![x](https://example.com/inner.png)](https://evil.test/track.png)", "x"),  # the inner one completed the outer
+    ("![![![a](https://evil.test/1.png)](https://evil.test/2.png)](https://evil.test/3.png)", "a"),
+    ("![a ![b](https://evil.test/1.png) c](https://evil.test/2.png)", "a b c"),
 ])
 def test_a_markdown_image_in_a_report_becomes_its_alt_text(markdown, shown):
     c = Conversation()
@@ -712,3 +715,4 @@ def test_a_markdown_image_in_a_report_becomes_its_alt_text(markdown, shown):
 
     assert c.messages_for_ui()[-1]["content"] == f"{conv.REPORT_HEADING}\n\n{shown}"
     assert "evil.test/p.png" not in c.messages_for_ui()[-1]["content"]
+    assert "![" not in c.messages_for_ui()[-1]["content"]

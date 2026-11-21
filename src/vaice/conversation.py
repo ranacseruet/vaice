@@ -44,8 +44,11 @@ def _cap(text: str, limit: int) -> str:
 
 
 def _without_images(text: str) -> str:
-    """`text` with each markdown image replaced by its alt text (links stay)."""
-    return _IMAGE.sub(r"\1", text)
+    """`text` with each markdown image replaced by its alt text (links stay). Repeated until none is left: replacing
+    an inner image can complete an outer one (`![![x](a)](b)` becomes `![x](b)`); each pass shortens the text."""
+    while (stripped := _IMAGE.sub(r"\1", text)) != text:
+        text = stripped
+    return text
 
 
 def write_json_atomically(path: Path, data) -> None:
