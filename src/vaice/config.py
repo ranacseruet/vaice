@@ -197,7 +197,7 @@ BROWSE_AGENT = _env("VAICE_BROWSE_AGENT", default="").strip()
 BROWSE_URL = _endpoint_url("VAICE_BROWSE_URL")
 BROWSE_MODEL = _env("VAICE_BROWSE_MODEL", default="").strip()
 BROWSE_API_KEY = _env("VAICE_BROWSE_API_KEY", default="").strip()
-BROWSE_SECONDS = _number("VAICE_BROWSE_SECONDS", default="180", kind=float)
+BROWSE_SECONDS = _number("VAICE_BROWSE_SECONDS", default="600", kind=float)
 if not BROWSE_SECONDS > 0:
     raise SystemExit("vaice: VAICE_BROWSE_SECONDS must be > 0 (seconds)")
 BROWSE_HEADLESS = _flag("VAICE_BROWSE_HEADLESS", default=False)

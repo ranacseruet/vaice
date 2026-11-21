@@ -303,6 +303,18 @@ class BrowseStatus:
         with self._lock:
             self._asking = None if title is None else STEP_ACTIONS.get(tool_name(title), OTHER_STEP)
 
+    def view(self) -> dict:
+        """A plain snapshot for the UI's status line (not text for the model; `result()` is that): the goal, the
+        seconds run (up to the end, once ended), the tool calls so far, the latest host a tool opened (None when
+        none did), whether a step waits for an approval (`asking`) and whether the task `ended`. The goal and the host
+        are untrusted text: the UI must escape them."""
+        with self._lock:
+            tools, asking, ended, ended_at = list(self._tools), self._asking, self._ended, self._ended_at
+        hosts = [h for h in (host_of({"url": url}) for _, url in tools if url) if h]
+        seconds = int((ended_at if ended else self._clock()) - self._started)
+        return {"goal": self._goal, "seconds": seconds, "steps": len(tools), "host": hosts[-1] if hosts else None,
+                "asking": asking is not None, "ended": ended}
+
     def result(self) -> SkillResult:
         """The report: one capped line for the model, a fuller one for the panel. For a task that has ended, how it
         ended and how long ago, and the finding of a finished one (`_last_result`)."""

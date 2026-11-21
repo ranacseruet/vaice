@@ -13,6 +13,10 @@ approval, the MCP `auto` and `voice` policies, llama-server's built-in tools) ar
 the pull requests (#53 to #126).
 
 ### Added
+- **A status line while a browser task runs.** Beside *Stop the browser task*: the goal, the time run against the
+  limit (`2:14 of 10:00`), the tool calls so far, the latest host it opened and "waiting for Run" while a step waits
+  for approval. The 1 s timer now re-sends only the components whose own view changed, so the ticking time does not
+  redraw the chat.
 - **Follow-ups about a finished browser task.** `browser_status` also reports the last ended task (its goal, how long
   ago it ended and how; a finished one adds its spoken summary and more of the answer, capped at 700 characters), so a
   follow-up such as "What did you find?" can be answered from it (on `evals/browse_flow.py` the follow-up did what it
@@ -57,6 +61,8 @@ the pull requests (#53 to #126).
   everything in memory (#84).
 
 ### Changed
+- **`VAICE_BROWSE_SECONDS` defaults to 600** (was 180): research tasks took 79 to 302 s live and two of six ran past
+  180.
 - **Default model: LFM3-Omni-2B `Q8_0`** (`VAICE_LLAMACPP_MODEL`; LFM3-Audio-2B still works). It also reads images, so
   one server can be the vision model (#106).
 - History goes to the model as ChatML turns, and the VAD is tuned with a 0.3 s pre-roll so opening words are not clipped
