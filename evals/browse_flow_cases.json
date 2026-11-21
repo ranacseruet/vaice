@@ -14,5 +14,14 @@
   {"id": "coffee-running", "say": "Research the best drip coffee makers under 100 dollars.", "fixture": "coffee-2",
    "followup": {"say": "How is the browser task going?", "when": "running"}},
   {"id": "webb-running", "say": "Find out what is new with the James Webb telescope this week.", "fixture": "webb-2",
-   "followup": {"say": "How is the browser task going?", "when": "running"}}
+   "followup": {"say": "How is the browser task going?", "when": "running"}},
+  {"id": "coffee-cheapest", "say": "Research the best drip coffee makers under 100 dollars.", "fixture": "coffee-2",
+   "followup": {"say": "Which one was the cheapest?", "when": "finished"}},
+  {"id": "headphones-results", "say": "Look up the best noise cancelling headphones on the web.",
+   "fixture": "headphones-1",
+   "followup": {"say": "What were the results of the browser task?", "when": "finished"}},
+  {"id": "coffee-then-new", "say": "Research the best drip coffee makers under 100 dollars.", "fixture": "coffee-2",
+   "followup": {"say": "Now look up the best espresso machines online.", "when": "finished", "expect": "browse"}},
+  {"id": "webb-then-new", "say": "Find out what is new with the James Webb telescope this week.", "fixture": "webb-1",
+   "followup": {"say": "Now find the latest news about the Mars rovers.", "when": "finished", "expect": "browse"}}
 ]

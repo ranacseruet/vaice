@@ -28,6 +28,8 @@
   {"id": "status-going", "say": "How is the browser task going?", "expect": {"tools": ["browser_status"]}},
   {"id": "status-update", "say": "Any update on the browser?", "expect": {"tools": ["browser_status"]}},
   {"id": "status-doing", "say": "What is it doing in the browser right now?", "expect": {"tools": ["browser_status"]}},
+  {"id": "status-found", "say": "What did the browser task find?", "expect": {"tools": ["browser_status"]}},
+  {"id": "status-results", "say": "Tell me what you found in the browser.", "expect": {"tools": ["browser_status"]}},
   {"id": "stop-task", "say": "Stop the browser task.", "expect": {"tools": ["stop_browsing"]}},
 
   {"id": "nobrowse-sky", "say": "Why is the sky blue?",
