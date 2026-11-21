@@ -1,0 +1,18 @@
+[
+  {"id": "coffee-real", "say": "Research the best coffee maker online.", "fixture": "coffee-1",
+   "followup": {"say": "Have you completed compiling into the final answer?", "when": "finished"}},
+  {"id": "coffee-found", "say": "Research the best drip coffee makers under 100 dollars.", "fixture": "coffee-2",
+   "followup": {"say": "What did you find?", "when": "finished"}},
+  {"id": "headphones-found", "say": "Look up the best noise cancelling headphones on the web.", "fixture": "headphones-1",
+   "followup": {"say": "What did you find?", "when": "finished"}},
+  {"id": "headphones-found-2", "say": "Look up the best noise cancelling headphones on the web.", "fixture": "headphones-2",
+   "followup": {"say": "What did you find?", "when": "finished"}},
+  {"id": "webb-found", "say": "Find out what is new with the James Webb telescope this week.", "fixture": "webb-1",
+   "followup": {"say": "What did you find?", "when": "finished"}},
+  {"id": "webb-found-2", "say": "Find out what is new with the James Webb telescope this week.", "fixture": "webb-2",
+   "followup": {"say": "What did you find?", "when": "finished"}},
+  {"id": "coffee-running", "say": "Research the best drip coffee makers under 100 dollars.", "fixture": "coffee-2",
+   "followup": {"say": "How is the browser task going?", "when": "running"}},
+  {"id": "webb-running", "say": "Find out what is new with the James Webb telescope this week.", "fixture": "webb-2",
+   "followup": {"say": "How is the browser task going?", "when": "running"}}
+]

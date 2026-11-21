@@ -18,7 +18,7 @@ from vaice import config, lifecycle
 from vaice import realtime as rt
 from vaice.conversation import Turn
 from vaice.outbox import Marker, Outbox
-from vaice.realtime import MODE_INSTRUCTION, SPEAK_PROMPT, RealtimeResponder, check_server, spoken_part
+from vaice.realtime import MODE_INSTRUCTION, SPEAK_PROMPT, EndReply, RealtimeResponder, check_server, spoken_part
 
 TONE = (8000 * np.sin(2 * np.pi * 440 * np.arange(4800) / 48000)).astype(np.int16)
 AUDIO = (48000, np.stack([TONE, np.zeros_like(TONE)]))  # 0.1 s of stereo browser audio
@@ -314,6 +314,66 @@ def test_a_tool_call_is_executed_and_its_result_spoken(realtime):
     assert turn.assistant_text == "It is noon."  # the preamble before the tool result is not the answer
     assert [len(samples) for _, samples in frames] == [2]  # only the spoken answer has audio
     assert turn.tool_events == [{"name": "get_info", "arguments": "{}", "output": '{"os": "Darwin"}'}]
+
+
+def sent_outputs(conn):
+    return [e["item"]["output"] for e in conn.events
+            if e["type"] == "conversation.item.create" and e.get("item", {}).get("type") == "function_call_output"]
+
+
+def test_an_end_reply_output_is_sent_but_the_model_is_not_asked_to_continue(realtime, caplog):
+    server = realtime(reply=[[("call", "item_1", "get_info", "call_1", "{}"), ("done",)],
+                             [("text", "Here are some results."), ("audio", pcm(1, 2)), ("done",)]])
+    turn = Turn()
+
+    with caplog.at_level(logging.WARNING, logger="vaice.realtime"):
+        frames = drive(tool_responder(server, lambda name, arguments: EndReply("Working.")), turn=turn)
+
+    conn = server.conversation()
+    assert frames == [] and turn.assistant_text == ""  # the reply ended with the call: nothing was said
+    assert conn.closed.wait(3)  # the server has read everything the session sent
+    assert sent_outputs(conn) == ["Working."]  # the result was still sent
+    assert conn.types == ["session.update", "input_audio_buffer.append", "response.create",
+                          "conversation.item.create"]  # no second response.create
+    assert caplog.records == []  # a reply without audio that ended with a call is no warning and no error
+    wait_for_threads_to_end()
+
+
+def test_a_plain_output_still_continues_the_reply(realtime):
+    server = realtime(reply=[[("call", "item_1", "get_info", "call_1", "{}"), ("done",)],
+                             [("text", "Done."), ("audio", pcm(1, 2)), ("done",)]])
+
+    frames = drive(tool_responder(server, lambda name, arguments: "Working."), turn=Turn())
+
+    assert len(frames) == 1
+    assert server.conversation().types.count("response.create") == 2
+
+
+def test_the_other_calls_of_the_round_run_and_are_sent_but_the_reply_still_ends(realtime):
+    server = realtime(reply=[[("call", "item_1", "get_info", "call_1", "a"),
+                              ("call", "item_2", "get_info", "call_2", "b"),
+                              ("call", "item_3", "get_info", "call_3", "c"), ("done",)],
+                             [("text", "Done."), ("audio", pcm(1, 2)), ("done",)]])
+    ran = []
+
+    def executor(name, arguments):
+        ran.append(arguments)
+        return EndReply("Working.") if arguments == "b" else f"result {arguments}"
+
+    turn = Turn()
+    assert drive(tool_responder(server, executor), turn=turn) == []
+
+    conn = server.conversation()
+    assert ran == ["a", "b", "c"]  # the calls on both sides of the one that ends the reply ran ...
+    assert [event["arguments"] for event in turn.tool_events] == ["a", "b", "c"]  # ... and were recorded
+    assert conn.closed.wait(3)  # the server has read everything the session sent
+    assert sent_outputs(conn) == ["result a", "Working.", "result c"]
+    assert conn.types.count("response.create") == 1  # but the model was not asked to speak them
+
+
+def test_an_end_reply_is_a_string_and_is_compacted_like_one():
+    assert EndReply("Working.") == "Working." and isinstance(EndReply("x"), str)
+    assert rt._speech_friendly(EndReply('{"a": "b"}')) == "a: b"
 
 
 def test_what_is_said_before_a_tool_result_is_not_recorded_as_the_answer(realtime):

@@ -173,15 +173,20 @@ def aggregate(records: list[dict]) -> dict:
 
     A record has `error` (text or None), `score` (the `score` result, absent for an errored run) and
     `latency_s` (seconds to the first audio; may be None). Percentages are of all
-    runs, errors included; latency covers the runs that produced one. `answer_faithful` and `command_ok`
-    (`check_answer`) are added when some run was asked for them: `{"ok": k, "of": N}` over completed runs.
+    runs, errors included; latency covers the runs that produced one, leaving out those whose `browse_start` is true
+    (the reply ended in a started browser task: no audio by design), which `browse_starts` counts. `answer_faithful`
+    and `command_ok` (`check_answer`) are added when some run was asked for them: `{"ok": k, "of": N}` over completed
+    runs.
     """
     total = len(records)
     counts = dict.fromkeys(OUTCOMES, 0)
     for record in records:
         counts["error" if record.get("error") else record["score"]["verdict"]] += 1
     duplicates = sum(1 for r in records if not r.get("error") and r["score"]["duplicate"])
-    latencies = [r["latency_s"] for r in records if not r.get("error") and r.get("latency_s") is not None]
+    browse_starts = sum(1 for r in records if not r.get("error") and r.get("browse_start"))
+    # a reply that ended in a browser start has no audio by design: no first-audio time to compare
+    latencies = [r["latency_s"] for r in records
+                 if not r.get("error") and not r.get("browse_start") and r.get("latency_s") is not None]
     summary = {
         "runs": total,
         "counts": counts,
@@ -190,6 +195,7 @@ def aggregate(records: list[dict]) -> dict:
         "duplicate_percent": _percent(duplicates, total),
         "latency_median_s": statistics.median(latencies) if latencies else None,
         "latency_max_s": max(latencies) if latencies else None,
+        "browse_starts": browse_starts,
     }
     for name, key in (("answer_faithful", "answer_ok"), ("command_ok", "command_ok")):
         ok, of = check_totals(records, key)

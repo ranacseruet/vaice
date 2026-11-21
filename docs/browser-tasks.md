@@ -1,11 +1,12 @@
 # Browser tasks
 
 `VAICE_BROWSE=pi` or `VAICE_BROWSE=acp` (off by default) adds one skill, `browse(goal)`: when you ask for something to
-be done or looked up on the web ("Open python.org and tell me the page title", "Research some coffee makers online"), the assistant says it is working in the browser and
-vaice hands the goal to a browser agent, which drives a Chrome window through chrome-devtools-mcp. The task runs
+be done or looked up on the web ("Open python.org and tell me the page title", "Research some coffee makers online"), vaice says it is working in the browser and
+hands the goal to a browser agent, which drives a Chrome window through chrome-devtools-mcp. The task runs
 **in the background and quietly**: you can keep talking (a new question is answered as usual and does not stop the
 task), vaice says nothing about progress, asks before any step that changes a page, and when the task ends a fresh
-realtime session says the outcome in a sentence or two ("The page title is Welcome to Python.org"). Ask "How is the
+realtime session says the outcome in a sentence or two ("The page title is Welcome to Python.org"). The whole answer
+is added to the chat as its own message. Ask "How is the
 browser task going?" and the assistant reports where it is.
 
 vaice speaks [ACP](https://agentclientprotocol.com), the Agent Client Protocol, to the agent: one agent process runs
@@ -78,9 +79,17 @@ a version it cannot parse only warns), and for `acp` that the agent's program is
   conversation*, closing vaice and `VAICE_BROWSE_SECONDS` (default 180) stop it too; a new utterance does not. Only one
   task runs at a time: a second `browse` request while one works is refused, and one made while the previous task's
   outcome is still being said replaces it (the old outcome is dropped). A stop is quiet.
+- **What you hear.** The reply that calls `browse` ends there: vaice has the voice model say "I'm working on it in the browser. I'll
+  tell you when it's done." (`SAY`; it may reword it slightly), and the model is not asked to continue, so it cannot invent results. Other calls the model
+  made in the same reply still run, but their results are not spoken. When the task ends you hear a short summary: the agent is
+  asked to start its answer with a `Summary:` line of one or two plain sentences, and vaice speaks that line (without
+  one, the answer with its narration before the first rule or heading dropped, cleaned for speech and capped).
+- **The report in the chat.** The agent's whole answer appears in the chat as its own message headed "From the browser
+  task:", with markdown links kept and images reduced to their alt text. It is stored with the turn (capped at 12000
+  characters, `"reports"` in `conversation.json`) but is not part of what the model sees later. The *Tool activity*
+  panel shows two rows per task: the start (`WORKING`) and the outcome (`finished: ...`, `stopped`, `declined`, `failed: ...`).
 - **Quiet.** Nothing is spoken while the task works except the step heads-up and the outcome (or, when it fails or is
   declined, a fixed sentence). The outcome (and each step's heads-up, [#127](https://github.com/ranacseruet/vaice/issues/127)) is added to the turn that asked for the task even if you spoke meanwhile.
-  The *Tool activity* panel shows a single `browse` entry per task.
 - **One browser path.** Do not also configure a browser MCP server (such as `chrome-devtools-mcp`) in
   `VAICE_MCP_CONFIG`: with both, the model mixed the two browsers' tools. vaice does not filter such a server out; it
   is up to the config file (see [MCP tools](mcp-tools.md)).
@@ -99,6 +108,19 @@ a version it cannot parse only warns), and for `acp` that the agent's program is
   a question it should answer itself. `evals/browse_live.py` checks the agent's side: Pi 1.5.2 with a local Sage-A1.5 model
   answered 3 of 3 research goals in each of two runs (79 to 302 s, 16 to 43 tool calls), with nothing left holding
   the profile. Two of those six took longer than the default `VAICE_BROWSE_SECONDS` (180): raise it for research.
+- **Measured end to end.** `evals/browse_flow.py` (8 cases x 3, the real voice model, a fake agent replaying six
+  recorded Pi answers; screen skill on / off) before and after this behaviour: the start reply invented results in
+  14/24 and 16/24 runs before, 0/24 and 0/24 after; the spoken outcome named a finding in 13/24 and 13/24 before (in
+  10/23 and 11/24 it was the agent's narration, "Let me compile my findings ..."), 24/24 and 24/24 after with no
+  narration; the report was in the chat in 0/24 before, 24/24 after. The start sentence goes through the voice model (`SAY`): in all 72 runs it said "I'm working on it in the
+  browser. I'll let you know when it's done." and nothing more. On `evals/browse_cases.json` x 5 no reply followed
+  `browse` with `look_at_screen` (`browse-python-title` with the screen skill on did in 5 of 5 before). A second `browse`
+  with the same goal in the starting reply now starts nothing and adds no event (before, about half of these replies
+  made one and it was answered "busy"). `REPORT` and `SAY` as the outcome's wording
+  scored the same (`--outcome say`: named 24/24, narration 0/24), so `REPORT` stayed. With the `Summary:` line in its
+  prompt, Pi with the local model started 3 of 3 answers with one (`browse_live.py`, 29 to 259 s). Still open: a
+  follow-up such as "What did you find?" after the task cannot see the result and starts a new task (10/24 and 11/24
+  runs); that is the next change.
 
 Not verified: speaker echo (the microphone hearing the heads-up and the VAD cutting a reply, #36; headphones assumed),
 any model other than the one named above driving Pi, ACP agents other than Pi (the protocol is generic, vaice's tests

@@ -13,6 +13,11 @@ approval, the MCP `auto` and `voice` policies, llama-server's built-in tools) ar
 the pull requests (#53 to #126).
 
 ### Added
+- **Browser task results.** The reply that starts a browser task ends at the call and vaice has a fixed sentence
+  said through a fresh speech session (the model no longer talks on and invents results, calls `browse` twice or follows it with `look_at_screen`, #131, #132); the outcome spoken is the agent's own `Summary:` line (or
+  the answer without its narration); the whole answer appears in the chat as its own message and is saved with the
+  turn (`"reports"` in `conversation.json`, not in the model's history); the *Tool activity* outcome row starts with
+  `finished: `. `evals/browse_flow.py --outcome report|say` compares the two outcome wordings.
 - **A voice assistant for the Mac.** Every reply is one speech-to-speech session whose tools are vaice's own skills,
   run by vaice with its own permissions (#94, #125): disk space, battery, system info, top processes, finding files,
   opening and quitting apps, volume and mute (#96). The model reads a skill's result and speaks the answer; results are
@@ -35,7 +40,9 @@ the pull requests (#53 to #126).
 - **`vaice up`**: one command that starts `llama-server` when none is running and opens the UI (#89).
 - **A live eval** (`evals/run.py`) that measures how reliably spoken requests become the right skill call, with repeats
   (#88); research requests in `evals/browse_cases.json`, and `evals/browse_live.py`, an opt-in check that the browser
-  agent finishes research tasks with the configured model (headless, muted, never in CI).
+  agent finishes research tasks with the configured model (headless, muted, never in CI); `evals/browse_flow.py`,
+  which scores a whole browser task as the user hears it (the start reply, the spoken outcome, the chat, a follow-up)
+  with a fake agent that replays recorded answers.
 - The *Tool activity* panel (#55); the current date and time in every reply's instructions (#78); a loop breaker that
   cuts a reply repeating itself (#78); a `/v1/realtime` probe and a temperature warning at startup (#47, #74, #81).
 - Settings: `VAICE_VAD_THRESHOLD`, `VAICE_VAD_MIN_SILENCE_MS`, `VAICE_VAD_SPEECH_PAD_MS`, `VAICE_CAN_INTERRUPT` (#49),

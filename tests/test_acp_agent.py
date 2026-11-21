@@ -134,6 +134,9 @@ def test_the_answer_is_the_text_after_the_last_tool_call_and_progress_and_text_a
 def test_the_task_prompt_carries_the_date_and_the_goal():
     prompt = browse.task_prompt("find the news", datetime(2026, 11, 20, 15, 0))
     assert "Today is Friday, November 20, 2026." in prompt and prompt.endswith("Task: find the news")
+    # the answer starts with a line vaice speaks (`browse_task.spoken_summary`), and the details follow it
+    assert 'begins with "Summary:"' in prompt and "read aloud" in prompt and "details after that line" in prompt
+    assert "Bing or DuckDuckGo" in prompt and "never Google" in prompt
 
 
 def test_the_client_offers_no_file_system_or_terminal_and_new_session_carries_the_cwd_and_mcp_servers(harness):
