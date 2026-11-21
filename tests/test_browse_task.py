@@ -223,11 +223,94 @@ class Clock:
         return self.now
 
 
-def test_an_idle_status_says_no_task_is_running_and_so_does_one_that_ended():
-    status = browse_task.BrowseStatus("open python.org")
-    status.end()
+def test_the_status_description_is_in_the_skill_and_covers_what_the_last_task_found():
+    by_name = {skill.name: skill for skill in browse_task.browse_skills(
+        busy=None, status=lambda: SkillResult("s"), stop=lambda: SkillResult("x"))}
 
-    assert status.result().speech == browse_task.NO_TASK and status.ended
+    assert by_name["browser_status"].description == browse_task.STATUS_DESCRIPTION
+    assert "what the last one found" in browse_task.STATUS_DESCRIPTION
+
+
+def test_an_idle_status_has_not_ended_and_reports_no_tool_calls():
+    status = browse_task.BrowseStatus("open python.org")
+
+    assert not status.ended and "no tool calls yet" in status.result().speech
+
+
+REPORT = ("I now have the research. Let me compile my findings.\n\n---\n\n## Best coffee makers\n\n"
+          "### 1. Ninja 12-Cup Brewer, $90\n- **Braun** is the value pick \U0001F44D\n")
+WITH_SUMMARY = "Summary: The **Ninja** is the best pick at 90 dollars.\n\n" + REPORT
+
+
+def ended_status(outcome, answer="", goal="research coffee makers", after=0.0):
+    clock = Clock()
+    status = browse_task.BrowseStatus(goal, clock)
+    status.tool("mcp__chrome__navigate_page", {"url": "https://example.com/"})
+    clock.now += 5
+    status.end(outcome, answer)
+    clock.now += after
+    return status
+
+
+def test_a_finished_task_reports_its_goal_how_long_ago_and_the_summary_first_then_more_of_the_answer():
+    result = ended_status(browse_task.FINISHED, WITH_SUMMARY, after=42.4).result()
+
+    assert result.speech == (
+        "the last browser task, research coffee makers, finished 42 seconds ago: The Ninja is the best pick at 90 "
+        "dollars. Best coffee makers Ninja 12-Cup Brewer, $90 Braun is the value pick")
+    assert result.detail.startswith("goal: research coffee makers\nended 42 seconds ago\n\n")
+    assert result.detail.endswith(WITH_SUMMARY)  # the panel keeps the whole answer
+
+
+def test_a_finished_task_without_a_summary_line_speaks_the_answer_after_its_narration():
+    speech = ended_status(browse_task.FINISHED, REPORT).result().speech
+
+    assert "I now have" not in speech and "Let me compile" not in speech  # the agent's narration is not the finding
+    assert speech == ("the last browser task, research coffee makers, finished 0 seconds ago: Best coffee makers "
+                      "Ninja 12-Cup Brewer, $90 Braun is the value pick")
+
+
+def test_markdown_and_emoji_are_cleaned_from_the_speech_but_not_from_the_panel():
+    answer = "Summary: **Bold** `code` [a link](https://x.test) \U0001F600 done.\n\n---\n\n- **item** \U0001F44D\n"
+    result = ended_status(browse_task.FINISHED, answer).result()
+
+    assert result.speech.endswith("Bold code a link done. item")
+    assert not any(mark in result.speech for mark in ("*", "`", "](", "\U0001F600", "\U0001F44D", "\n"))
+    assert "**item**" in result.detail
+
+
+def test_a_long_answer_is_cut_as_a_whole_but_the_summary_survives():
+    summary = "The Ninja is the best pick. " * 14  # about 390 characters
+    answer = f"Summary: {summary.strip()}\n\n---\n\n" + "More text about coffee makers. " * 200
+    result = ended_status(browse_task.FINISHED, answer, goal="g" * 900).result()
+
+    assert len(result.speech) <= browse_task.LAST_SPEECH_CHARS < 800  # under the realtime layer's output cap
+    assert summary.strip() in result.speech and result.speech.count("The Ninja is the best pick.") == 14
+    assert result.speech.endswith(browse_task.CUT) and "\n" not in result.speech
+    assert len(result.detail) <= browse_task.STATUS_DETAIL_CHARS
+
+
+def test_a_long_answer_without_a_summary_line_is_capped_too():
+    result = ended_status(browse_task.FINISHED, "## Report\n\n" + "word " * 2000).result()
+
+    assert len(result.speech) <= browse_task.LAST_SPEECH_CHARS and result.speech.endswith(browse_task.CUT)
+
+
+@pytest.mark.parametrize("outcome, sentence", [
+    (browse_task.STOPPED_KIND, "was stopped"), (browse_task.DECLINED, "was declined at a step"),
+    (browse_task.FAILED_KIND, "failed")])
+def test_a_stopped_declined_or_failed_task_is_one_sentence_without_the_answer(outcome, sentence):
+    result = ended_status(outcome, "the answer is ignored: it is not a finding", after=130).result()
+
+    assert result.speech == f"the last browser task, research coffee makers, {sentence} 2 minutes ago"
+    assert result.detail is None or "ignored" not in result.detail
+
+
+@pytest.mark.parametrize("seconds, said", [(0, "0 seconds ago"), (1, "1 second ago"), (59.9, "59 seconds ago"),
+                                           (60, "1 minute ago"), (89, "1 minute ago"), (91, "2 minutes ago"),
+                                           (3600, "60 minutes ago")])
+def test_how_long_ago_is_rounded_to_seconds_then_minutes(seconds, said):
+    assert browse_task._ago(seconds) == said
 
 
 def test_the_status_reports_goal_time_tools_pages_the_waiting_step_and_the_latest_words():

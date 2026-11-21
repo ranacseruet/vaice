@@ -29,12 +29,12 @@ NINJA_LINE = "### 1. Ninja 12-Cup Programmable Coffee Brewer, $90"
 
 
 def record(start="Okay, looking into it.", outcome="The browser found a Ninja.", follow="Ninja again.",
-           start_calls=(("browse", "{}"),), follow_calls=(), runs=1, ui=()):
+           start_calls=(("browse", "{}"),), follow_calls=(), runs=1, ui=(), when="finished", expect="answer"):
     return {
         "start": {"text": start, "calls": [list(c) for c in start_calls], "first_audio_s": 0.8},
         "outcome": None if outcome is None else {"text": outcome, "first_audio_s": 1.5},
         "followup": None if follow is None else {"text": follow, "calls": [list(c) for c in follow_calls],
-                                                 "first_audio_s": 0.9},
+                                                 "first_audio_s": 0.9, "when": when, "expect": expect},
         "agent_runs": runs, "ui": list(ui),
     }
 
@@ -48,6 +48,7 @@ def test_a_clean_run_scores_well():
     assert score["outcome_spoken"] and score["outcome_named"] and not score["outcome_narration"]
     assert not score["chat_report"]
     assert not score["followup_rebrowse"] and not score["followup_status"] and score["followup_named"]
+    assert score["followup_right"]
     assert (score["start_first_audio_s"], score["outcome_first_audio_s"], score["followup_first_audio_s"]) == (
         0.8, 1.5, 0.9)
 
@@ -87,6 +88,7 @@ def test_no_outcome_is_not_named_and_has_no_narration_verdict():
 def test_no_follow_up_leaves_its_flags_undefined():
     score = browse_flow.score_run(record(follow=None), FIXTURE)
     assert score["followup_rebrowse"] is None and score["followup_status"] is None and score["followup_named"] is None
+    assert score["followup_right"] is None
 
 
 def test_a_follow_up_that_calls_browse_or_starts_a_second_agent_run_is_a_rebrowse():
@@ -94,6 +96,36 @@ def test_a_follow_up_that_calls_browse_or_starts_a_second_agent_run_is_a_rebrows
     assert browse_flow.score_run(record(runs=2), FIXTURE)["followup_rebrowse"]
     assert not browse_flow.score_run(record(follow_calls=[("browser_status", "{}")]), FIXTURE)["followup_rebrowse"]
     assert browse_flow.score_run(record(follow_calls=[("browser_status", "{}")]), FIXTURE)["followup_status"]
+
+
+def right(**kwargs) -> bool:
+    return browse_flow.score_run(record(**kwargs), FIXTURE)["followup_right"]
+
+
+def test_an_answer_after_the_task_finished_is_right_when_it_names_a_finding_without_a_new_task():
+    assert right(follow="The Ninja won.")
+    assert not right(follow="I could not tell.")  # names nothing
+    assert not right(follow="The Ninja won.", follow_calls=[("browse", "{}")])  # a new task, even with the name
+    assert not right(follow="The Ninja won.", runs=2)
+    assert right(follow="The Ninja won.", follow_calls=[("browser_status", "{}")])  # status is not a new task
+
+
+def test_an_answer_while_the_task_runs_is_right_when_it_asks_for_the_status_without_a_new_task():
+    assert right(when="running", follow="It is searching.", follow_calls=[("browser_status", "{}")])
+    assert not right(when="running", follow="The Ninja so far.")  # named, but never asked
+    assert not right(when="running", follow="It is searching.", follow_calls=[("browser_status", "{}"),
+                                                                                ("browse", "{}")])
+    assert not right(when="running", follow="It is searching.", follow_calls=[("browser_status", "{}")], runs=2)
+
+
+def test_a_new_request_is_right_only_when_browse_was_called_in_the_follow_up():
+    assert right(expect="browse", follow="Looking into it.", follow_calls=[("browse", "{}")], runs=2)
+    assert right(expect="browse", follow="Looking into it.", follow_calls=[("browse", "{}")])
+    assert not right(expect="browse", follow="The Ninja won.")  # answered from the old finding instead
+    assert not right(expect="browse", follow="x", follow_calls=[("browser_status", "{}")], runs=2)
+    # the old flags do not change with the expectation: a new task still counts as a rebrowse
+    score = browse_flow.score_run(record(expect="browse", follow_calls=[("browse", "{}")]), FIXTURE)
+    assert score["followup_rebrowse"] and not score["followup_status"]
 
 
 def test_the_report_itself_in_the_chat_counts_but_a_summary_does_not():
@@ -267,15 +299,35 @@ def test_the_drainer_is_paced_by_the_apps_own_lead():
 def test_every_case_names_a_fixture_and_a_valid_follow_up():
     cases, fixtures = browse_flow.load_cases()
     ids = [case["id"] for case in cases]
-    assert len(ids) == len(set(ids)) and len(cases) >= 8
+    assert len(ids) == len(set(ids)) and len(cases) == 12
     for case in cases:
         assert set(case) == {"id", "say", "fixture", "followup"}, case["id"]
         assert case["fixture"] in fixtures and case["say"].strip(), case["id"]
-        assert set(case["followup"]) == {"say", "when"} and case["followup"]["say"].strip()
+        assert {"say", "when"} <= set(case["followup"]) <= {"say", "when", "expect"} and case["followup"]["say"].strip()
         assert case["followup"]["when"] in ("running", "finished")
+        assert case["followup"].get("expect", "answer") in browse_flow.EXPECTS
     assert {case["followup"]["when"] for case in cases} == {"running", "finished"}
+    new_requests = {case["id"] for case in cases if case["followup"].get("expect") == "browse"}
+    assert new_requests == {"coffee-then-new", "webb-then-new"}
+    assert all(case["followup"]["when"] == "finished" for case in cases if case["id"] in new_requests)
     assert any(case["followup"]["say"] == "Have you completed compiling into the final answer?" for case in cases)
     assert {case["fixture"] for case in cases} == set(fixtures)  # every recorded answer is used
+
+
+def test_a_follow_up_expects_an_answer_unless_it_says_it_is_a_new_request():
+    assert browse_flow.expectation({"say": "x", "when": "finished"}) == "answer"
+    assert browse_flow.expectation({"say": "x", "when": "finished", "expect": "answer"}) == "answer"
+    assert browse_flow.expectation({"say": "x", "when": "finished", "expect": "browse"}) == "browse"
+    with pytest.raises(ValueError, match=r"case odd.*'search'"):
+        browse_flow.expectation({"say": "x", "when": "finished", "expect": "search"}, "odd")
+
+
+def test_loading_the_cases_refuses_an_unknown_expect(monkeypatch):
+    bad = [{"id": "odd", "say": "x", "fixture": "coffee-1",
+            "followup": {"say": "y", "when": "finished", "expect": "search"}}]
+    monkeypatch.setattr(eval_run, "load_json", lambda name: bad if name == "browse_flow_cases.json" else [])
+    with pytest.raises(ValueError, match="case odd"):
+        browse_flow.load_cases()
 
 
 def test_every_fixture_is_a_recorded_answer_with_keywords_from_its_report():
@@ -460,6 +512,7 @@ def test_the_summary_prints_every_case_and_the_overall_row(capsys):
     summary = browse_flow.print_summary(runs, ["one", "two"])
     out = capsys.readouterr().out
     assert "2 runs, 0 with errors" in out and "one" in out and "two" in out and "all" in out
+    assert "f-right" in out and summary["overall"]["flags"]["followup_right"] == [2, 2]
     assert summary["overall"]["flags"]["start_browse"] == [2, 2]
     assert json.dumps(summary)  # JSON-serializable as written to the results file
 

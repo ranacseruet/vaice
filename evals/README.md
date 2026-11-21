@@ -86,14 +86,14 @@ It measures whether the agent finishes a research task and how (tools, pages, ti
 
 ```bash
 .venv/bin/python evals/browse_flow.py --cases coffee-real --repeats 1   # a quick check
-.venv/bin/python evals/browse_flow.py --label Q8_0                      # all 8 cases, 3 repeats
+.venv/bin/python evals/browse_flow.py --label Q8_0                      # all 12 cases, 3 repeats
 ```
 
 Options: `--url`, `--cases id,id`, `--repeats N` (default 3), `--task-seconds S` (how long the fake task takes, default 8), `--vision` (also offer the stubbed `look_at_screen`, as the app does with vision on), `--outcome report|say` (how the outcome is spoken: `REPORT`, the model's words, the app's default, or `SAY`, as it is; it patches `assistant.OUTCOME` for the run and is recorded in the results), `--prompt TEXT`, `--label TEXT` and `--out FILE` (default `evals/results/browse-flow-<UTC timestamp>.json`, gitignored).
 
 Each run is the app's own wiring: an `Assistant` with a browser agent (so `_start_browse`, the task thread, the real busy check, `browser_status`, `stop_browsing` and the outcome speech are the app's code) over the stub skills of `run.py` (nothing runs on this machine), a `Conversation` whose turns and history are made as `app.make_handler` makes them, and an `Outbox` drained by a thread that does what the idle `emit()` does (paced by the same lead, serving nothing while a reply is in flight; frames are counted, nothing is played). The reply that starts the task ends at the call and vaice says its fixed sentence (the run waits for it, as a listener would, before the follow-up); the outcome is the speech recorded after that one. The sequence: the request (spoken by `say`, or a recording named `<case id>.wav`; the follow-up's recording is `<case id>-followup.wav`), the task, then the follow-up, asked while the fake task still runs (`"when": "running"`: the task is held open until the follow-up's reply is over) or after the outcome was spoken and recorded (`"finished"`). Afterwards the run stops any task and joins its threads.
 
-A case file entry is `{"id", "say", "fixture", "followup": {"say", "when"}}` (`browse_flow_cases.json`); a fixture is `{"id", "goal", "answer", "keywords"}`, where `keywords` are two to four names from the report part of the answer (products, missions) that any summary should keep.
+A case file entry is `{"id", "say", "fixture", "followup": {"say", "when", "expect"}}` (`browse_flow_cases.json`); `expect` is optional: `"answer"` (the default) means the follow-up asks about the task, so it should be answered from what the task found with no new task, and `"browse"` means it is a new request ("Now look up ..."), so a new task is right (the new-request cases use `"finished"`). The loader refuses any other value. a fixture is `{"id", "goal", "answer", "keywords"}`, where `keywords` are two to four names from the report part of the answer (products, missions) that any summary should keep.
 
 Recorded per run, raw data first (so a number can be traced): the start reply's calls, text, time to first audio and audio seconds; the outcome speech's text and the seconds from the task's end to its first audio (frames served after both the task's end and the fixed sentence's marker; a running case's outcome also waits behind the follow-up's answer); the chat as the UI would show it (`ui`) and every turn with its tool events; the follow-up's calls, text and timings; the fake agent's run count and goals; the errors. On top, per run:
 
@@ -108,6 +108,7 @@ Recorded per run, raw data first (so a number can be traced): the start reply's 
 | `followup_rebrowse` | the follow-up called `browse` again, or the fake agent ran more than once |
 | `followup_status` | the follow-up called `browser_status` |
 | `followup_named` | the follow-up's answer names a fixture keyword |
+| `followup_right` (`f-right`) | the follow-up did what its case expects: `answer` and `finished`, no new task and a keyword named; `answer` and `running`, no new task and `browser_status` called; `browse`, `browse` called |
 
 plus `start_extra_chars`. The summary prints `k/N` per flag per case and overall (N counts the runs where the flag applies: no follow-up after a failed start, no `outcome_narration` without an outcome), and the medians of the start length and of the first-audio times.
 
@@ -145,7 +146,7 @@ The summary prints `answer faithful k/N` and `command ok k/N` when a case asked 
 
 `vision_cases.json` is for `--vision` only: 14 cases. 7 questions about the screen should call `look_at_screen` (two of them follow an earlier screen answer and must look again); the rest must not (one asks about that earlier answer, the others are battery, disk space, "What is a screen saver?", general knowledge and opening an app). The stub answers from a fixed fake screen (a Numbers window titled Quarterly report, and a dialog "Your disk is almost full" when the question is about a dialog, error or message), so `answer_has` is checked against that text. The vision model itself is not measured here.
 
-`browse_cases.json` is for `--browse` only: requests to do something on a website that should call `browse` (the goal must name the site or topic, matched with `contains`), questions about a running task that should call `browser_status`, a request to stop it that should call `stop_browsing`, and requests that must call none of them. The run ends at the call (`browse` answers `Working in the browser.`), so what the browser agent does is not measured here.
+`browse_cases.json` is for `--browse` only: requests to do something on a website that should call `browse` (the goal must name the site or topic, matched with `contains`), questions about a running task, or what a finished one found, that should call `browser_status`, a request to stop it that should call `stop_browsing`, and requests that must call none of them. The run ends at the call (`browse` answers `Working in the browser.`), so what the browser agent does is not measured here.
 
 `shell_cases.json` is for `--shell` only: spoken requests to run a command, tempting must-not-call ones such as "What does the ls command do?" and "Goodbye.", and two other skills.
 

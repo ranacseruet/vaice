@@ -62,18 +62,30 @@ STEPS = (
     ("mcp__chrome__navigate_page", {"url": "https://www.example.com/reviews"}),
     ("mcp__chrome__take_snapshot", {}),
 )
+EXPECTS = ("answer", "browse")  # what a follow-up should lead to: an answer from what the task found, or a new task
 FLAGS = ("start_browse", "start_invented", "outcome_spoken", "outcome_named", "outcome_narration", "chat_report",
-         "followup_rebrowse", "followup_status", "followup_named")
+         "followup_rebrowse", "followup_status", "followup_named", "followup_right")
 NUMBERS = ("start_extra_chars", "start_first_audio_s", "outcome_first_audio_s", "followup_first_audio_s")
 HEADS = {"start_browse": "browse", "start_invented": "invent", "outcome_spoken": "spoken", "outcome_named": "named",
          "outcome_narration": "narrat", "chat_report": "chat", "followup_rebrowse": "rebrw",
-         "followup_status": "status", "followup_named": "f-named"}
+         "followup_status": "status", "followup_named": "f-named", "followup_right": "f-right"}
 
 
 def load_cases() -> tuple[list[dict], dict[str, dict]]:
-    """The cases, and the fixtures (the recorded agent answers) by id."""
+    """The cases, and the fixtures (the recorded agent answers) by id. Raises ValueError on a bad follow-up `expect`."""
     fixtures = {fixture["id"]: fixture for fixture in evals_run.load_json("browse_answers.json")}
-    return evals_run.load_json("browse_flow_cases.json"), fixtures
+    cases = evals_run.load_json("browse_flow_cases.json")
+    for case in cases:
+        expectation(case["followup"], case["id"])
+    return cases, fixtures
+
+
+def expectation(follow: dict, case_id: str = "") -> str:
+    """What the follow-up should lead to (`answer` when the case does not say); ValueError on any other value."""
+    expect = follow.get("expect", "answer")
+    if expect not in EXPECTS:
+        raise ValueError(f"case {case_id or '?'}: follow-up expect {expect!r} is not one of {', '.join(EXPECTS)}")
+    return expect
 
 
 # -- the fake browser agent
@@ -255,6 +267,14 @@ def called(calls: list, name: str) -> bool:
     return any(call[0] == name for call in calls)
 
 
+def followup_is_right(follow: dict, named: bool, rebrowse: bool, status: bool) -> bool:
+    """Whether the follow-up did what its case expects: for `browse`, a task was asked for; for `answer`, no new task
+    and, after the task ended, the finding named (while it runs, `browser_status` called)."""
+    if expectation(follow) == "browse":
+        return called(follow["calls"], "browse")
+    return not rebrowse and (named if follow["when"] == "finished" else status)
+
+
 def score_run(record: dict, fixture: dict) -> dict:
     """The flags and numbers of one run (None where the run never got that far)."""
     keywords = fixture["keywords"]
@@ -271,9 +291,11 @@ def score_run(record: dict, fixture: dict) -> dict:
                          outcome_first_audio_s=outcome["first_audio_s"])
         score["chat_report"] = chat_has_report(record["ui"], fixture)
     if follow is not None:
-        score.update(followup_rebrowse=called(follow["calls"], "browse") or record["agent_runs"] > 1,
-                     followup_status=called(follow["calls"], "browser_status"),
-                     followup_named=names_finding(follow["text"], keywords),
+        rebrowse = called(follow["calls"], "browse") or record["agent_runs"] > 1
+        status = called(follow["calls"], "browser_status")
+        named = names_finding(follow["text"], keywords)
+        score.update(followup_rebrowse=rebrowse, followup_status=status, followup_named=named,
+                     followup_right=followup_is_right(follow, named, rebrowse, status),
                      followup_first_audio_s=follow["first_audio_s"])
     return score
 
@@ -465,7 +487,7 @@ def run_flow(url: str, prompt: str, case: dict, fixture: dict, audio, followup_a
             if follow["when"] == "finished":
                 flow.wait_for_outcome()
             flow.wait_for_playback()
-            record["followup"] = {"say": follow["say"], "when": follow["when"],
+            record["followup"] = {"say": follow["say"], "when": follow["when"], "expect": expectation(follow),
                                   "task_running": flow.agent.finished_at is None and bool(flow.task_threads()),
                                   **flow.reply(followup_audio)}
             if record["followup"]["error"]:
@@ -537,7 +559,8 @@ def print_summary(runs: list[dict], case_ids: list[str]) -> dict:
     print(f"\n== {len(runs)} runs, {errors} with errors ==")
     print("k/N over the runs where the flag applies; invent = the start reply said too much or named a finding, "
           "spoken = an outcome was recorded,\nnarrat = the outcome sounds like the agent's narration, chat = the chat "
-          "holds a line of the report, rebrw = the follow-up started a task again")
+          "holds a line of the report, rebrw = the follow-up started a task again,\nf-right = the follow-up did what "
+          "its case expects (answered from the finding, or started the new task it asked for)")
     width = max([len("case"), len("all"), *(len(c) for c in case_ids)])
     print(f"\n{'case':<{width}}  " + "  ".join(f"{HEADS[name]:>8}" for name in FLAGS))
     for label, row in (*by_case.items(), ("all", overall)):

@@ -727,6 +727,137 @@ def test_the_status_and_stop_skills_are_the_models_way_to_ask_how_it_goes_and_to
     wait_until(browse_over)
 
 
+OTHER_GOAL = '{"goal": "look up the weather"}'
+
+
+def answers_after_a_stop(agent, goal, stop, on_progress, on_ask, deadline_s):
+    """A task that is cancelled and still returns an answer (the agent had finished when the stop came)."""
+    while not stop():
+        time.sleep(0.005)
+    return BROWSE_ANSWER
+
+
+def test_browser_status_reports_the_last_finished_task_and_the_task_is_no_longer_running(realtime):
+    s = browsing(realtime, answers)
+    wait_until(browse_over)
+
+    speech = s.resp._browser_status().speech
+    assert speech.startswith("the last browser task, open python.org and tell me the page title, finished ")
+    assert " seconds ago: " in speech and speech.endswith(BROWSE_ANSWER)
+    assert s.resp._browser_status().detail.endswith(BROWSE_ANSWER)  # the panel gets the goal and the whole answer
+    assert not s.resp.browsing() and s.resp.stop_task() is False  # the Stop button never sees a finished task
+
+    (status,) = ask_again(s, ("browser_status", "{}"))  # and the model reads it through the skill
+    assert status.endswith(BROWSE_ANSWER) and "finished" in status
+
+
+def test_a_new_task_replaces_the_last_result_at_once_and_its_own_result_follows(realtime):
+    release = threading.Event()
+
+    def script(agent, goal, stop, on_progress, on_ask, deadline_s):
+        if "weather" in goal:
+            while not release.is_set():
+                if stop():
+                    raise BrowseStopped
+                time.sleep(0.005)
+            return "It is sunny."
+        return BROWSE_ANSWER
+
+    s = browsing(realtime, script)
+    wait_until(browse_over)
+    assert BROWSE_ANSWER in s.resp._browser_status().speech
+
+    ask_again(s, ("browse", OTHER_GOAL))
+    wait_until(lambda: s.agent.goals[-1:] == ["look up the weather"])
+
+    running = s.resp._browser_status().speech
+    assert running.startswith("the browser task is running: look up the weather") and BROWSE_ANSWER not in running
+    release.set()
+    wait_until(browse_over)
+
+    speech = s.resp._browser_status().speech
+    assert speech.startswith("the last browser task, look up the weather, finished ") and speech.endswith("sunny.")
+    assert BROWSE_ANSWER not in speech
+
+
+def test_new_conversation_forgets_the_last_result(realtime):
+    s = browsing(realtime, answers)
+    wait_until(browse_over)
+    assert BROWSE_ANSWER in s.resp._browser_status().speech
+
+    s.resp.clear_pending()
+
+    assert s.resp._browser_status().speech == browse_task.NO_TASK
+
+
+def test_a_task_that_ends_after_new_conversation_is_not_kept_for_the_new_one(realtime):
+    for script in (holds(threading.Event()), answers_after_a_stop):
+        s = browsing(realtime, script)
+        assert s.agent.entered.wait(5)
+
+        s.resp.clear_pending()  # "New conversation" while it runs: it ends, with a stop or a late answer
+        wait_until(browse_over)
+
+        assert s.resp._browser_status().speech == browse_task.NO_TASK
+
+
+def test_an_answer_that_arrives_after_a_stop_is_not_kept_the_last_result_is_the_stop(realtime):
+    s = browsing(realtime, answers_after_a_stop)
+    assert s.agent.entered.wait(5)
+
+    assert s.resp.stop_task() is True  # the Stop button
+    wait_until(browse_over)
+
+    speech = s.resp._browser_status().speech
+    assert speech.startswith("the last browser task, open python.org and tell me the page title, was stopped ")
+    assert BROWSE_ANSWER not in speech and not s.resp._browser_status().detail
+    assert ("browse", FINISHED) in tool_events(s.turn)  # the turn still records what the agent returned, as before
+
+    t = browsing(realtime, holds(threading.Event()))  # a stop the agent honours says the same
+    assert t.agent.entered.wait(5)
+    ask_again(t, ("stop_browsing", "{}"))
+    wait_until(browse_over)
+    assert " was stopped " in t.resp._browser_status().speech
+
+
+def test_the_app_ending_makes_a_late_answer_a_stop(realtime):
+    s = browsing(realtime, answers_after_a_stop)
+    assert s.agent.entered.wait(5)
+
+    lifecycle.stopping.set()
+    wait_until(browse_over)
+
+    assert " was stopped " in s.resp._browser_status().speech
+
+
+def test_a_task_that_was_replaced_is_not_the_last_result(realtime):
+    s = browsing(realtime, holds(threading.Event()))
+    assert s.agent.entered.wait(5)
+
+    first = s.resp._browse
+    assert s.resp._start_browse(Turn(), "browse", OTHER_GOAL, s.resp._confirmations.epoch) is True  # newest wins
+    wait_until(lambda: len(s.agent.goals) == 2 and first.status.ended)  # the replaced task ended, stopped
+    with s.resp._task_lock:
+        assert s.resp._last_ended is None
+    assert s.resp._browser_status().speech.startswith("the browser task is running: look up the weather")
+
+
+@pytest.mark.parametrize("sentence", ["was declined at a step", "failed"])
+def test_a_declined_or_failed_task_is_one_sentence(realtime, sentence):
+    def failing(agent, goal, stop, on_progress, on_ask, deadline_s):
+        raise BrowseError("secret-key-123", "Sorry.")
+
+    s = browsing(realtime, asks_then_answers if "declined" in sentence else failing)
+    if "declined" in sentence:
+        wait_until(lambda: s.resp.pending() is not None)
+        s.resp.cancel(s.resp.pending().id)
+    wait_until(browse_over)
+
+    speech = s.resp._browser_status().speech
+    assert speech.startswith(f"the last browser task, open python.org and tell me the page title, {sentence} ")
+    assert "secret-key-123" not in speech and "Welcome" not in speech
+
+
 def test_the_browse_skills_are_offered_only_with_an_agent():
     names = {"browse", "browser_status", "stop_browsing"}
 

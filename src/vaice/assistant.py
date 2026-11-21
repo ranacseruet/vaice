@@ -13,7 +13,8 @@ the model's continuation made up results), vaice itself says `browse_task.STARTE
 thread (`_browse`), says nothing until a step needs the Run button or it has finished, and its outcome is spoken the
 same way, after `STARTED`: the spoken summary of its answer in the model's words, with the whole report in the chat.
 A new utterance does not stop it: `browser_status` / `stop_browsing` and the Stop button are how the user asks about it
-and ends it.
+and ends it. `browser_status` also reports the last ended task (how it ended and what it found) until a new task starts
+or *New conversation*; it is kept in memory only.
 """
 import json
 import logging
@@ -120,7 +121,8 @@ class _Executor:
 @dataclass
 class _BrowseRun:
     """The browser task as the responder holds it: its cancel event (the Stop button, `stop_browsing`, "New
-    conversation", the app ending) and what it has reported about itself (`browser_status`)."""
+    conversation", the app ending) and what it has reported about itself (`browser_status`; once the task ended, how
+    it ended)."""
 
     cancelled: threading.Event
     status: browse_task.BrowseStatus
@@ -185,29 +187,35 @@ class _BrowseHooks:
 
 def _browse(agent: BrowseAgent, confirmations: Confirmations, turn: Turn, name: str, arguments: str, seconds: float,
             cancelled: threading.Event, status: browse_task.BrowseStatus,
-            say: Callable[[str, Callable[[], bool]], None], done: Callable[[], None], epoch: int) -> None:
+            say: Callable[[str, Callable[[], bool]], None], ended: Callable[[str, str], None],
+            done: Callable[[], None], epoch: int) -> None:
     """Daemon thread: a `browse` task, started by the reply whose call returned `WORKING`. The agent works for at most
     `seconds`, quietly (`_BrowseHooks`); a new utterance does not stop it. Every end is recorded on the asking turn,
     however many turns came since, and spoken once through `say(request, stop)`: the answer's spoken summary in the
     model's words (`OUTCOME`), a
     refusal or a failure as its fixed sentence, a stop (the Stop button, `stop_browsing`, "New conversation", the app
-    ending) quietly. Takes only plain data, never the responder; `done` runs last, whatever happened. The whole answer
-    is also a report on the asking turn (the chat shows it)."""
+    ending) quietly. Takes only plain data, never the responder; `ended(outcome, answer)` says how the agent ended (the
+    status, and the responder's last result) as soon as it has, and `done` runs last, whatever happened. The whole
+    answer is also a report on the asking turn (the chat shows it)."""
 
     def stop() -> bool:
         return cancelled.is_set() or lifecycle.stopping.is_set()
 
     hooks = _BrowseHooks(confirmations, lambda request: say(request, stop), status, stop, epoch)
     begun = time.monotonic()
+    outcome, answer = browse_task.FAILED_KIND, ""
     try:
         try:
             answer = agent.run(browse_task.goal_of(arguments), stop=stop, on_progress=hooks.progress,
                                on_ask=hooks.ask, deadline_s=seconds, on_text=hooks.text)
+            outcome = browse_task.FINISHED
         except BrowseStopped:
+            outcome = browse_task.STOPPED_KIND
             log.info("browse stopped after %.1fs", time.monotonic() - begun)
             turn.add_tool_event(name, arguments, "stopped")
             return
         except BrowseError as exc:  # a refusal too: its sentence is `Okay, I stopped there.`
+            outcome = browse_task.DECLINED if isinstance(exc, BrowseDeclined) else browse_task.FAILED_KIND
             log.warning("browse ended after %.1fs: %s", time.monotonic() - begun, exc)
             turn.add_tool_event(name, arguments, "declined" if isinstance(exc, BrowseDeclined) else f"failed: {exc}")
             say(SAY.format(text=exc.spoken), stop)
@@ -218,7 +226,7 @@ def _browse(agent: BrowseAgent, confirmations: Confirmations, turn: Turn, name: 
             say(SAY.format(text=browse_task.FAILED), stop)
             return
         finally:
-            status.end()  # the agent is done: not "running" any more, so a new `browse` call is no clash
+            ended(outcome, answer)  # the agent is done: not "running" any more, so a new `browse` call is no clash
         log.info("browse finished in %.1fs", time.monotonic() - begun)
         result = browse_task.result_of(answer)
         turn.add_report(answer)
@@ -258,6 +266,9 @@ class Assistant:
         self._browse_seconds = browse_seconds
         self._task_lock = threading.Lock()
         self._browse: _BrowseRun | None = None  # the latest browser task (the Stop button, `browser_status`)
+        # the status of the last task that ended, for `browser_status` once none runs (set and read under
+        # `_task_lock`; memory only; a new task and "New conversation" clear it)
+        self._last_ended: browse_task.BrowseStatus | None = None
         # `browse` with its busy check, `browser_status` and `stop_browsing`: offered together, only with an agent
         browse_skills = browse_task.browse_skills(busy=self.browsing, status=self._browser_status,
                                                   stop=self._stop_browsing) if browse is not None else ()
@@ -351,6 +362,8 @@ class Assistant:
         with self._task_lock:
             if self._browse is not None:
                 self._browse.cancelled.set()
+            # forgotten with the conversation: what the task ends with from now on is not kept either
+            self._browse = self._last_ended = None
         if self._outbox is not None:
             self._outbox.clear()
 
@@ -375,6 +388,7 @@ class Assistant:
             if self._browse is not None:
                 self._browse.cancelled.set()
             run = self._browse = _BrowseRun(cancelled, status)
+            self._last_ended = None  # the new task replaces the last one at once
         announced = threading.Event()  # `STARTED` was spoken or dropped
 
         def ended() -> bool:
@@ -398,11 +412,24 @@ class Assistant:
         threading.Thread(
             target=_browse,
             args=(self._browse_agent, self._confirmations, turn, name, arguments, self._browse_seconds, cancelled,
-                  status, say, lambda: self._browse_done(run), epoch),
+                  status, say, lambda outcome, answer: self._browse_ended(run, outcome, answer),
+                  lambda: self._browse_done(run), epoch),
             name="vaice-assistant-browse",
             daemon=True,
         ).start()
         return True
+
+    def _browse_ended(self, run: _BrowseRun, outcome: str, answer: str) -> None:
+        """The agent of `run` is done. One decision under the task lock, for this run only: a task that was cancelled
+        (the Stop button, `stop_browsing`, the app ending) has been stopped, whatever the agent returned, so a late
+        answer is not kept as the last result; and a run that was replaced, or forgotten by "New conversation", is not
+        the last one at all."""
+        with self._task_lock:
+            if run.cancelled.is_set() or lifecycle.stopping.is_set():
+                outcome, answer = browse_task.STOPPED_KIND, ""
+            run.status.end(outcome, answer)
+            if self._browse is run:
+                self._last_ended = run.status
 
     def _browse_done(self, run: _BrowseRun) -> None:
         with self._task_lock:
@@ -427,9 +454,12 @@ class Assistant:
         return True
 
     def _browser_status(self) -> SkillResult:
+        """The running task's report; else how the last ended task ended and what it found; else `NO_TASK`."""
         with self._task_lock:
             run = self._browse if self._browse is not None and self._browse.live else None
-        return run.status.result() if run is not None else SkillResult(browse_task.NO_TASK)
+            last = self._last_ended
+        status = run.status if run is not None else last
+        return status.result() if status is not None else SkillResult(browse_task.NO_TASK)
 
     def _stop_browsing(self) -> SkillResult:
         return SkillResult(browse_task.STOPPED if self.stop_task() else browse_task.NO_TASK)
