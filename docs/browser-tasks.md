@@ -74,7 +74,17 @@ a version it cannot parse only warns), and for `acp` that the agent's program is
 - **Status.** `browser_status` answers "How is the browser task going?", "What is it doing?" and "Any update?" from
   what vaice already receives from Pi: the goal, how long it has run, the tools it called with the pages it visited,
   the page it is on, a step that waits for approval, and Pi's latest words between tools (cleaned and capped; the
-  screen shows more). It says "no browser task is running" when there is none. No new command is sent to Pi.
+  screen shows more). No new command is sent to Pi.
+- **Follow-ups after the task ended.** The model does not see a finished task's result except as the summary that was
+  said, so "What did you find?" or "Which one was the cheapest?" is answered through `browser_status`, which also
+  reports the **last ended task**: its goal, how long ago it ended ("42 seconds ago", then minutes) and how it ended. A
+  finished task adds its spoken summary and then more of the answer, cleaned for speech and capped at 700 characters
+  as a whole (the summary comes first); a task that was stopped, declined at a step or failed is one sentence
+  ("the last browser task, ..., was stopped 2 minutes ago", no error text: the panel has it). A task
+  cancelled by the Stop button, `stop_browsing` or exit counts as stopped even if its agent still returned an answer:
+  that answer is not kept. The last result lives in memory only (not in `conversation.json`, never in the model's history or instructions): a new `browse` task replaces
+  it at once (while that runs, the status is the running one), *New conversation* forgets it, and so does
+  restarting vaice. With no task yet, it says "no browser task is running".
 - **Stop.** Say "Stop the browser task" (`stop_browsing`) or press the **Stop the browser task** button. *New
   conversation*, closing vaice and `VAICE_BROWSE_SECONDS` (default 180) stop it too; a new utterance does not. Only one
   task runs at a time: a second `browse` request while one works is refused, and one made while the previous task's
@@ -120,7 +130,7 @@ a version it cannot parse only warns), and for `acp` that the agent's program is
   scored the same (`--outcome say`: named 24/24, narration 0/24), so `REPORT` stayed. With the `Summary:` line in its
   prompt, Pi with the local model started 3 of 3 answers with one (`browse_live.py`, 29 to 259 s). Still open: a
   follow-up such as "What did you find?" after the task cannot see the result and starts a new task (10/24 and 11/24
-  runs); that is the next change.
+  runs); `browser_status` keeping the last result is the change for that (measured: <!-- numbers -->).
 
 Not verified: speaker echo (the microphone hearing the heads-up and the VAD cutting a reply, #36; headphones assumed),
 any model other than the one named above driving Pi, ACP agents other than Pi (the protocol is generic, vaice's tests

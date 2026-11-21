@@ -4,8 +4,9 @@ into words, what a running task reports about itself, and how the answer becomes
 
 `browse(goal)` is a `background` skill: the call returns `WORKING` at once and the reply ends, the browser agent works
 on a thread of its own and says nothing more than a heads-up that a step needs the Run button until it has finished;
-its answer is then spoken through the outbox. `browser_status` and `stop_browsing` are what the user can ask
-meanwhile: how it is going, and to end it.
+its answer is then spoken through the outbox. `browser_status` and `stop_browsing` are what the user can ask: how the
+running task is going (or, once it has ended, how the last one ended and what it found, from memory: `BrowseStatus`
+keeps the outcome), and to end it.
 """
 import json
 import re
@@ -28,6 +29,8 @@ STOPPED = "stopped the browser task"
 GOAL_MAX_CHARS = 500
 STATUS_SPEECH_CHARS = 600  # what `browser_status` hands the model; its detail (the panel) keeps more
 STATUS_DETAIL_CHARS = 2500
+LAST_SPEECH_CHARS = 700  # the speech line of the last ended task: under the realtime layer's tool output cap (800)
+LAST_GOAL_CHARS = 120  # of the goal in it
 STATUS_TEXT_CHARS = 200  # of the agent's latest words in the speech line (the detail keeps `STATUS_DETAIL_TEXT_CHARS`)
 STATUS_DETAIL_TEXT_CHARS = 800
 STATUS_TOOLS_SHOWN = 5  # the latest tool names in the speech line
@@ -36,6 +39,18 @@ RESULT_CHARS = 2000  # characters of the answer that are spoken when it has no `
 SUMMARY_CHARS = 400  # ... and of a `Summary:` line
 CUT = "(more on screen)"
 NARRATION_CHARS = 400  # a rule or a heading this early ends the agent's narration ("I now have ... Let me compile")
+
+# how a task ended, for `BrowseStatus.end` (the last ended task is reported by it)
+FINISHED = "finished"
+STOPPED_KIND = "stopped"
+DECLINED = "declined"
+FAILED_KIND = "failed"
+_ENDED_AS = {FINISHED: "finished", STOPPED_KIND: "was stopped", DECLINED: "was declined at a step",
+             FAILED_KIND: "failed"}
+STATUS_DESCRIPTION = (
+    "Report on the browser task: how the running one is going (what it is doing, the pages it has visited, whether "
+    "it waits for approval), or what the last one found once it has finished. Use it when the user asks how the "
+    "browser task is going, for an update, or what it found. Not for other questions.")
 
 ASK_STEP = "The browser task wants to {action}{where}. The details are on the screen."
 # what each tool that changes a page is called (the gate asks about exactly these, see `browse.GATE_POLICY`)
@@ -97,14 +112,12 @@ def browse_skill(busy: Callable[[], bool] | None = None) -> Skill:
 def browse_skills(*, busy: Callable[[], bool] | None, status: Callable[[], SkillResult],
                   stop: Callable[[], SkillResult]) -> list[Skill]:
     """`browse` and the two skills that go with it, offered together: `browser_status` (what the running task is
-    doing; `status` answers) and `stop_browsing` (`stop` ends it, the same way the Stop button does)."""
+    doing, or how the last one ended and what it found; `status` answers) and `stop_browsing` (`stop` ends it, the same
+    way the Stop button does)."""
     nothing = {"type": "object", "properties": {}}
     return [
         browse_skill(busy),
-        Skill("browser_status",
-              "Report how the running browser task is going: what it is doing, the pages it has visited and whether "
-              "it waits for approval. Use it when the user asks how the browser task is going, what it is doing or "
-              "for an update on it. Not for other questions.", nothing, lambda _args: status()),
+        Skill("browser_status", STATUS_DESCRIPTION, nothing, lambda _args: status()),
         Skill("stop_browsing", "Stop the running browser task. Use it when the user asks to stop, cancel or end the "
                                "browser task.", nothing, lambda _args: stop(), kind="action"),
     ]
@@ -175,22 +188,56 @@ def _cut(text: str, limit: int) -> str:
     return text if len(text) <= limit else f"{text[:limit].rstrip()} {CUT}"
 
 
+def _split_summary(answer: str) -> tuple[str, str]:
+    """The speakable text of the answer's `Summary:` line (the next line when it stands alone; empty when there is
+    none) and the answer without that line."""
+    match = _SUMMARY_LINE.search(answer)
+    if match is None:
+        return "", answer
+    after = answer[match.end(1):].splitlines(keepends=True)
+    summary = _speakable(match.group(1))
+    if summary:
+        return summary, answer[:match.start()] + "".join(after[1:])
+    following = next((n for n, line in enumerate(after) if line.strip()), None)  # `Summary:` alone: the next line
+    if following is None:
+        return "", answer
+    summary = _speakable(after[following])
+    return summary, (answer[:match.start()] + "".join(after[following + 1:]) if summary else answer)
+
+
+def _report_body(answer: str) -> str:
+    """The answer from its first horizontal rule or heading when that is within `NARRATION_CHARS` (every recorded Pi
+    answer is its own narration, "I now have ... Let me compile ...", then a rule, then the report: the narration is
+    not the finding), else all of it."""
+    start = _RULE_OR_HEADING.search(answer)
+    return answer[start.start():] if start is not None and start.start() < NARRATION_CHARS else answer
+
+
 def spoken_summary(answer: str) -> str:
     """What of the agent's answer is spoken: the text of its `Summary:` line (`browse.PROMPT` asks for one; markdown
     emphasis around the word, any case, anywhere in the answer) cut at `SUMMARY_CHARS`. Without one, the answer from
-    its first horizontal rule or heading when that is within `NARRATION_CHARS` (every recorded Pi answer is its own
-    narration, "I now have ... Let me compile ...", then a rule, then the report; the narration is not the finding),
-    cut at `RESULT_CHARS`. Either way as one speakable line (`_speakable`). Deterministic: no model involved."""
-    match = _SUMMARY_LINE.search(answer)
-    if match is not None:
-        following = (line for line in answer[match.end(1):].splitlines() if line.strip())
-        summary = _speakable(match.group(1)) or _speakable(next(following, ""))  # `Summary:` alone: the next line
-        if summary:
-            return _cut(summary, SUMMARY_CHARS)
-    start = _RULE_OR_HEADING.search(answer)
-    if start is not None and start.start() < NARRATION_CHARS:
-        answer = answer[start.start():]
-    return _cut(_speakable(answer), RESULT_CHARS)
+    its first horizontal rule or heading when that is within `NARRATION_CHARS` (see `_report_body`), cut at
+    `RESULT_CHARS`. Either way as one speakable line (`_speakable`). Deterministic: no model involved."""
+    summary, _ = _split_summary(answer)
+    if summary:
+        return _cut(summary, SUMMARY_CHARS)
+    return _cut(_speakable(_report_body(answer)), RESULT_CHARS)
+
+
+def _ago(seconds: float) -> str:
+    """"N seconds ago", or "N minutes ago" from a minute on (rounded)."""
+    if seconds < 60:
+        count, unit = int(seconds), "second"
+    else:
+        count, unit = round(seconds / 60), "minute"
+    return f"{count} {unit}{'' if count == 1 else 's'} ago"
+
+
+def _fit(text: str, limit: int) -> str:
+    """`text` cut so that it, with `CUT` after it when it was cut, is at most `limit` characters."""
+    if len(text) <= limit:
+        return text
+    return f"{text[:max(0, limit - len(CUT) - 1)].rstrip()} {CUT}"
 
 
 def result_of(answer: str) -> SkillResult:
@@ -206,11 +253,12 @@ def _one_line(text: str, limit: int) -> str:
 
 
 class BrowseStatus:
-    """What a running browser task has reported about itself, for `browser_status`: the goal, how long it has run,
-    the tool calls so far (the latest `STATUS_TOOLS_KEPT`) with the pages they opened, the agent's latest words and
-    the step that waits for an approval. Written on the task's thread (the agent's callbacks), read on the reply's, so
-    every access is under one lock and `result()` builds from a snapshot. What the agent wrote is page-steerable text:
-    it is cleaned to one line and capped, and it only ever reaches the model as a tool output."""
+    """What a browser task has reported about itself, for `browser_status`: while it runs, the goal, how long it has
+    run, the tool calls so far (the latest `STATUS_TOOLS_KEPT`) with the pages they opened, the agent's latest words and
+    the step that waits for an approval; once it has ended (`end`), how it ended and, when it finished, its answer.
+    Written on the task's thread (the agent's callbacks), read on the reply's, so every access is under one lock and
+    `result()` builds from a snapshot. What the agent wrote is page-steerable text: it is cleaned to one line and
+    capped, and it only ever reaches the model as a tool output."""
 
     def __init__(self, goal: str, clock: Callable[[], float] = time.monotonic):
         self._goal = goal
@@ -221,17 +269,23 @@ class BrowseStatus:
         self._text = ""
         self._asking: str | None = None
         self._ended = False
+        self._outcome = STOPPED_KIND  # how it ended (`end`), the answer of a finished one, and when
+        self._answer = ""
+        self._ended_at = self._started
 
     @property
     def ended(self) -> bool:
         with self._lock:
             return self._ended
 
-    def end(self) -> None:
-        """The agent is done (an answer, a failure, a stop): the task no longer runs."""
+    def end(self, outcome: str, answer: str = "") -> None:
+        """The agent is done: the task no longer runs. `outcome` is how it ended (`FINISHED` with its `answer`,
+        `STOPPED_KIND`, `DECLINED` or `FAILED_KIND`); `result()` reports it from then on."""
         with self._lock:
             self._ended = True
             self._asking = None
+            self._outcome, self._answer = outcome, answer if outcome == FINISHED else ""
+            self._ended_at = self._clock()
 
     def tool(self, title: str, args: object) -> None:
         url = args.get("url") if isinstance(args, dict) else None
@@ -250,11 +304,13 @@ class BrowseStatus:
             self._asking = None if title is None else STEP_ACTIONS.get(tool_name(title), OTHER_STEP)
 
     def result(self) -> SkillResult:
-        """The report: one capped line for the model, a fuller one for the panel."""
+        """The report: one capped line for the model, a fuller one for the panel. For a task that has ended, how it
+        ended and how long ago, and the finding of a finished one (`_last_result`)."""
         with self._lock:
             tools, text, asking, ended = list(self._tools), self._text, self._asking, self._ended
+            outcome, answer, ended_at = self._outcome, self._answer, self._ended_at
         if ended:
-            return SkillResult(NO_TASK)
+            return self._last_result(outcome, answer, int(self._clock() - ended_at))
         seconds = int(self._clock() - self._started)
         urls = [url for _, url in tools if url]
         visits = [h for h in (host_of({"url": url}) for url in urls) if h]
@@ -279,3 +335,17 @@ class BrowseStatus:
             lines.append(f"latest words: {text}")
         lines += [f"  {n}. {name}{f' {url}' if url else ''}" for n, (name, url) in enumerate(tools, 1)]
         return SkillResult(speech, "\n".join(lines)[:STATUS_DETAIL_CHARS])
+
+    def _last_result(self, outcome: str, answer: str, seconds: int) -> SkillResult:
+        """The report of an ended task: its goal, how long ago it ended and how. A finished one adds its spoken summary
+        and then more of the answer, one speakable line cut to `LAST_SPEECH_CHARS` as a whole (the summary comes first,
+        so a cut takes the rest); the panel's detail is the goal and the whole answer, capped. A stop, a refusal and
+        a failure are one sentence each: the reason is in the panel."""
+        head = f"the last browser task, {_one_line(self._goal, LAST_GOAL_CHARS)}, {_ENDED_AS[outcome]} {_ago(seconds)}"
+        if outcome != FINISHED:
+            return SkillResult(head)
+        _, rest = _split_summary(answer)
+        more = _speakable(_report_body(rest)) if rest != answer else ""  # without a `Summary:` line the summary is it
+        text = " ".join(part for part in (spoken_summary(answer), more) if part)
+        speech = _fit(f"{head}: {text}" if text else head, LAST_SPEECH_CHARS)
+        return SkillResult(speech, f"goal: {self._goal}\nended {_ago(seconds)}\n\n{answer}"[:STATUS_DETAIL_CHARS])
