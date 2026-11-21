@@ -128,9 +128,19 @@ a version it cannot parse only warns), and for `acp` that the agent's program is
   with the same goal in the starting reply now starts nothing and adds no event (before, about half of these replies
   made one and it was answered "busy"). `REPORT` and `SAY` as the outcome's wording
   scored the same (`--outcome say`: named 24/24, narration 0/24), so `REPORT` stayed. With the `Summary:` line in its
-  prompt, Pi with the local model started 3 of 3 answers with one (`browse_live.py`, 29 to 259 s). Still open: a
-  follow-up such as "What did you find?" after the task cannot see the result and starts a new task (10/24 and 11/24
-  runs); `browser_status` keeping the last result is the change for that (measured: <!-- numbers -->).
+  prompt, Pi with the local model started 3 of 3 answers with one (`browse_live.py`, 29 to 259 s).
+- **Follow-ups after the task.** Before `browser_status` kept the last result, a follow-up such as "What did you
+  find?" could not see it and often started a new task. On `evals/browse_flow.py` (12 cases x 3, four of them added
+  for this: "Which one was the cheapest?", "What were the results of the browser task?" and two new requests that
+  should start a new task; screen skill on / off), the follow-up did what its case expects in 21/36 and 22/36 runs
+  before, 26/36 and 27/36 after. "What were the results of the browser task?" called `browser_status` 3 of 3 times
+  both before and after, but it answered "no browser task is running" before, so it named a finding 0/3 before and
+  3/3 after. A new request after the task still started one in 6/6 runs both ways. Still open: a follow-up that
+  should be answered from the result started a new task in 8/24 and 8/24 runs (11/24 and 10/24 before), mostly "What
+  did you find?". On `evals/browse_cases.json` x 5, "What did the browser task find?" called `browser_status` 5/5 and
+  5/5 (3/5 and 0/5 before, with the old description); "Tell me what you found in the browser." 0/5 both before and
+  after; all 29 cases 132/145 and 133/145 (132 and 129 before), the no-browse cases 51/55 and 52/55 (53 and 54 before,
+  `disk_space`/`battery_status` misses).
 
 Not verified: speaker echo (the microphone hearing the heads-up and the VAD cutting a reply, #36; headphones assumed),
 any model other than the one named above driving Pi, ACP agents other than Pi (the protocol is generic, vaice's tests

@@ -14,8 +14,10 @@ the pull requests (#53 to #126).
 
 ### Added
 - **Follow-ups about a finished browser task.** `browser_status` also reports the last ended task (its goal, how long
-  ago it ended and how; a finished one adds its spoken summary and more of the answer, capped at 700 characters), so
-  "What did you find?" no longer needs the model to start the task again. It is kept in memory only: a new task
+  ago it ended and how; a finished one adds its spoken summary and more of the answer, capped at 700 characters), so a
+  follow-up such as "What did you find?" can be answered from it (on `evals/browse_flow.py` the follow-up did what it
+  should in 26/36 and 27/36 runs, 21/36 and 22/36 before; it still starts a new task in about a third of the runs
+  that should be answered from the result). It is kept in memory only: a new task
   replaces it and *New conversation* or a restart forgets it. A task cancelled by Stop or exit counts as stopped even
   if its agent still returned an answer. `evals/browse_flow.py` gets four follow-up cases and an `f-right` score.
 - **Browser task results.** The reply that starts a browser task ends at the call and vaice has a fixed sentence
