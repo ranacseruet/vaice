@@ -90,7 +90,6 @@ a version it cannot parse only warns), and for `acp` that the agent's program is
   panel shows two rows per task: the start (`WORKING`) and the outcome (`finished: ...`, `stopped`, `declined`, `failed: ...`).
 - **Quiet.** Nothing is spoken while the task works except the step heads-up and the outcome (or, when it fails or is
   declined, a fixed sentence). The outcome (and each step's heads-up, [#127](https://github.com/ranacseruet/vaice/issues/127)) is added to the turn that asked for the task even if you spoke meanwhile.
-  The *Tool activity* panel shows a single `browse` entry per task.
 - **One browser path.** Do not also configure a browser MCP server (such as `chrome-devtools-mcp`) in
   `VAICE_MCP_CONFIG`: with both, the model mixed the two browsers' tools. vaice does not filter such a server out; it
   is up to the config file (see [MCP tools](mcp-tools.md)).
@@ -109,6 +108,17 @@ a version it cannot parse only warns), and for `acp` that the agent's program is
   a question it should answer itself. `evals/browse_live.py` checks the agent's side: Pi 1.5.2 with a local Sage-A1.5 model
   answered 3 of 3 research goals in each of two runs (79 to 302 s, 16 to 43 tool calls), with nothing left holding
   the profile. Two of those six took longer than the default `VAICE_BROWSE_SECONDS` (180): raise it for research.
+- **Measured end to end.** `evals/browse_flow.py` (8 cases x 3, the real voice model, a fake agent replaying six
+  recorded Pi answers; screen skill on / off) before and after this behaviour: the start reply invented results in
+  14/24 and 16/24 runs before, 0/24 and 0/24 after; the spoken outcome named a finding in 13/24 and 13/24 before (in
+  10/23 and 11/24 it was the agent's narration, "Let me compile my findings ..."), 24/24 and 24/24 after with no
+  narration; the report was in the chat in 0/24 before, 24/24 after; the outcome started a median 0.44 s after the task
+  ended (7.2 and 10.4 s before). On `evals/browse_cases.json` x 5 no reply called `browse` twice (24 of 51 and 26 of 50
+  replies did before) and none followed `browse` with `look_at_screen`. `REPORT` and `SAY` as the outcome's wording
+  scored the same (`--outcome say`: named 24/24, narration 0/24), so `REPORT` stayed. With the `Summary:` line in its
+  prompt, Pi with the local model started 3 of 3 answers with one (`browse_live.py`, 29 to 259 s). Still open: a
+  follow-up such as "What did you find?" after the task cannot see the result and starts a new task (10/24 and 11/24
+  runs); that is the next change.
 
 Not verified: speaker echo (the microphone hearing the heads-up and the VAD cutting a reply, #36; headphones assumed),
 any model other than the one named above driving Pi, ACP agents other than Pi (the protocol is generic, vaice's tests
