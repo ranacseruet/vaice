@@ -13,8 +13,8 @@ approval, the MCP `auto` and `voice` policies, llama-server's built-in tools) ar
 the pull requests (#53 to #126).
 
 ### Added
-- **Browser task results.** The reply that starts a browser task ends at the call and vaice says a fixed sentence
-  itself (the model no longer talks on and invents results, calls `browse` twice or follows it with `look_at_screen`, #131, #132); the outcome spoken is the agent's own `Summary:` line (or
+- **Browser task results.** The reply that starts a browser task ends at the call and vaice has a fixed sentence
+  said through a fresh speech session (the model no longer talks on and invents results, calls `browse` twice or follows it with `look_at_screen`, #131, #132); the outcome spoken is the agent's own `Summary:` line (or
   the answer without its narration); the whole answer appears in the chat as its own message and is saved with the
   turn (`"reports"` in `conversation.json`, not in the model's history); the *Tool activity* outcome row starts with
   `finished: `. `evals/browse_flow.py --outcome report|say` compares the two outcome wordings.

@@ -79,8 +79,8 @@ a version it cannot parse only warns), and for `acp` that the agent's program is
   conversation*, closing vaice and `VAICE_BROWSE_SECONDS` (default 180) stop it too; a new utterance does not. Only one
   task runs at a time: a second `browse` request while one works is refused, and one made while the previous task's
   outcome is still being said replaces it (the old outcome is dropped). A stop is quiet.
-- **What you hear.** The reply that calls `browse` ends there: vaice itself says "I'm working on it in the browser. I'll
-  tell you when it's done." (the model is not asked to continue, so it cannot invent results). Other calls the model
+- **What you hear.** The reply that calls `browse` ends there: vaice has the voice model say "I'm working on it in the browser. I'll
+  tell you when it's done." (`SAY`; it may reword it slightly), and the model is not asked to continue, so it cannot invent results. Other calls the model
   made in the same reply still run, but their results are not spoken. When the task ends you hear a short summary: the agent is
   asked to start its answer with a `Summary:` line of one or two plain sentences, and vaice speaks that line (without
   one, the answer with its narration before the first rule or heading dropped, cleaned for speech and capped).
@@ -112,9 +112,11 @@ a version it cannot parse only warns), and for `acp` that the agent's program is
   recorded Pi answers; screen skill on / off) before and after this behaviour: the start reply invented results in
   14/24 and 16/24 runs before, 0/24 and 0/24 after; the spoken outcome named a finding in 13/24 and 13/24 before (in
   10/23 and 11/24 it was the agent's narration, "Let me compile my findings ..."), 24/24 and 24/24 after with no
-  narration; the report was in the chat in 0/24 before, 24/24 after; the outcome started a median 0.44 s after the task
-  ended (7.2 and 10.4 s before). On `evals/browse_cases.json` x 5 no reply called `browse` twice (24 of 51 and 26 of 50
-  replies did before) and none followed `browse` with `look_at_screen`. `REPORT` and `SAY` as the outcome's wording
+  narration; the report was in the chat in 0/24 before, 24/24 after. The start sentence goes through the voice model (`SAY`): in all 72 runs it said "I'm working on it in the
+  browser. I'll let you know when it's done." and nothing more. On `evals/browse_cases.json` x 5 no reply followed
+  `browse` with `look_at_screen` (`browse-python-title` with the screen skill on did in 5 of 5 before). A second `browse`
+  with the same goal in the starting reply now starts nothing and adds no event (before, about half of these replies
+  made one and it was answered "busy"). `REPORT` and `SAY` as the outcome's wording
   scored the same (`--outcome say`: named 24/24, narration 0/24), so `REPORT` stayed. With the `Summary:` line in its
   prompt, Pi with the local model started 3 of 3 answers with one (`browse_live.py`, 29 to 259 s). Still open: a
   follow-up such as "What did you find?" after the task cannot see the result and starts a new task (10/24 and 11/24
