@@ -248,7 +248,8 @@ def test_every_change_is_saved_with_no_temp_files_left(tmp_path):
     turn.finish()
 
     assert json.loads(path.read_text())["turns"] == [
-        {"user": "q", "assistant": "a", "tools": [], "error": "", "interrupted": False, "complete": True}
+        {"user": "q", "assistant": "a", "tools": [], "reports": [], "error": "", "interrupted": False,
+         "complete": True}
     ]
     assert os.listdir(tmp_path) == ["c.json"]
 
@@ -622,3 +623,92 @@ def test_appending_is_thread_safe():
         t.join(5)
 
     assert sorted(turn.assistant_text.split()) == sorted(f"w{i}" for i in range(50))
+
+
+# --- a browser task's report: in the chat and in the file, never in the model's history
+
+REPORT = "I now have it.\n\n---\n\n## Coffee\n\n1. **Ninja** at $90 ([source](https://example.com/a))"
+
+
+def test_a_report_is_added_capped_and_blank_ones_are_not():
+    turn = Turn()
+    turn.add_report(f"  {REPORT}\n")
+    turn.add_report("   ")
+    turn.add_report("x" * (conv.REPORT_CHARS + 500))
+
+    assert turn.reports[0] == REPORT  # trimmed
+    assert len(turn.reports) == 2 and len(turn.reports[1]) == conv.REPORT_CHARS
+    assert turn.reports[1].endswith("... (truncated)")  # the same marker as a tool output
+
+
+def test_a_closed_turn_still_takes_a_report():
+    turn = Turn()
+    turn.finish()
+
+    turn.add_report("late")
+
+    assert turn.reports == ["late"]
+
+
+def test_reports_are_persisted_and_a_file_without_them_loads_with_none(tmp_path):
+    path = tmp_path / "c.json"
+    c = Conversation(path)
+    turn = exchange(c, "research", "On it.")
+    turn.add_report(REPORT)
+
+    assert json.loads(path.read_text())["turns"][0]["reports"] == [REPORT]
+    assert Conversation(path).messages_for_ui()[-1]["content"].endswith(REPORT)
+
+    data = turn.to_dict()
+    del data["reports"]  # a file written before reports existed
+    assert Turn.from_dict(data, threading.RLock(), None).reports == []
+
+
+def test_a_report_is_not_in_the_models_history_nor_in_the_activity_panel():
+    c = Conversation()
+    turn = exchange(c, "research", "I'm working on it.")
+    turn.add_tool_event("browse", "{}", "finished: summary")
+    turn.add_report(REPORT)
+
+    assert c.history(before=c.start_turn()) == [("user", "research"), ("assistant", "I'm working on it.")]
+    assert "Ninja" not in c.tool_activity_for_ui()
+
+
+def test_the_chat_shows_the_report_as_its_own_message_after_what_was_said():
+    c = Conversation()
+    turn = exchange(c, "research", "I'm working on it.")
+    turn.add_report(REPORT)
+    exchange(c, "thanks", "Welcome.")
+
+    assert c.messages_for_ui() == [
+        {"role": "user", "content": "research"},
+        {"role": "assistant", "content": "I'm working on it."},
+        {"role": "assistant", "content": f"{conv.REPORT_HEADING}\n\n{REPORT}"},  # markdown and links stay
+        {"role": "user", "content": "thanks"},
+        {"role": "assistant", "content": "Welcome."},
+    ]
+
+
+def test_a_report_shows_even_when_nothing_was_said_on_the_turn():
+    c = Conversation()
+    turn = exchange(c, "research")
+    turn.add_report("The answer.")
+
+    assert c.messages_for_ui()[1:] == [{"role": "assistant", "content": f"{conv.REPORT_HEADING}\n\nThe answer."}]
+
+
+@pytest.mark.parametrize("markdown, shown", [
+    ("see ![a chart](https://evil.test/p.png) now", "see a chart now"),
+    ("![](https://evil.test/p.png)text", "text"),
+    ("![x](https://evil.test/a_(1).png \"title\") and ![y](<https://evil.test/b c.png>)", "x and y"),
+    ("![ref image][r]\n\n[r]: https://evil.test/c.png", "ref image\n\n[r]: https://evil.test/c.png"),
+    ("![shortcut]\n\n[shortcut]: https://evil.test/d.png", "shortcut\n\n[shortcut]: https://evil.test/d.png"),
+    ("[![badge](https://evil.test/b.svg)](https://example.com/page)", "[badge](https://example.com/page)"),
+    ("a [link](https://example.com) stays", "a [link](https://example.com) stays"),
+])
+def test_a_markdown_image_in_a_report_becomes_its_alt_text(markdown, shown):
+    c = Conversation()
+    exchange(c, "q").add_report(markdown)
+
+    assert c.messages_for_ui()[-1]["content"] == f"{conv.REPORT_HEADING}\n\n{shown}"
+    assert "evil.test/p.png" not in c.messages_for_ui()[-1]["content"]

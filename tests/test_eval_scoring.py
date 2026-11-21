@@ -212,6 +212,16 @@ def test_aggregate_counts_percentages_and_latency():
     assert agg["latency_max_s"] == 3.0
 
 
+def test_aggregate_leaves_browser_starts_out_of_the_latency_and_counts_them():
+    started = record("a", "correct", latency=9.0)
+    started["browse_start"] = True  # the reply ended in a started task: no audio by design
+    agg = scoring.aggregate([started, record("a", "correct", latency=1.0), record("b", "correct", latency=3.0)])
+
+    assert agg["browse_starts"] == 1 and agg["counts"]["correct"] == 3  # still scored as calls
+    assert agg["latency_median_s"] == 2.0 and agg["latency_max_s"] == 3.0
+    assert scoring.aggregate([record("a", "correct")])["browse_starts"] == 0  # older records have no such key
+
+
 def test_aggregate_with_zero_runs_has_zero_percentages_and_no_latency():
     agg = scoring.aggregate([])
     assert agg["runs"] == 0

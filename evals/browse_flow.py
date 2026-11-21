@@ -6,12 +6,17 @@ scores what the user gets around them: the reply that starts the task, the spoke
 a follow-up question does. The browser agent is a fake that replays real recorded answers (`browse_answers.json`), so
 it measures vaice and the voice model, not the agent, and uses no browser, Pi or network.
 
+The reply that starts a task ends with the call (it has no audio of its own) and vaice says a fixed sentence afterwards:
+the run waits for it, as a listener would, before the follow-up. `--outcome report|say` is the wording the outcome is
+spoken with (`REPORT`, the model's words, or `SAY`, as it is).
+
 Every run is the app's own wiring: an `Assistant` with a browser agent (so `_start_browse`, `_browse`, the real `busy`
 check, `browser_status` and `stop_browsing`, and the outcome speech are the app's code) over the stub skills of
 `run.py`, a `Conversation` whose turns and history are made as `app.make_handler` makes them, and an `Outbox` drained
 as fastrtc's idle `emit()` drains it. No audio is played: frames are counted.
 """
 import argparse
+import contextlib
 import json
 import platform
 import re
@@ -26,6 +31,7 @@ from pathlib import Path
 import numpy as np
 import run as evals_run
 
+from vaice import assistant as vaice_assistant
 from vaice import browse_task, config
 from vaice.assistant import Assistant
 from vaice.browse import BrowseStopped
@@ -43,6 +49,8 @@ SETTLE_SECONDS = 2.0  # after the follow-up reply: speech still in flight may la
 JOIN_SECONDS = 30.0  # for a task thread to end once stopped
 TRANSCRIPT_WAIT = 5.0  # as in run.py and app.make_handler: the transcript is reported by a parallel session
 BROWSE_THREAD = "vaice-assistant-browse"  # the name `Assistant._start_browse` gives the task's thread
+SPEECH_THREAD = "vaice-assistant-speech"  # the name `Assistant` gives the threads that speak (the announcement)
+OUTCOME_WORDINGS = {"report": "REPORT", "say": "SAY"}  # --outcome: the name in `vaice.assistant` of what it speaks with
 INVENTED_CHARS = 120  # a start reply longer than this has said more than "I'll look into it"
 MIN_REPORT_LINE = 20  # characters of a report line that counts as "the report itself" in the chat
 # What a spoken outcome must not sound like: the agent's own narration instead of the finding
@@ -304,7 +312,8 @@ class FlowRun:
         self.drainer = Drainer(self.outbox)
         self.conversation = Conversation(path=None)
         self.turns: list[Turn] = []
-        self.appended: list[dict] = []  # the speech recorded onto a turn after its reply ended (outcomes)
+        # the speech recorded onto a turn after its reply ended: the announcement of the task, then its outcome
+        self.appended: list[dict] = []
         self.outcome_recorded = threading.Event()  # the first task's outcome was recorded on the first turn
         self.began = time.monotonic()
         self.drainer.start()
@@ -315,12 +324,21 @@ class FlowRun:
         original = turn.append_assistant_text
 
         def append(text: str) -> None:
-            self.appended.append({"turn": index, "t": round(time.monotonic() - self.began, 2), "text": text.strip()})
+            now = time.monotonic()
+            self.appended.append({"turn": index, "t": round(now - self.began, 2), "text": text.strip()})
             original(text)
-            if index == 0:
+            if index == 0 and self._is_outcome_recorded(now):
                 self.outcome_recorded.set()
 
         turn.append_assistant_text = append  # type: ignore[method-assign]
+
+    def _is_outcome_recorded(self, now: float) -> bool:
+        """Whether what was recorded onto the first turn by `now` includes the outcome. The announcement is always
+        recorded first (the outcome waits for it), so a second entry is the outcome; a single one is it only when it
+        came after the agent had finished (a task shorter than its own announcement is not what this measures)."""
+        spoken = [a for a in self.appended if a["turn"] == 0]
+        finished = self.agent.finished_at
+        return len(spoken) >= 2 or (len(spoken) == 1 and finished is not None and now >= finished)
 
     def reply(self, audio) -> dict:
         """One reply as `app.make_handler` makes it: a turn, the history before it, the frames counted, the turn
@@ -374,6 +392,26 @@ class FlowRun:
             time.sleep(POLL)
         return False
 
+    def wait_for_announcement(self) -> None:
+        """The listener hears "I'm working on it" before saying anything more: wait until it was recorded onto the first
+        turn, or nothing is coming (no task, no speech thread, nothing queued for `GIVE_UP_AFTER`), or `PLAYBACK_WAIT`
+        passed."""
+        deadline = time.monotonic() + PLAYBACK_WAIT
+        idle_since = None
+        while time.monotonic() < deadline:
+            if any(a["turn"] == 0 for a in self.appended):
+                return
+            if self.task_threads() or self.speech_threads() or len(self.outbox):
+                idle_since = None
+            elif idle_since is None:
+                idle_since = time.monotonic()
+            elif time.monotonic() - idle_since >= GIVE_UP_AFTER:
+                return
+            time.sleep(POLL)
+
+    def speech_threads(self) -> list[threading.Thread]:
+        return [t for t in threading.enumerate() if t.name == SPEECH_THREAD]
+
     def wait_for_playback(self) -> None:
         """The user listens before asking the next question: what was said so far has (nearly) played."""
         deadline = time.monotonic() + PLAYBACK_WAIT
@@ -386,8 +424,11 @@ class FlowRun:
         finished = self.agent.finished_at
         if not spoken or finished is None:
             return None
+        if len(spoken) == 1 and spoken[0]["t"] + 0.01 < finished - self.began:
+            return None  # the one entry is the announcement: the outcome was never recorded
+        outcome = spoken[-1]  # the announcement came first
         frames = [(when, seconds) for when, seconds in self.drainer.frames if when >= finished]
-        return {"text": spoken[0]["text"], "recorded_s": spoken[0]["t"],
+        return {"text": outcome["text"], "recorded_s": outcome["t"],
                 "first_audio_s": frames[0][0] - finished if frames else None,
                 "audio_s": sum(seconds for _, seconds in frames)}
 
@@ -417,6 +458,7 @@ def run_flow(url: str, prompt: str, case: dict, fixture: dict, audio, followup_a
         if record["start"]["error"]:
             record["errors"].append(f"start: {record['start']['error']}")
         else:
+            flow.wait_for_announcement()
             if follow["when"] == "finished":
                 flow.wait_for_outcome()
             flow.wait_for_playback()
@@ -459,6 +501,9 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--vision", action="store_true",
                         help="also offer the look_at_screen skill (stubbed: a fixed fake screen)")
     parser.add_argument("--prompt", help="reply instructions (default: VAICE_PROMPT)")
+    parser.add_argument("--outcome", choices=sorted(OUTCOME_WORDINGS), default="report",
+                        help="how the task's outcome is spoken: report = in the model's words (the app's default), "
+                             "say = as it is (default: report)")
     parser.add_argument("--label", default="", help="free text stored in the results, e.g. the quantization")
     parser.add_argument("--out", type=Path, help="results file (default: evals/results/browse-flow-<UTC timestamp>"
                                                  ".json)")
@@ -505,6 +550,17 @@ def print_summary(runs: list[dict], case_ids: list[str]) -> dict:
     return {"by_case": by_case, "overall": overall, "runs_with_errors": errors}
 
 
+@contextlib.contextmanager
+def outcome_wording(name: str):
+    """Speak the tasks' outcomes with `vaice.assistant.REPORT` or `SAY` (`--outcome`) for the block, then restore."""
+    original = vaice_assistant.OUTCOME
+    vaice_assistant.OUTCOME = getattr(vaice_assistant, OUTCOME_WORDINGS[name])
+    try:
+        yield
+    finally:
+        vaice_assistant.OUTCOME = original
+
+
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
     all_cases, fixtures = load_cases()
@@ -519,7 +575,7 @@ def main(argv: list[str] | None = None) -> None:
     started = datetime.now(UTC).isoformat(timespec="seconds")
     total = len(cases) * args.repeats
     try:
-        with tempfile.TemporaryDirectory(prefix="vaice-evals-") as scratch:
+        with tempfile.TemporaryDirectory(prefix="vaice-evals-") as scratch, outcome_wording(args.outcome):
             audio = {case["id"]: (evals_run.audio_for(case, Path(scratch)),
                                   evals_run.audio_for({"id": f"{case['id']}-followup", "say": case["followup"]["say"]},
                                                       Path(scratch)))
@@ -539,7 +595,7 @@ def main(argv: list[str] | None = None) -> None:
     summary = print_summary(runs, [c["id"] for c in cases])
 
     config_used = {"repeats": args.repeats, "task_seconds": args.task_seconds, "vision": args.vision, "prompt": prompt,
-                   "cases": [c["id"] for c in cases], "platform": platform.platform()}
+                   "outcome": args.outcome, "cases": [c["id"] for c in cases], "platform": platform.platform()}
     document = {"label": args.label, "started": started, "config": config_used, "server": info,
                 "summary": summary, "runs": runs}
     out.parent.mkdir(parents=True, exist_ok=True)

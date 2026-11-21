@@ -161,6 +161,12 @@ TOOL_OUTPUT_CHARS = config.LLAMACPP_TOOL_OUTPUT_CHARS
 TOOL_VALUE_CHARS = config.LLAMACPP_TOOL_VALUE_CHARS
 
 
+class EndReply(str):
+    """A tool output that ends the reply once it is sent: `_converse` gives the model the result but does not ask it
+    to continue (no `response.create`), so it says nothing more. What starts a task that outlives the reply returns
+    one (`assistant._Executor`): the model's continuation made up results for work that had only begun."""
+
+
 def _short(text: str, chars: int) -> str:
     return text if len(text) <= chars else text[:chars].rstrip() + "..."
 
@@ -405,8 +411,9 @@ def _converse(
     """Daemon thread: one realtime session for one reply. Puts frames, `_ROUND` at each tool-round
     boundary, exceptions, and finally `(_DONE, (reply text, samples received))` on `out` (a queue, or anything else
     with `put`: `speak` hands it a sink). `heard` is the user's audio, or text to speak (`speak`: a message of the
-    user's, which the model answers). `executor(name, arguments)` runs a tool call and returns what the model reads;
-    it runs here on the session thread and never raises. `external_stop` is a stop of the caller's besides
+    user's, which the model answers). `executor(name, arguments)` runs a tool call and returns what the model reads
+    (an `EndReply` also ends the reply once the round's results are sent); it runs here on the session thread and
+    never raises. `external_stop` is a stop of the caller's besides
     `cancelled` and the app's.
 
     Every frame carries a reference to its round's `acc = [text, samples]`, so the consumer never reads
@@ -501,16 +508,24 @@ def _converse(
                     acc = ["", 0]
                     stripper = _MarkupStripper()
                     out.put(_ROUND)
+                    ends = False
                     for call in calls:
                         log.info("realtime tool call %s(%s)", call.name, call.arguments)
                         if stop():
                             raise _Stopped
-                        output = _speech_friendly(executor(call.name, call.arguments))
+                        result = executor(call.name, call.arguments)
+                        ends = ends or isinstance(result, EndReply)
                         session.send({"type": "conversation.item.create", "item": {
-                            "type": "function_call_output", "call_id": call.call_id, "output": output}})
+                            "type": "function_call_output", "call_id": call.call_id,
+                            "output": _speech_friendly(result)}})
                     calls = []
                     if stop():  # don't ask the model to continue after the user or the app stopped
                         raise _Stopped
+                    if ends:
+                        # An `EndReply` in the round ends the reply here. The round's other calls ran and were
+                        # recorded (the executor does that), but their results are not spoken: the model is not asked
+                        # to continue. The reply has only the audio before the call, usually none, by design.
+                        break
                     # after the first round, let the model chain; at the cap, force the answer
                     _create_response(session, "auto" if rounds < MAX_TOOL_ROUNDS else "none")
     except _Stopped:

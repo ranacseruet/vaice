@@ -12,6 +12,7 @@ import statistics
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import wave
 from collections.abc import Sequence
@@ -25,6 +26,7 @@ import scoring
 
 from vaice import browse_task, config
 from vaice.assistant import Assistant
+from vaice.browse import BrowseStopped
 from vaice.conversation import WAITING_FOR_CONFIRMATION, Turn
 from vaice.memory import Memory
 from vaice.skills import Skill, SkillResult, Skills, default_skills
@@ -77,6 +79,8 @@ def vision_stub(args: dict) -> str:
 VISION_STUBS = {"look_at_screen": vision_stub}
 BROWSER_STATUS_STUB = "the browser task is running: open python.org; it has run for 20 seconds; now on python.org"
 TRANSCRIPT_WAIT = 5.0  # the transcript is reported by a parallel session, maybe after the reply; wait this long
+BROWSE_THREAD = "vaice-assistant-browse"  # the name `Assistant._start_browse` gives the task's thread
+BROWSE_JOIN_SECONDS = 10.0  # for the task thread to end once it was stopped
 
 
 def fail(message: str) -> None:
@@ -177,11 +181,38 @@ def case_memory(case: dict) -> Memory:
     return memory
 
 
+class HoldingBrowseAgent:
+    """A `BrowseAgent` whose task works until it is stopped, so that `Assistant._start_browse` starts a task as in the
+    app (the reply ends with the call, nothing is run: no browser, no network) and the task never produces an outcome
+    event of its own while the run is read."""
+
+    def run(self, goal, *, stop, on_progress, on_ask, deadline_s, on_text=None) -> str:
+        while not stop():
+            time.sleep(0.05)
+        raise BrowseStopped
+
+    def close(self) -> None:
+        pass
+
+
+def end_browser_task(responder: Assistant) -> None:
+    """Stop the task a run started (when it did) and wait for its thread."""
+    responder.stop_task()
+    for thread in threading.enumerate():
+        if thread.name == BROWSE_THREAD:
+            thread.join(BROWSE_JOIN_SECONDS)
+
+
 def run_case(url: str, prompt: str, skills: Skills, memory: Memory | None, audio, history) -> dict:
     """One reply: the audio through `Assistant`, timed to the first audio, with the calls read back from
     the turn's tool events. `pending`: the run ended in a request for the Run button or a browser task, whose spoken
-    answer is the model's wording of that, not an answer to the question."""
-    responder = Assistant(url=url, prompt=prompt, skills=skills, memory=memory)
+    answer is the model's wording of that, not an answer to the question. `browse_start`: the reply ended in a started
+    browser task (the call returned `WORKING`): it has no reply audio by design, since the reply ends with the call
+    (vaice says the fixed sentence afterwards, through the outbox: none here), so such runs are counted apart from the
+    audio and latency numbers. With `browse` offered, the task runs on a fake agent that works until it is stopped,
+    which happens after the calls were read: the outcome event is never among them."""
+    agent = HoldingBrowseAgent() if "browse" in skills.names else None
+    responder = Assistant(url=url, prompt=prompt, skills=skills, memory=memory, browse=agent)
     turn = Turn()
     record: dict = {"error": None}
     first = None
@@ -197,10 +228,12 @@ def run_case(url: str, prompt: str, skills: Skills, memory: Memory | None, audio
     total = time.perf_counter() - start
     turn.finish()
     turn.transcribed.wait(TRANSCRIPT_WAIT)  # keeps the transcription session out of the next run
-    events = list(turn.tool_events)
+    events = list(turn.tool_events)  # before the task is stopped: its `stopped` event is not a call
+    end_browser_task(responder)
     record.update(
         calls=[[event["name"], event["arguments"]] for event in events],
         pending=any(event["output"] in (WAITING_FOR_CONFIRMATION, browse_task.WORKING) for event in events),
+        browse_start=any(event["output"] == browse_task.WORKING for event in events),
         first_audio_s=first, total_s=total, audio_s=seconds, latency_s=first, answer=turn.assistant_text,
         transcript=turn.user_text)
     return record
@@ -279,7 +312,8 @@ def fmt(seconds: float | None) -> str:
 
 def print_summary(runs: list[dict], case_ids: list[str]) -> dict:
     agg = scoring.aggregate(runs)
-    audio = [r["audio_s"] for r in runs if not r["error"]]
+    # a run that ended in a browser start has no reply audio by design: it is not a silent reply and has no latency
+    audio = [r["audio_s"] for r in runs if not r["error"] and not r.get("browse_start")]
     agg["audio_median_s"] = statistics.median(audio) if audio else None
     agg["silent"] = sum(1 for seconds in audio if seconds < SILENT_SECONDS)
     print(f"\n== {agg['runs']} runs ==")
@@ -289,6 +323,9 @@ def print_summary(runs: list[dict], case_ids: list[str]) -> dict:
           "twice; also counted above)")
     print(f"  time to first audio: median {fmt(agg['latency_median_s'])}, max {fmt(agg['latency_max_s'])}")
     print(f"  audio per reply: median {fmt(agg['audio_median_s'])}; under {SILENT_SECONDS:g} s: {agg['silent']}")
+    if agg["browse_starts"]:
+        print(f"  browser starts: {agg['browse_starts']} (no reply audio by design: left out of the audio, "
+              "silent and latency numbers above)")
     for label, key in (("answer faithful", "answer_faithful"), ("command ok", "command_ok")):
         if key in agg:  # only when a case asked for it; apart from the verdicts above
             print(f"  {label} {agg[key]['ok']}/{agg[key]['of']}")

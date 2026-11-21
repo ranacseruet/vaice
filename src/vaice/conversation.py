@@ -3,6 +3,7 @@ import contextlib
 import json
 import logging
 import os
+import re
 import tempfile
 import threading
 import time
@@ -25,6 +26,13 @@ _VERSION = 1
 # conversation.json. The cap is idempotent: re-applying it to an already-capped value changes nothing.
 TOOL_EVENT_OUTPUT_CHARS = 800
 _TRUNCATED = "... (truncated)"
+# A browser task's whole report, as the chat shows it (and conversation.json keeps it); the model never reads it
+REPORT_CHARS = 12000
+REPORT_HEADING = "**From the browser task:**"
+# A markdown image, inline (`![alt](url "title")`) or by reference (`![alt][ref]`, `![alt]`): the report is
+# page-steerable text and an image in it would load from a remote address in the UI
+_IMAGE = re.compile(
+    r"!\[([^\]]*)\](?:\(\s*(?:<[^<>\n]*>|(?:[^()\s]|\([^()]*\))*)(?:\s+(?:\"[^\"]*\"|'[^']*'))?\s*\)|\[[^\]]*\])?")
 # The output recorded for a call that asked the user first; its result is recorded as a second event (the Run click)
 WAITING_FOR_CONFIRMATION = "waiting for confirmation"
 
@@ -33,6 +41,11 @@ def _cap(text: str, limit: int) -> str:
     if len(text) <= limit or len(_TRUNCATED) >= limit:
         return text
     return text[: limit - len(_TRUNCATED)].rstrip() + _TRUNCATED
+
+
+def _without_images(text: str) -> str:
+    """`text` with each markdown image replaced by its alt text (links stay)."""
+    return _IMAGE.sub(r"\1", text)
 
 
 def write_json_atomically(path: Path, data) -> None:
@@ -75,6 +88,7 @@ class Turn:
         self.user_text: str | None = None  # None until transcribed
         self.assistant_text = ""  # cumulative "spoken so far"
         self.tool_events: list[dict] = []  # {"name", "arguments", "output"} per tool call, in order
+        self.reports: list[str] = []  # what a browser task answered, whole (capped): shown in the chat, never replayed
         self.error = ""  # why the reply failed, for the UI only; never sent to the model
         self.interrupted = False
         self.complete = False
@@ -118,6 +132,16 @@ class Turn:
         with self._lock:
             self.tool_events.append({"name": name, "arguments": arguments,
                                      "output": _cap(output, TOOL_EVENT_OUTPUT_CHARS)})
+            self._changed()
+
+    def add_report(self, text: str) -> None:
+        """A browser task's whole answer, for the chat (`Conversation.messages_for_ui`): the spoken outcome is only its
+        summary. Never part of the history the model gets (`to_messages`). Capped at `REPORT_CHARS`, with the same
+        marker as a tool output; a blank report is not added. Like the outcome speech, a closed turn takes it."""
+        if not text.strip():
+            return
+        with self._lock:
+            self.reports.append(_cap(text.strip(), REPORT_CHARS))
             self._changed()
 
     def audio_handed_out(self, seconds: float, now: float | None = None) -> None:
@@ -175,6 +199,7 @@ class Turn:
                 "user": self.user_text,
                 "assistant": self.assistant_text,
                 "tools": self.tool_events,
+                "reports": self.reports,
                 "error": self.error,
                 "interrupted": self.interrupted,
                 "complete": self.complete,
@@ -188,6 +213,7 @@ class Turn:
         turn.assistant_text = data["assistant"]
         turn.error = data.get("error", "")  # written by older versions without it
         turn.tool_events = list(data.get("tools", []))  # older versions wrote no tool events
+        turn.reports = list(data.get("reports", []))  # nor browser task reports
         turn.interrupted = bool(data["interrupted"]) or not data["complete"]
         turn.complete = True
         turn.closed.set()
@@ -299,6 +325,9 @@ class Conversation:
                     spoken = f"{spoken} (error: {turn.error})" if spoken else f"(error: {turn.error})"
                 if spoken:
                     messages.append({"role": "assistant", "content": spoken})
+                # a browser task's whole answer, apart from what was said of it
+                messages.extend({"role": "assistant", "content": f"{REPORT_HEADING}\n\n{_without_images(report)}"}
+                                for report in turn.reports)
             return messages
 
     def tool_activity_for_ui(self) -> str:

@@ -77,10 +77,19 @@ def outputs(conn):
             if e["type"] == "conversation.item.create" and e["item"]["type"] == "function_call_output"]
 
 
-def spoken_requests(server):
-    """The texts the assistant had a text-input session say (the outcome of a click, a browser task), in order."""
+STARTED_REQUEST = SAY.format(text=browse_task.STARTED)
+
+
+def all_spoken_requests(server):
+    """Every text the assistant had a text-input session say (a task's start, the outcome of a click or a task), in
+    the order the sessions began."""
     return [event["item"]["content"][0]["text"] for conn in sessions(server) for event in conn.events
             if event["type"] == "conversation.item.create" and event["item"].get("role") == "user"]
+
+
+def spoken_requests(server):
+    """`all_spoken_requests` without the sentence that announces a started browser task (see `STARTED_REQUEST`)."""
+    return [text for text in all_spoken_requests(server) if text != STARTED_REQUEST]
 
 
 def serve(outbox):
@@ -414,6 +423,7 @@ GOAL = '{"goal": "open python.org and tell me the page title"}'
 CLICK_STEP = ("mcp__chrome__click", '{"uid": "1_7"}')
 STEP_QUESTION = "The browser task wants to click something on python.org. The details are on the screen."
 BROWSE_ANSWER = "The page title is Welcome to Python.org."
+FINISHED = f"finished: {BROWSE_ANSWER}"  # the outcome row of the Tool activity panel
 
 
 class FakeAgent:
@@ -482,15 +492,18 @@ def end_browser_tasks():
     wait_until(browse_over)
 
 
-def browsing(realtime, script, outbox=True, **options):
+def browsing(realtime, script, outbox=True, speech=None, settle=True, **options):
     """A responder with the browse skills and a fake agent, driven through the reply in which the model calls
-    `browse`; later sessions (the outcome, a heads-up) speak `SPEECH`."""
-    server = realtime(reply=calls_then_speech(("browse", GOAL)))
+    `browse`; later sessions (the announcement, the outcome, a heads-up) speak `speech` (default `SPEECH`). The reply
+    ends with the call; vaice announces the task (`STARTED`) on a thread of its own, which `settle` waits for."""
+    server = realtime(reply=calls_then_speech(("browse", GOAL), speech=speech))
     agent = FakeAgent(script)
     resp = assistant_over(server, None, outbox=outbox, browse=agent, **options)
     BROWSERS.append(resp)
     s = SimpleNamespace(resp=resp, server=server, agent=agent, turn=Turn(), outbox=resp.outbox)
     s.frames = drive(resp, s.turn)
+    if settle:
+        wait_until(speech_over)
     return s
 
 
@@ -508,6 +521,7 @@ def test_browse_starts_the_task_in_the_background_and_the_reply_ends_while_it_ru
     s = browsing(realtime, holds(release))
 
     assert outputs(sessions(s.server)[0]) == [browse_task.WORKING]  # the model is told it works in the background
+    assert s.frames == [] and s.server.connections and sessions(s.server)[0].types.count("response.create") == 1
     assert s.agent.entered.wait(5) and s.agent.goals == ["open python.org and tell me the page title"]
     assert threads_named("vaice-assistant-browse") and s.resp.browsing()
     assert s.agent.deadline == 180.0
@@ -522,11 +536,81 @@ def test_the_outcome_is_spoken_through_the_outbox_and_recorded_on_the_asking_tur
 
     wait_until(browse_over)
 
-    assert ("browse", BROWSE_ANSWER) in tool_events(s.turn)
-    assert spoken_requests(s.server) == [REPORT.format(text=f"the browser task finished: {BROWSE_ANSWER}")]
-    spoken = s.turn.assistant_text
-    serve(s.outbox)  # the handler serves the frames, then the marker that records the words
-    assert s.turn.assistant_text == f"{spoken} All done.".strip()
+    assert tool_events(s.turn) == [("browse", browse_task.WORKING), ("browse", FINISHED)]  # the panel's two rows
+    assert all_spoken_requests(s.server) == [
+        STARTED_REQUEST, REPORT.format(text=f"the browser task finished: {BROWSE_ANSWER}")]  # in this order
+    assert s.turn.assistant_text == ""  # nothing was recorded before the handler served the audio
+    serve(s.outbox)  # the handler serves the frames, then the markers that record the words
+    assert s.turn.assistant_text == "All done. All done."  # the announcement, then the outcome
+
+
+def test_the_outcome_is_spoken_with_what_the_module_names_and_only_its_spoken_summary(realtime, monkeypatch):
+    monkeypatch.setattr(assistant, "OUTCOME", SAY)
+    report = "I now have it. Let me compile.\n\n---\n\n## Python\n\nThe title is **Welcome**."
+
+    def long_answer(agent, goal, stop, on_progress, on_ask, deadline_s):
+        return report
+
+    s = browsing(realtime, long_answer)
+    wait_until(browse_over)
+
+    assert spoken_requests(s.server) == [SAY.format(text="the browser task finished: Python The title is Welcome.")]
+    assert s.turn.reports == [report]  # the whole answer is for the chat
+    assert tool_events(s.turn)[-1] == ("browse", f"finished: {report}")  # the panel row says what it is
+
+
+def test_the_task_says_it_started_once_and_before_its_outcome_even_when_the_task_is_quicker(realtime, monkeypatch):
+    log, release, first_in = [], threading.Event(), threading.Event()
+
+    def fake_speak(url, timeout, max_tokens, outbox, turn, request, stop, generation):
+        log.append(("begin", request))
+        if request == STARTED_REQUEST:
+            first_in.set()
+            release.wait(5)
+        log.append(("end", request))
+
+    monkeypatch.setattr(assistant, "speak", fake_speak)
+    s = browsing(realtime, answers, settle=False)  # the agent answers at once; the announcement is still being said
+    assert first_in.wait(3)
+    time.sleep(0.2)
+
+    assert log == [("begin", STARTED_REQUEST)]  # the outcome waits for it
+    assert threads_named("vaice-assistant-browse")
+    release.set()
+    wait_until(browse_over)
+    outcome = REPORT.format(text=f"the browser task finished: {BROWSE_ANSWER}")
+    assert log == [("begin", STARTED_REQUEST), ("end", STARTED_REQUEST), ("begin", outcome), ("end", outcome)]
+    assert s.turn.reports == [BROWSE_ANSWER]
+
+
+def test_a_clear_drops_the_announcement_and_the_task_goes_on(realtime):
+    gate = threading.Event()
+    release = threading.Event()
+    s = browsing(realtime, holds(release), speech=[("wait", gate), *SPEECH], settle=False)
+    wait_until(lambda: all_spoken_requests(s.server) == [STARTED_REQUEST])
+
+    s.outbox.clear()  # the user spoke while the announcement was being made
+    gate.set()
+    wait_until(speech_over)
+
+    assert serve(s.outbox) == [] and s.turn.assistant_text == ""  # its frames were refused: nothing was queued
+    assert s.resp.browsing()  # a new utterance does not stop the task
+    release.set()
+    wait_until(browse_over)
+
+
+def test_stopping_the_task_before_the_announcement_was_made_drops_it_quietly(realtime):
+    gate = threading.Event()
+    s = browsing(realtime, holds(threading.Event()), speech=[("wait", gate), *SPEECH], settle=False)
+    wait_until(lambda: all_spoken_requests(s.server) == [STARTED_REQUEST])
+
+    assert s.resp.stop_task() is True
+    gate.set()
+    wait_until(browse_over)
+    wait_until(speech_over)
+
+    assert serve(s.outbox) == [] and s.turn.assistant_text == ""
+    assert spoken_requests(s.server) == []
 
 
 def test_the_tools_a_task_uses_are_kept_for_the_status_and_never_spoken(realtime):
@@ -618,7 +702,7 @@ def test_a_new_utterance_does_not_stop_the_task(realtime):
     assert s.resp.browsing() and not s.agent.stops[0]()
     release.set()
     wait_until(browse_over)
-    assert ("browse", BROWSE_ANSWER) in tool_events(s.turn)  # still reported on the turn that asked
+    assert ("browse", FINISHED) in tool_events(s.turn)  # still reported on the turn that asked
 
 
 def test_a_second_browse_while_one_runs_is_refused_and_starts_nothing(realtime):
@@ -676,7 +760,7 @@ def test_without_an_outbox_the_task_still_runs_and_records_and_a_step_is_answera
     assert s.resp.approve(s.resp.pending().id) == "go ahead"
     wait_until(browse_over)
 
-    assert ("browse", BROWSE_ANSWER) in tool_events(s.turn)
+    assert ("browse", FINISHED) in tool_events(s.turn)
     assert spoken_requests(s.server) == []  # nothing to say it through
 
 
@@ -690,6 +774,119 @@ def test_a_click_cannot_answer_a_step_twice(realtime):
 
     assert results.count("go ahead") == 1 and results.count(None) == 1
     wait_until(browse_over)
+
+
+# -- the executor of a call that starts a task: the reply ends only when one started
+
+
+def browse_executor(started=True, busy=None):
+    """An `_Executor` over the real `browse` skill and a `start_browse` that records its calls and answers `started`;
+    `busy` is the skill's busy check (default: busy once a task was started, like the assistant's)."""
+    began = []
+
+    def start(turn, name, arguments, epoch):
+        began.append((name, arguments))
+        return started
+
+    skills = Skills([browse_task.browse_skill(busy or (lambda: bool(began) and started))])
+    turn = Turn()
+    return assistant._Executor(skills, Confirmations(), start, turn, lambda: False), began, turn
+
+
+def test_a_started_task_ends_the_reply_and_a_task_that_did_not_start_lets_the_model_answer():
+    executor, began, turn = browse_executor(started=True)
+    result = executor("browse", GOAL)
+    assert isinstance(result, rt.EndReply) and result == browse_task.WORKING
+    assert began == [("browse", GOAL)] and tool_events(turn) == [("browse", browse_task.WORKING)]
+
+    # no agent, a stale epoch or the app stopping: `_start_browse` says no, and the result is an ordinary one
+    executor, began, turn = browse_executor(started=False)
+    result = executor("browse", GOAL)
+    assert type(result) is str and result == browse_task.WORKING
+    assert tool_events(turn) == [("browse", browse_task.WORKING)]
+
+
+def test_the_same_goal_again_in_one_reply_is_the_same_task_and_a_different_goal_is_refused():
+    executor, began, turn = browse_executor()
+    executor("browse", GOAL)
+
+    again = executor("browse", '{"goal": "  Open   PYTHON.org and tell me the PAGE title "}')
+    assert isinstance(again, rt.EndReply) and again == browse_task.WORKING
+    assert len(began) == 1 and len(turn.tool_events) == 1  # nothing started, nothing recorded
+
+    other = executor("browse", '{"goal": "something else"}')
+    assert type(other) is str and other.endswith(browse_task.BUSY) and len(began) == 1
+    assert tool_events(turn)[-1] == ("browse", other)  # a refusal is recorded like any result
+
+    # another reply (another executor) is no repeat: it is refused by the busy check, not by this
+    fresh, began2, _ = browse_executor(busy=lambda: True)
+    assert fresh("browse", GOAL).endswith(browse_task.BUSY) and began2 == []
+
+
+def test_a_failed_first_call_does_not_make_the_next_one_a_repeat():
+    executor, began, _ = browse_executor(started=False, busy=lambda: False)
+    executor("browse", GOAL)
+    executor("browse", GOAL)
+
+    assert len(began) == 2
+
+
+def test_start_browse_says_whether_a_task_started(realtime):
+    server = realtime(reply=SPEECH)
+    resp = assistant_over(server, None, browse=FakeAgent(answers))
+    BROWSERS.append(resp)
+    began = resp._confirmations.epoch
+    assert resp._start_browse(Turn(), "browse", GOAL, began) is True
+    wait_until(browse_over)
+
+    resp.clear_pending()
+    assert resp._start_browse(Turn(), "browse", GOAL, began) is False  # "New conversation" came since
+
+    lifecycle.stopping.set()
+    assert resp._start_browse(Turn(), "browse", GOAL, resp._confirmations.epoch) is False
+    lifecycle.stopping.clear()
+
+    without = Assistant("http://h", skills=Skills([browse_task.browse_skill()]))
+    assert without._start_browse(Turn(), "browse", GOAL, without._confirmations.epoch) is False  # no agent
+
+
+def test_without_an_agent_the_model_reads_the_result_and_answers(realtime):
+    server = realtime(reply=calls_then_speech(("browse", GOAL)))
+    resp = assistant_over(server, Skills([browse_task.browse_skill()]))
+
+    frames = drive(resp, Turn())
+
+    assert len(frames) == 1 and sessions(server)[0].types.count("response.create") == 2  # it continued, as before
+    assert all_spoken_requests(server) == []  # and nothing was announced
+
+
+def test_a_stale_reply_that_asks_for_a_task_after_new_conversation_continues_and_starts_nothing(realtime):
+    started = threading.Event()
+    release = threading.Event()
+    agent = FakeAgent(answers)
+    skills = Skills([browse_task.browse_skill()])
+    server = realtime(reply=calls_then_speech(("browse", GOAL)))
+    resp = assistant_over(server, skills, browse=agent)
+    BROWSERS.append(resp)
+    original = resp.skills.prepare
+
+    def slow_prepare(name, arguments):  # "New conversation" arrives while the call is being prepared
+        started.set()
+        release.wait(5)
+        return original(name, arguments)
+
+    resp.skills.prepare = slow_prepare
+    turn = Turn()
+    reply = threading.Thread(target=drive, args=(resp, turn), daemon=True)
+    reply.start()
+    assert started.wait(3)
+    resp.clear_pending()
+    release.set()
+    reply.join(5)
+
+    assert not agent.entered.wait(0.2) and not resp.browsing()
+    assert sessions(server)[0].types.count("response.create") == 2  # it was a plain result: the model answered
+    assert all_spoken_requests(server) == []
 
 
 # -- "New conversation" while a reply is still preparing a call, and one utterance at a time

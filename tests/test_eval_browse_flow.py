@@ -10,8 +10,10 @@ import pytest
 import run as eval_run
 from fake_realtime import pcm
 
+from vaice import assistant as vaice_assistant
 from vaice import browse_task
 from vaice.browse import BrowseStopped
+from vaice.conversation import Turn
 from vaice.outbox import Outbox
 from vaice.skills import SkillResult
 
@@ -299,6 +301,7 @@ def test_the_defaults():
     args = browse_flow.parse_args([])
     assert (args.repeats, args.task_seconds, args.vision, args.cases, args.prompt, args.label, args.out) == (
         3, 8.0, False, None, None, "", None)
+    assert args.outcome == "report"  # the app's own wording
     assert args.url == eval_run.config.LLAMACPP_URL
 
 
@@ -307,6 +310,29 @@ def test_the_options():
                                    "--prompt", "p", "--label", "L", "--out", "x.json", "--url", "http://h:1"])
     assert (args.repeats, args.cases, args.task_seconds, args.vision, args.prompt, args.label, str(args.out),
             args.url) == (1, "a,b", 2.5, True, "p", "L", "x.json", "http://h:1")
+
+
+def test_the_outcome_wording_is_report_or_say():
+    assert browse_flow.parse_args(["--outcome", "say"]).outcome == "say"
+    assert browse_flow.parse_args(["--outcome", "report"]).outcome == "report"
+    with pytest.raises(SystemExit):
+        browse_flow.parse_args(["--outcome", "shout"])
+
+
+def test_the_outcome_wording_patches_what_the_assistant_speaks_with_and_restores_it():
+    before = vaice_assistant.OUTCOME
+    assert before == vaice_assistant.REPORT  # the app's default
+
+    with browse_flow.outcome_wording("say"):
+        assert vaice_assistant.OUTCOME == vaice_assistant.SAY
+        with browse_flow.outcome_wording("report"):
+            assert vaice_assistant.OUTCOME == vaice_assistant.REPORT
+        assert vaice_assistant.OUTCOME == vaice_assistant.SAY
+    assert before == vaice_assistant.OUTCOME
+
+    with pytest.raises(RuntimeError), browse_flow.outcome_wording("say"):
+        raise RuntimeError
+    assert before == vaice_assistant.OUTCOME  # restored when the block fails too
 
 
 @pytest.mark.parametrize("bad", [["--repeats", "0"], ["--task-seconds", "0"], ["--task-seconds", "-1"]])
@@ -355,10 +381,11 @@ CASE = {"id": "coffee", "say": "Research coffee makers.", "fixture": "coffee",
         "followup": {"say": "What did you find?", "when": "finished"}}
 
 
-def test_a_whole_finished_run_records_the_start_the_outcome_the_chat_and_the_follow_up(realtime, quick):
+def test_a_whole_finished_run_records_the_start_the_announcement_the_outcome_the_chat_and_the_follow_up(
+        realtime, quick):
     server = realtime(reply=[
-        a_call("browse", '{"goal": "research coffee makers"}'),  # the request: a call ...
-        a_reply("I'll look into it."),                          # ... and its words after the result
+        a_call("browse", '{"goal": "research coffee makers"}'),  # the request: a call, and the reply ends there
+        a_reply("I'm working on it."),                          # the announcement vaice makes
         a_reply("The Ninja is the pick."),                      # the outcome, spoken by the task
         a_reply("I found the Ninja."),                          # the follow-up
     ])
@@ -366,25 +393,26 @@ def test_a_whole_finished_run_records_the_start_the_outcome_the_chat_and_the_fol
 
     assert result["errors"] == []
     start, outcome, follow = result["start"], result["outcome"], result["followup"]
-    assert [call[0] for call in start["calls"]] == ["browse"] and start["text"] == "I'll look into it."
-    assert start["first_audio_s"] is not None and start["audio_s"] > 0
-    assert outcome["text"] == "The Ninja is the pick." and outcome["first_audio_s"] is not None
+    assert [call[0] for call in start["calls"]] == ["browse"]
+    assert start["text"] == "" and start["first_audio_s"] is None and start["audio_s"] == 0  # no reply audio
+    assert outcome["text"] == "The Ninja is the pick." and outcome["first_audio_s"] is not None  # not the announcement
     assert follow["text"] == "I found the Ninja." and follow["calls"] == [] and not follow["task_running"]
     assert result["agent_runs"] == 1 and result["agent_goals"] == ["research coffee makers"]
-    # the chat shows the request's answer with the spoken outcome after it, not the report
+    # the chat shows the announcement and the spoken outcome, then the whole report as its own message
     assistant = [m["content"] for m in result["ui"] if m["role"] == "assistant"]
-    assert assistant == ["I'll look into it. The Ninja is the pick.", "I found the Ninja."]
-    assert [a["turn"] for a in result["appended"]] == [0]
+    assert assistant == ["I'm working on it. The Ninja is the pick.",
+                         f"**From the browser task:**\n\n{FIXTURE['answer'].strip()}", "I found the Ninja."]
+    assert [a["turn"] for a in result["appended"]] == [0, 0]
     score = result["score"]
     assert score["start_browse"] and not score["start_invented"] and score["outcome_named"]
-    assert not score["chat_report"] and not score["followup_rebrowse"] and score["followup_named"]
+    assert score["chat_report"] and not score["followup_rebrowse"] and score["followup_named"]
     assert not any(t.name == browse_flow.BROWSE_THREAD for t in threading.enumerate())
 
 
 def test_a_running_follow_up_asks_for_the_status_while_the_task_is_held_and_the_outcome_follows(realtime, quick):
     server = realtime(reply=[
         a_call("browse", '{"goal": "research coffee makers"}'),
-        a_reply("I'll look into it."),
+        a_reply("I'm working on it."),
         a_call("browser_status"),
         a_reply("It is searching."),
         a_reply("The Ninja is the pick."),
@@ -434,3 +462,62 @@ def test_the_summary_prints_every_case_and_the_overall_row(capsys):
     assert "2 runs, 0 with errors" in out and "one" in out and "two" in out and "all" in out
     assert summary["overall"]["flags"]["start_browse"] == [2, 2]
     assert json.dumps(summary)  # JSON-serializable as written to the results file
+
+
+def test_the_outcome_is_the_entry_after_the_announcement_and_none_when_only_the_announcement_was_recorded():
+    flow = browse_flow.FlowRun("http://127.0.0.1:1", "prompt", FIXTURE, vision=False, task_seconds=0.1, hold=False)
+    try:
+        flow.turns.append(Turn())
+        flow.began = 100.0
+        flow.appended = [{"turn": 0, "t": 1.0, "text": "I'm working on it."}]
+        assert flow.outcome() is None  # the agent has not finished
+        flow.agent.finished_at = 108.0
+        assert flow.outcome() is None and not flow._is_outcome_recorded(107.0)  # one entry, before the finish
+        assert flow._is_outcome_recorded(108.5)  # one entry after it: that is the outcome
+        flow.appended.append({"turn": 0, "t": 9.0, "text": "The Ninja."})
+        assert flow.outcome()["text"] == "The Ninja." and flow.outcome()["recorded_s"] == 9.0
+        assert flow._is_outcome_recorded(0.0)  # two entries: the second is the outcome, whenever
+        flow.appended[:] = [{"turn": 1, "t": 9.0, "text": "a follow-up's"}]
+        assert flow.outcome() is None  # only the first turn's speech counts
+    finally:
+        flow.finish()
+
+
+def test_the_listener_waits_for_the_announcement_and_stops_waiting_when_none_is_coming(monkeypatch):
+    monkeypatch.setattr(browse_flow, "GIVE_UP_AFTER", 0.1)
+    flow = browse_flow.FlowRun("http://127.0.0.1:1", "prompt", FIXTURE, vision=False, task_seconds=0.1, hold=False)
+    try:
+        started = time.monotonic()
+        flow.wait_for_announcement()  # no task, no speech, nothing queued
+        assert time.monotonic() - started < 3
+
+        def speaking():  # the announcement is being said: its record comes later
+            time.sleep(0.3)
+            flow.appended.append({"turn": 0, "t": 1.0, "text": "I'm working on it."})
+
+        threading.Thread(target=speaking, name=browse_flow.SPEECH_THREAD).start()
+        started = time.monotonic()
+        flow.wait_for_announcement()
+        assert 0.2 < time.monotonic() - started < 3
+    finally:
+        flow.finish()
+
+
+def test_main_speaks_the_outcomes_with_the_chosen_wording_and_records_it(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(eval_run, "server_info", lambda url: {"url": url})
+    monkeypatch.setattr(eval_run, "audio_for", lambda case, scratch: AUDIO)
+    seen = []
+
+    def run_flow(url, prompt, case, fixture, audio, followup_audio, **kwargs):
+        seen.append(vaice_assistant.OUTCOME)
+        return {"errors": [], "score": browse_flow.score_run(record(), FIXTURE)}
+
+    monkeypatch.setattr(browse_flow, "run_flow", run_flow)
+    out = tmp_path / "out.json"
+
+    browse_flow.main(["--repeats", "1", "--cases", "coffee-real", "--outcome", "say", "--out", str(out)])
+    browse_flow.main(["--repeats", "1", "--cases", "coffee-real", "--out", str(out)])
+
+    assert seen == [vaice_assistant.SAY, vaice_assistant.REPORT]
+    assert vaice_assistant.OUTCOME == vaice_assistant.REPORT  # restored
+    assert json.loads(out.read_text())["config"]["outcome"] == "report"

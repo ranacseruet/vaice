@@ -8,8 +8,10 @@ the model reads. A skill that cannot be undone (`kind="confirm"`) does not run w
 one request in `confirm.Confirmations`, on the screen at once, and the model is told that only the Run button runs it.
 Run executes the stored call and the outcome is spoken through the `Outbox` that the handler's idle emit() serves, by a
 session whose input is a text message (`realtime.speak`); Cancel only drops the request. The `browse` skill
-(`VAICE_BROWSE`) is a task that outlives the reply: the call returns at once, a browser agent works on a daemon thread
-(`_browse`), says nothing until a step needs the Run button or it has finished, and its outcome is spoken the same way.
+(`VAICE_BROWSE`) is a task that outlives the reply: the call returns at once and ends the reply (`realtime.EndReply`:
+the model's continuation made up results), vaice itself says `browse_task.STARTED`, a browser agent works on a daemon
+thread (`_browse`), says nothing until a step needs the Run button or it has finished, and its outcome is spoken the
+same way, after `STARTED`: the spoken summary of its answer in the model's words, with the whole report in the chat.
 A new utterance does not stop it: `browser_status` / `stop_browsing` and the Stop button are how the user asks about it
 and ends it.
 """
@@ -27,7 +29,7 @@ from vaice.confirm import Confirmations, Pending, Waiter
 from vaice.conversation import WAITING_FOR_CONFIRMATION, Message, Turn
 from vaice.memory import REFUSED_AFTER_TOOL, Memory
 from vaice.outbox import Outbox
-from vaice.realtime import RealtimeResponder, speak
+from vaice.realtime import EndReply, RealtimeResponder, speak
 from vaice.skills import Question, Skill, SkillResult, Skills, Started, default_skills
 
 log = logging.getLogger(__name__)
@@ -39,10 +41,12 @@ WAITING = ("not done yet: the request is shown on the screen and only the Run bu
            "Tell the user to press Run on the screen if they want it.")
 SAY = "Say this to the user: {text}"  # a fixed sentence, as it is
 REPORT = "Tell the user in one or two short sentences: {text}"  # an outcome, in the model's words
+OUTCOME = REPORT  # what a browser task's outcome is spoken with (`REPORT` or `SAY`; `evals/browse_flow.py --outcome`)
 # A Run click's outcome. Probed on Omni Q8_0 (one run per wording, 5 results): REPORT turned "quit Calculator" into
 # "Sure, here's your request: quit Calculator." and invented advice on a failure; this one said what happened
 APPROVED = "The approved action is finished. Result: {text}. In one short sentence, tell the user what happened."
 APPROVAL = "{question} Press Run to allow it, or Cancel."  # the heads-up of a browser step that needs the button
+FINISHED = "finished: "  # starts the outcome row of the Tool activity panel (the start row says `WORKING`)
 # What the model reads when "New conversation" came while its call was being prepared: no request was made
 DROPPED = "not done: the conversation was started over, so nothing was asked"
 
@@ -59,16 +63,22 @@ class _Executor:
 
     A `direct_only` skill (`remember`) is refused once any other skill was called earlier in this reply: what the
     user dictates never needs a tool first, so a call after one acts on what a tool reported (a file name, a page,
-    a command's output). It runs nothing and its result says so."""
+    a command's output). It runs nothing and its result says so.
+
+    A `background` call that started a task returns an `EndReply`: the reply ends there, the model says nothing more
+    (it would make up the results of work that has only begun; vaice says `browse_task.STARTED` itself). The same call
+    again in the same reply (the same goal) is the same task: started once, recorded once. A call that did not start
+    one (no agent, "New conversation" came since) returns plainly and the model answers."""
 
     def __init__(self, skills: Skills, confirmations: Confirmations,
-                 start_browse: Callable[[Turn, str, str, int], None], turn: Turn, stop: Callable[[], bool]):
+                 start_browse: Callable[[Turn, str, str, int], bool], turn: Turn, stop: Callable[[], bool]):
         self._skills, self._confirmations, self._start_browse = skills, confirmations, start_browse
         self._turn, self._stop = turn, stop
         # "New conversation" after this reply began (a `clear`) refuses its request and its browser task: the reply
         # may still be preparing a call (`quit_app` asks `lsappinfo`) when the user starts over
         self._epoch = confirmations.epoch
         self._tainted = False  # a skill other than a `direct_only` one was called in this reply
+        self._started: tuple[str, str] | None = None  # the task this reply started: (skill name, its goal, compared)
 
     def __call__(self, name: str, arguments: str) -> str:
         log.info("assistant skill %s(%s)", name, arguments)
@@ -78,6 +88,8 @@ class _Executor:
                 return self._record(name, arguments, SkillResult(REFUSED_AFTER_TOOL))
             return self._record(name, arguments, self._skills.run(name, arguments, self._stop))
         self._tainted = True
+        if self._started and self._started[0] == name and self._started[1] == self._goal_key(arguments):
+            return EndReply(browse_task.WORKING)  # the model asked twice: nothing more to start or record
         prepared = self._skills.prepare(name, arguments)
         if isinstance(prepared, Question):
             if not self._confirmations.ask(Pending(name, arguments, prepared.text, self._turn), self._epoch):
@@ -86,11 +98,19 @@ class _Executor:
             self._turn.add_tool_event(name, arguments, WAITING_FOR_CONFIRMATION)
             return WAITING
         if isinstance(prepared, Started):
-            self._start_browse(self._turn, name, arguments, self._epoch)
-            return self._record(name, arguments, SkillResult(prepared.text))
+            result = self._record(name, arguments, SkillResult(prepared.text))
+            if not self._start_browse(self._turn, name, arguments, self._epoch):
+                return result
+            self._started = (name, self._goal_key(arguments))
+            return EndReply(result)
         if prepared is None:
             prepared = self._skills.run(name, arguments, self._stop)
         return self._record(name, arguments, prepared)
+
+    @staticmethod
+    def _goal_key(arguments: str) -> str:
+        """A call's goal for the comparison of two calls: whitespace-normalised, case ignored."""
+        return " ".join(browse_task.goal_of(arguments).split()).casefold()
 
     def _record(self, name: str, arguments: str, result: SkillResult) -> str:
         self._turn.add_tool_event(name, arguments, result.detail or result.speech)
@@ -168,9 +188,11 @@ def _browse(agent: BrowseAgent, confirmations: Confirmations, turn: Turn, name: 
             say: Callable[[str, Callable[[], bool]], None], done: Callable[[], None], epoch: int) -> None:
     """Daemon thread: a `browse` task, started by the reply whose call returned `WORKING`. The agent works for at most
     `seconds`, quietly (`_BrowseHooks`); a new utterance does not stop it. Every end is recorded on the asking turn,
-    however many turns came since, and spoken once through `say(request, stop)`: the answer in the model's words, a
+    however many turns came since, and spoken once through `say(request, stop)`: the answer's spoken summary in the
+    model's words (`OUTCOME`), a
     refusal or a failure as its fixed sentence, a stop (the Stop button, `stop_browsing`, "New conversation", the app
-    ending) quietly. Takes only plain data, never the responder; `done` runs last, whatever happened."""
+    ending) quietly. Takes only plain data, never the responder; `done` runs last, whatever happened. The whole answer
+    is also a report on the asking turn (the chat shows it)."""
 
     def stop() -> bool:
         return cancelled.is_set() or lifecycle.stopping.is_set()
@@ -199,8 +221,9 @@ def _browse(agent: BrowseAgent, confirmations: Confirmations, turn: Turn, name: 
             status.end()  # the agent is done: not "running" any more, so a new `browse` call is no clash
         log.info("browse finished in %.1fs", time.monotonic() - begun)
         result = browse_task.result_of(answer)
-        turn.add_tool_event(name, arguments, result.detail or result.speech)
-        say(REPORT.format(text=result.speech), stop)
+        turn.add_report(answer)
+        turn.add_tool_event(name, arguments, f"{FINISHED}{result.detail or result.speech}")
+        say(OUTCOME.format(text=result.speech), stop)
     finally:
         done()
 
@@ -333,25 +356,45 @@ class Assistant:
 
     # The browser task: one at a time, with a registration of its own; an utterance does not touch it.
 
-    def _start_browse(self, turn: Turn, name: str, arguments: str, epoch: int) -> None:
+    def _start_browse(self, turn: Turn, name: str, arguments: str, epoch: int) -> bool:
         """Start the `browse` task the model's call asked for (`turn` asked; a call while one runs was refused
-        before this, see `browse_task.browse_skill`). An earlier task whose agent is done but whose outcome is still
-        being spoken is cancelled: the newest wins. Nothing starts when "New conversation" came since the asking
-        reply began (`epoch`, see `_Executor`)."""
+        before this, see `browse_task.browse_skill`); whether it started. An earlier task whose agent is done but whose
+        outcome is still being spoken is cancelled: the newest wins. Nothing starts without an agent, when "New
+        conversation" came since the asking reply began (`epoch`, see `_Executor`) or when the app is stopping.
+
+        The reply ends with the call, so vaice says `browse_task.STARTED` itself, on a daemon thread, and everything
+        else the task says (a step's heads-up, the outcome) waits until that was spoken or dropped: a clear (the user
+        spoke, "New conversation", Stop) drops it like any speech, and the order is the same either way."""
         if self._browse_agent is None:
-            return
+            return False
         cancelled = threading.Event()
         status = browse_task.BrowseStatus(browse_task.goal_of(arguments))
         with self._task_lock:
             if lifecycle.stopping.is_set() or epoch != self._confirmations.epoch:
-                return
+                return False
             if self._browse is not None:
                 self._browse.cancelled.set()
             run = self._browse = _BrowseRun(cancelled, status)
+        announced = threading.Event()  # `STARTED` was spoken or dropped
+
+        def ended() -> bool:
+            return cancelled.is_set() or lifecycle.stopping.is_set()
+
+        def generation() -> int | None:
+            return self._outbox.generation if self._outbox is not None else None
+
+        def announce(taken: int | None) -> None:
+            try:
+                self._say(turn, SAY.format(text=browse_task.STARTED), ended, taken)
+            finally:
+                announced.set()
 
         def say(request: str, stop: Callable[[], bool]) -> None:
-            self._say(turn, request, stop)
+            taken = generation()  # before the wait, as in `_say`: a clear while waiting still cancels it
+            announced.wait()
+            self._say(turn, request, stop, taken)
 
+        threading.Thread(target=announce, args=(generation(),), name="vaice-assistant-speech", daemon=True).start()
         threading.Thread(
             target=_browse,
             args=(self._browse_agent, self._confirmations, turn, name, arguments, self._browse_seconds, cancelled,
@@ -359,6 +402,7 @@ class Assistant:
             name="vaice-assistant-browse",
             daemon=True,
         ).start()
+        return True
 
     def _browse_done(self, run: _BrowseRun) -> None:
         with self._task_lock:

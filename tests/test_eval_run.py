@@ -1,5 +1,6 @@
 """The eval harness's one path: argument handling, the stub skills and `run_case` against a fake realtime server."""
 import json
+import threading
 
 import pytest
 import run as eval_run
@@ -9,6 +10,7 @@ from vaice.skills import Question, default_skills
 
 AUDIO = (16000, pcm(1, 2, 3).reshape(1, -1))
 NADIA = "The user's sister is called Nadia."
+SPOKEN = [("text", "Sorry."), ("audio", pcm(1, 2, 3, 4)), ("done",)]
 RECORD = {"error": None, "calls": [], "transcript": "x", "answer": "a", "pending": False, "first_audio_s": 0.1,
           "total_s": 0.2, "audio_s": 1.0, "latency_s": 0.1}
 
@@ -240,6 +242,41 @@ def test_a_background_call_is_scored_as_the_call_and_marked_pending(realtime):
     assert record["error"] is None
 
 
+def browse_server(realtime):
+    return realtime(reply=[
+        [("call", "item_1", "browse", "call_1", '{"goal": "open python.org"}'), ("done",)],
+        [("text", "Here are some results."), ("audio", pcm(1)), ("done",)],  # what the old continuation would say
+    ])
+
+
+def test_a_browse_run_starts_a_task_on_a_fake_agent_ends_the_reply_and_reads_the_calls_before_stopping_it(realtime):
+    server = browse_server(realtime)
+
+    record = eval_run.run_case(server.url, "prompt", eval_run.stub_skills(browse=True), None, AUDIO, [])
+
+    assert record["error"] is None and record["browse_start"] is True and record["pending"] is True
+    assert record["calls"] == [["browse", '{"goal": "open python.org"}']]  # not the task's own `stopped` event
+    assert record["audio_s"] == 0 and record["first_audio_s"] is None and record["answer"] == ""  # it ended there
+    assert server.conversation().types.count("response.create") == 1  # the model was not asked to continue
+    assert not [t for t in threading.enumerate() if t.name == eval_run.BROWSE_THREAD]  # stopped and joined
+
+
+def test_a_run_without_browse_has_no_task_and_no_browse_start(realtime):
+    record = eval_run.run_case(realtime().url, "prompt", eval_run.stub_skills(), None, AUDIO, [])
+
+    assert record["browse_start"] is False
+    assert not [t for t in threading.enumerate() if t.name == eval_run.BROWSE_THREAD]
+
+
+def test_a_browse_call_that_did_not_start_is_not_a_browse_start(realtime):
+    # a bad goal is a failed call, not a started task
+    server = realtime(reply=[[("call", "item_1", "browse", "call_1", "{}"), ("done",)], SPOKEN])
+
+    record = eval_run.run_case(server.url, "prompt", eval_run.stub_skills(browse=True), None, AUDIO, [])
+
+    assert record["browse_start"] is False and record["pending"] is False and record["audio_s"] > 0
+
+
 def test_the_notes_go_into_the_instructions_as_the_app_does(realtime):
     with_notes, without = realtime(), realtime()
     memory = eval_run.Memory(None)
@@ -299,6 +336,37 @@ def test_the_summary_and_the_table_report_answer_checks_apart_from_the_verdict(o
     assert first["verdict"] == "correct" and first["answer_ok"] is False and first["command_ok"] is None
     assert document["summary"]["answer_faithful"] == {"ok": 0, "of": 2}
     assert document["config"]["cases_file"] == "cases.json"
+
+
+def test_browser_starts_are_left_out_of_the_silent_latency_and_audio_numbers_and_counted_apart(
+        offline, monkeypatch, tmp_path, capsys):
+    started = {**RECORD, "calls": [["browse", '{"goal": "g"}']], "pending": True, "browse_start": True,
+               "audio_s": 0.0, "first_audio_s": None, "latency_s": None}
+    answered = {**RECORD, "calls": [["disk_space", "{}"]], "answer": "Plenty."}
+    runs = iter([started,
+                 {**started, "audio_s": 3.0, "first_audio_s": 9.0, "latency_s": 9.0},  # a start with some audio too
+                 {**answered, "audio_s": 2.0, "latency_s": 0.5},
+                 {**answered, "audio_s": 0.1, "latency_s": 0.7}])
+    monkeypatch.setattr(eval_run, "run_case", lambda *args: next(runs))
+    out = tmp_path / "out.json"
+
+    eval_run.main(["--repeats", "4", "--cases", "disk-free", "--out", str(out)])
+
+    summary = json.loads(out.read_text())["summary"]
+    printed = capsys.readouterr().out
+    assert summary["silent"] == 1 and summary["audio_median_s"] == 1.05  # only the two answered runs
+    assert summary["browse_starts"] == 2
+    assert summary["latency_median_s"] == 0.6 and summary["latency_max_s"] == 0.7
+    assert "browser starts: 2" in printed and "under 0.5 s: 1" in printed
+    assert json.loads(out.read_text())["runs"][0]["browse_start"] is True
+
+
+def test_without_browser_starts_the_summary_prints_no_extra_line(offline, monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(eval_run, "run_case", lambda *args: RECORD)
+
+    eval_run.main(["--repeats", "1", "--cases", "disk-free", "--out", str(tmp_path / "out.json")])
+
+    assert "browser starts" not in capsys.readouterr().out
 
 
 def test_the_command_check_is_reported_for_the_shell_cases(offline, monkeypatch, tmp_path, capsys):

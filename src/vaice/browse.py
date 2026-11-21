@@ -96,8 +96,10 @@ _PI_FLAGS = ("--no-session", "--no-builtin-tools", "--no-context-files", "--no-s
 _SECRET_NAME = re.compile(r"KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL", re.IGNORECASE)
 _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 
-PROMPT = ("Use the chrome browser tools to do this task in the browser, then answer in plain text. To search the "
-          "web use Bing or DuckDuckGo, never Google: Google shows an automated browser a bot check instead of "
+PROMPT = ("Use the chrome browser tools to do this task in the browser, then answer in plain text. Start the answer "
+          "with one line that begins with \"Summary:\" and gives one or two plain sentences that answer the task: "
+          "that line is read aloud, so no lists, links or markdown in it. Put the details after that line. To search "
+          "the web use Bing or DuckDuckGo, never Google: Google shows an automated browser a bot check instead of "
           "results. Today is {today}. Task: {goal}")
 
 

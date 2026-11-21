@@ -11,12 +11,16 @@ import json
 import re
 import threading
 import time
+import unicodedata
 from collections.abc import Callable
 from urllib.parse import urlsplit
 
 from vaice.skills import Skill, SkillError, SkillResult
 
-WORKING = "Working in the browser."  # the result of the `browse` call: the model says it
+WORKING = "Working in the browser."  # the result of the `browse` call: the model is told, and the reply ends
+# What vaice says when the task started (`Assistant`, a fixed sentence through `SAY`): the model's reply ended with the
+# call, so nothing else announces it. The outcome follows it.
+STARTED = "I'm working on it in the browser. I'll tell you when it's done."
 FAILED = "Sorry, the browser task failed."  # for an error nothing else explained
 BUSY = "A browser task is already running. Ask for an update, or ask to end the task first."
 NO_TASK = "no browser task is running"
@@ -28,8 +32,10 @@ STATUS_TEXT_CHARS = 200  # of the agent's latest words in the speech line (the d
 STATUS_DETAIL_TEXT_CHARS = 800
 STATUS_TOOLS_SHOWN = 5  # the latest tool names in the speech line
 STATUS_TOOLS_KEPT = 200  # the status record keeps this many tool calls, the latest
-RESULT_CHARS = 2000  # characters of the browser agent's answer the model gets
+RESULT_CHARS = 2000  # characters of the answer that are spoken when it has no `Summary:` line
+SUMMARY_CHARS = 400  # ... and of a `Summary:` line
 CUT = "(more on screen)"
+NARRATION_CHARS = 400  # a rule or a heading this early ends the agent's narration ("I now have ... Let me compile")
 
 ASK_STEP = "The browser task wants to {action}{where}. The details are on the screen."
 # what each tool that changes a page is called (the gate asks about exactly these, see `browse.GATE_POLICY`)
@@ -46,6 +52,19 @@ STEP_ACTIONS = {
 }
 OTHER_STEP = "take a step"
 _MARKDOWN = re.compile(r"\*\*|__|`")
+# the first line of the answer the prompt asks for (`browse.PROMPT`), with markdown emphasis or a heading mark around it
+_SUMMARY_LINE = re.compile(r"^[ \t>#]*[*_]{0,3}[ \t]*summary[ \t]*[*_]{0,3}[ \t]*:[ \t]*[*_]{0,3}[ \t]*(.*)$",
+                           re.IGNORECASE | re.MULTILINE)
+_RULE_OR_HEADING = re.compile(r"^(?:[ \t]{0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*|[ \t]{0,3}#{1,6}(?:[ \t].*)?)$",
+                              re.MULTILINE)
+_RULE_LINE = re.compile(r"^[ \t]{0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*$|^[ \t|:-]*$")  # a rule, or a table's separator row
+_LINE_MARKS = re.compile(r"^[ \t]*(?:#{1,6}[ \t]*|>[ \t]*|[-*+\u2022][ \t]+|\d+[.)][ \t]+)+")
+_LINK = re.compile(r"!?\[([^\]]*)\]\([^)\s]*(?:\s+\"[^\"]*\")?\)")
+_EMPHASIS = re.compile(r"[*`~]+|(?<![A-Za-z0-9])_+|_+(?![A-Za-z0-9])")
+_KEPT_SYMBOLS = "\u00b0"  # the degree sign is a "symbol, other" like an emoji, but it is spoken
+# symbols other and modifier (emoji, skin tones), format, private use and unassigned characters
+_PICTOGRAPH_CATEGORIES = ("So", "Sk", "Cf", "Co", "Cn")
+_MARKUP_JOINERS = "\u200d\ufe0e\ufe0f"  # zero-width joiner and variation selectors: what makes an emoji one glyph
 
 
 def browse_skill(busy: Callable[[], bool] | None = None) -> Skill:
@@ -131,13 +150,53 @@ def step_question(title: str, host: str | None) -> str:
     return ASK_STEP.format(action=action, where=f" on {host}" if host else "")
 
 
+def _is_spoken(char: str) -> bool:
+    """Whether a voice reads `char`: letters, digits, punctuation, currency signs and spaces, not emoji or other
+    pictographs."""
+    if char in _KEPT_SYMBOLS:
+        return True
+    if char in _MARKUP_JOINERS or unicodedata.category(char) in _PICTOGRAPH_CATEGORIES:
+        return False
+    return char.isprintable() or char.isspace()
+
+
+def _speakable(text: str) -> str:
+    """`text` as one line a voice can read: no headings, rules, quote, bullet or numbering marks, table pipes,
+    emphasis, link targets, emoji or pictographs (letters, digits, punctuation and currency signs stay)."""
+    lines = []
+    for line in text.splitlines():
+        if not _RULE_LINE.match(line):
+            line = _EMPHASIS.sub("", _LINK.sub(r"\1", _LINE_MARKS.sub("", line))).replace("|", " ")
+            lines.append("".join(c for c in line if _is_spoken(c)))
+    return " ".join(" ".join(lines).split())
+
+
+def _cut(text: str, limit: int) -> str:
+    return text if len(text) <= limit else f"{text[:limit].rstrip()} {CUT}"
+
+
+def spoken_summary(answer: str) -> str:
+    """What of the agent's answer is spoken: the text of its `Summary:` line (`browse.PROMPT` asks for one; markdown
+    emphasis around the word, any case, anywhere in the answer) cut at `SUMMARY_CHARS`. Without one, the answer from
+    its first horizontal rule or heading when that is within `NARRATION_CHARS` (every recorded Pi answer is its own
+    narration, "I now have ... Let me compile ...", then a rule, then the report; the narration is not the finding),
+    cut at `RESULT_CHARS`. Either way as one speakable line (`_speakable`). Deterministic: no model involved."""
+    match = _SUMMARY_LINE.search(answer)
+    if match is not None:
+        following = (line for line in answer[match.end(1):].splitlines() if line.strip())
+        summary = _speakable(match.group(1)) or _speakable(next(following, ""))  # `Summary:` alone: the next line
+        if summary:
+            return _cut(summary, SUMMARY_CHARS)
+    start = _RULE_OR_HEADING.search(answer)
+    if start is not None and start.start() < NARRATION_CHARS:
+        answer = answer[start.start():]
+    return _cut(_speakable(answer), RESULT_CHARS)
+
+
 def result_of(answer: str) -> SkillResult:
-    """The tool output for the model: the agent's answer as one line without markdown emphasis (it writes
-    `**Welcome to Python.org**`, which would be spoken), cut at `RESULT_CHARS`; the panel's detail keeps the answer."""
-    text = " ".join(_MARKDOWN.sub("", answer).split())
-    if len(text) > RESULT_CHARS:
-        text = f"{text[:RESULT_CHARS].rstrip()} {CUT}"
-    return SkillResult(f"the browser task finished: {text}", answer)
+    """The outcome as `_browse` uses it: `speech` is the spoken summary of the answer (`spoken_summary`), the panel's
+    `detail` keeps the whole answer."""
+    return SkillResult(f"the browser task finished: {spoken_summary(answer)}", answer)
 
 
 def _one_line(text: str, limit: int) -> str:

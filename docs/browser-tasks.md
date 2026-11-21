@@ -1,11 +1,12 @@
 # Browser tasks
 
 `VAICE_BROWSE=pi` or `VAICE_BROWSE=acp` (off by default) adds one skill, `browse(goal)`: when you ask for something to
-be done or looked up on the web ("Open python.org and tell me the page title", "Research some coffee makers online"), the assistant says it is working in the browser and
-vaice hands the goal to a browser agent, which drives a Chrome window through chrome-devtools-mcp. The task runs
+be done or looked up on the web ("Open python.org and tell me the page title", "Research some coffee makers online"), vaice says it is working in the browser and
+hands the goal to a browser agent, which drives a Chrome window through chrome-devtools-mcp. The task runs
 **in the background and quietly**: you can keep talking (a new question is answered as usual and does not stop the
 task), vaice says nothing about progress, asks before any step that changes a page, and when the task ends a fresh
-realtime session says the outcome in a sentence or two ("The page title is Welcome to Python.org"). Ask "How is the
+realtime session says the outcome in a sentence or two ("The page title is Welcome to Python.org"). The whole answer
+is added to the chat as its own message. Ask "How is the
 browser task going?" and the assistant reports where it is.
 
 vaice speaks [ACP](https://agentclientprotocol.com), the Agent Client Protocol, to the agent: one agent process runs
@@ -78,6 +79,15 @@ a version it cannot parse only warns), and for `acp` that the agent's program is
   conversation*, closing vaice and `VAICE_BROWSE_SECONDS` (default 180) stop it too; a new utterance does not. Only one
   task runs at a time: a second `browse` request while one works is refused, and one made while the previous task's
   outcome is still being said replaces it (the old outcome is dropped). A stop is quiet.
+- **What you hear.** The reply that calls `browse` ends there: vaice itself says "I'm working on it in the browser. I'll
+  tell you when it's done." (the model is not asked to continue, so it cannot invent results). Other calls the model
+  made in the same reply still run, but their results are not spoken. When the task ends you hear a short summary: the agent is
+  asked to start its answer with a `Summary:` line of one or two plain sentences, and vaice speaks that line (without
+  one, the answer with its narration before the first rule or heading dropped, cleaned for speech and capped).
+- **The report in the chat.** The agent's whole answer appears in the chat as its own message headed "From the browser
+  task:", with markdown links kept and images reduced to their alt text. It is stored with the turn (capped at 12000
+  characters, `"reports"` in `conversation.json`) but is not part of what the model sees later. The *Tool activity*
+  panel shows two rows per task: the start (`WORKING`) and the outcome (`finished: ...`, `stopped`, `declined`, `failed: ...`).
 - **Quiet.** Nothing is spoken while the task works except the step heads-up and the outcome (or, when it fails or is
   declined, a fixed sentence). The outcome (and each step's heads-up, [#127](https://github.com/ranacseruet/vaice/issues/127)) is added to the turn that asked for the task even if you spoke meanwhile.
   The *Tool activity* panel shows a single `browse` entry per task.
