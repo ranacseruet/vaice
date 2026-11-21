@@ -48,9 +48,10 @@ Layers from the outside in. `config` and `lifecycle` are imported by most module
 import made only when the feature is on (it keeps the optional extras optional).
 
 ```mermaid
-flowchart TB
+flowchart LR
   %% view: modules
   subgraph front["Front end"]
+    direction TB
     app["app.py"]
     interruptible["interruptible.py"]
     outbox["outbox.py"]
@@ -58,12 +59,14 @@ flowchart TB
     server["server.py"]
   end
   subgraph core["The reply"]
+    direction TB
     assistant["assistant.py"]
     realtime["realtime.py"]
     conversation["conversation.py"]
     confirm["confirm.py"]
   end
   subgraph skillset["Skills"]
+    direction TB
     skills["skills.py"]
     shell["shell.py"]
     memory["memory.py"]
@@ -71,12 +74,14 @@ flowchart TB
     mcp_skills["mcp_skills.py"]
   end
   subgraph browsing["Browser task"]
+    direction TB
     browse_task["browse_task.py"]
     browse["browse.py"]
     acp_agent["acp_agent.py"]
     gate["browse_gate.ts"]
   end
   subgraph base["Everywhere"]
+    direction TB
     config["config.py"]
     lifecycle["lifecycle.py"]
   end
@@ -411,7 +416,7 @@ Every thread vaice starts, by its name, and what passes between them. Rounded bo
 own (fastrtc's and Gradio's workers); the rest are daemons:
 
 ```mermaid
-flowchart LR
+flowchart TB
   %% view: threads
   fw(["fastrtc workers: emit and the reply generator, a new one per chunk"])
   gw(["Gradio workers: Run, Cancel, Stop, New conversation, the 1 s timer"])
