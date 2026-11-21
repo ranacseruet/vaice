@@ -427,7 +427,10 @@ class FlowRun:
         if len(spoken) == 1 and spoken[0]["t"] + 0.01 < finished - self.began:
             return None  # the one entry is the announcement: the outcome was never recorded
         outcome = spoken[-1]  # the announcement came first
-        frames = [(when, seconds) for when, seconds in self.drainer.frames if when >= finished]
+        # A marker is served after its utterance's frames, so frames served up to the announcement's marker are the
+        # announcement's, even when the task ended while it still played.
+        begins = max(finished, self.began + spoken[0]["t"]) if len(spoken) > 1 else finished
+        frames = [(when, seconds) for when, seconds in self.drainer.frames if when > begins]
         return {"text": outcome["text"], "recorded_s": outcome["t"],
                 "first_audio_s": frames[0][0] - finished if frames else None,
                 "audio_s": sum(seconds for _, seconds in frames)}

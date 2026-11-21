@@ -95,7 +95,7 @@ Each run is the app's own wiring: an `Assistant` with a browser agent (so `_star
 
 A case file entry is `{"id", "say", "fixture", "followup": {"say", "when"}}` (`browse_flow_cases.json`); a fixture is `{"id", "goal", "answer", "keywords"}`, where `keywords` are two to four names from the report part of the answer (products, missions) that any summary should keep.
 
-Recorded per run, raw data first (so a number can be traced): the start reply's calls, text, time to first audio and audio seconds; the outcome speech's text and the seconds from the task's end to its first audio; the chat as the UI would show it (`ui`) and every turn with its tool events; the follow-up's calls, text and timings; the fake agent's run count and goals; the errors. On top, per run:
+Recorded per run, raw data first (so a number can be traced): the start reply's calls, text, time to first audio and audio seconds; the outcome speech's text and the seconds from the task's end to its first audio (frames served after both the task's end and the fixed sentence's marker; a running case's outcome also waits behind the follow-up's answer); the chat as the UI would show it (`ui`) and every turn with its tool events; the follow-up's calls, text and timings; the fake agent's run count and goals; the errors. On top, per run:
 
 | flag | meaning |
 |---|---|

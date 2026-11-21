@@ -477,7 +477,11 @@ def test_the_outcome_is_the_entry_after_the_announcement_and_none_when_only_the_
         flow.appended.append({"turn": 0, "t": 9.0, "text": "The Ninja."})
         assert flow.outcome()["text"] == "The Ninja." and flow.outcome()["recorded_s"] == 9.0
         assert flow._is_outcome_recorded(0.0)  # two entries: the second is the outcome, whenever
-        flow.appended[:] = [{"turn": 1, "t": 9.0, "text": "a follow-up's"}]
+        # The announcement's marker at 112 (it still played when the task ended at 108): its frames are not counted.
+        flow.appended[0]["t"] = 12.0
+        flow.drainer._frames[:] = [(109.0, 0.02), (112.0, 0.02), (113.5, 0.02), (113.52, 0.02)]
+        assert flow.outcome()["first_audio_s"] == 5.5 and flow.outcome()["audio_s"] == 0.04
+        flow.appended[:] =[{"turn": 1, "t": 9.0, "text": "a follow-up's"}]
         assert flow.outcome() is None  # only the first turn's speech counts
     finally:
         flow.finish()
