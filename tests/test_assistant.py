@@ -524,11 +524,44 @@ def test_browse_starts_the_task_in_the_background_and_the_reply_ends_while_it_ru
     assert s.frames == [] and s.server.connections and sessions(s.server)[0].types.count("response.create") == 1
     assert s.agent.entered.wait(5) and s.agent.goals == ["open python.org and tell me the page title"]
     assert threads_named("vaice-assistant-browse") and s.resp.browsing()
-    assert s.agent.deadline == 180.0
+    assert s.agent.deadline == 600.0
     assert spoken_requests(s.server) == []  # quiet while it works
     release.set()
     wait_until(browse_over)
     assert not s.resp.browsing()
+
+
+def test_browse_view_is_the_running_tasks_status_and_the_limit_and_none_before_and_after(realtime):
+    release = threading.Event()
+    s = browsing(realtime, holds(release), settle=False, browse_seconds=90.0)
+    assert s.agent.entered.wait(5)
+
+    view = s.resp.browse_view()
+
+    assert view is not None and view["goal"] == "open python.org and tell me the page title"
+    assert view["limit"] == 90.0 and view["steps"] == 0 and view["host"] is None and not view["ended"]
+    assert s.resp.browsing()  # the same rule as the Stop row
+    release.set()
+    wait_until(browse_over)
+    assert s.resp.browse_view() is None and not s.resp.browsing()
+
+
+def test_browse_view_is_none_with_no_task(realtime):
+    resp = assistant_over(realtime(reply=[]), None, outbox=True, browse=FakeAgent(answers))
+
+    assert resp.browse_view() is None
+
+
+def test_browse_view_is_none_once_the_task_is_stopped_even_while_its_thread_winds_down(realtime):
+    release = threading.Event()
+    s = browsing(realtime, holds(release), settle=False)
+    assert s.agent.entered.wait(5) and s.resp.browse_view() is not None
+
+    s.resp.stop_task()
+
+    assert s.resp.browse_view() is None
+    release.set()
+    wait_until(browse_over)
 
 
 def test_the_outcome_is_spoken_through_the_outbox_and_recorded_on_the_asking_turn(realtime):

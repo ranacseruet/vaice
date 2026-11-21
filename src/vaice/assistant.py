@@ -441,6 +441,14 @@ class Assistant:
         with self._task_lock:
             return self._browse is not None and self._browse.live
 
+    def browse_view(self) -> dict | None:
+        """What the UI's status line shows (`BrowseStatus.view` plus the `limit` in seconds) while `browsing()`;
+        None otherwise. One look under the task lock, so the view and the Stop row never disagree."""
+        with self._task_lock:
+            if self._browse is None or not self._browse.live:
+                return None
+            return {**self._browse.status.view(), "limit": self._browse_seconds}
+
     def stop_task(self) -> bool:
         """The Stop button and the `stop_browsing` skill: end the browser task (the agent at work or its outcome
         being spoken; what it queued to say is dropped). False when there is none."""

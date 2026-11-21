@@ -72,8 +72,8 @@ class StubAssistant:
     def pending(self):
         return None
 
-    def browsing(self):
-        return False
+    def browse_view(self):
+        return None
 
     def approve(self, request_id):
         return None
@@ -1044,8 +1044,8 @@ def test_the_page_has_a_hidden_panel_with_run_and_cancel_above_the_tool_activity
     (accordion,) = [c for c in components if c["type"] == "accordion"]
     order = [c["id"] for c in components]
     assert order.index(panel["id"]) < order.index(accordion["id"])
-    hidden, text, pending_id, run_row, browse_row, _ = page.tick("")[2:]
-    assert hidden == run_row == browse_row == HIDDEN and text == "" and pending_id == ""
+    hidden, text, pending_id, run_row, browse_row, line, _ = page.tick("")[2:]
+    assert hidden == run_row == browse_row == HIDDEN and text == "" and pending_id == "" and line == ""
 
 
 def test_the_panel_shows_the_question_and_exactly_what_will_run_and_is_drawn_once():
@@ -1055,7 +1055,7 @@ def test_the_panel_shows_the_question_and_exactly_what_will_run_and_is_drawn_onc
     request = waiting_request()
     responder.waiting = request
 
-    *_, shown, text, pending_id, run_row, _browse_row, seen = page.tick(seen)
+    *_, shown, text, pending_id, run_row, _browse_row, _line, seen = page.tick(seen)
 
     assert shown == SHOWN and run_row == SHOWN  # Run and Cancel
     assert text == 'Shall I quit Safari?\n\n```\nquit_app {"name": "Safari"}\n```'
@@ -1063,7 +1063,7 @@ def test_the_panel_shows_the_question_and_exactly_what_will_run_and_is_drawn_onc
     assert all(item == {"__type__": "update"} for item in page.tick(seen)[:-1])  # unchanged: nothing re-renders
 
     responder.waiting = None  # settled somewhere else: the panel goes away
-    *_, hidden, text, pending_id, run_row, _browse_row, seen = page.tick(seen)
+    *_, hidden, text, pending_id, run_row, _browse_row, _line, seen = page.tick(seen)
     assert hidden == run_row == HIDDEN and pending_id == ""
 
 
@@ -1182,14 +1182,14 @@ def test_without_memory_there_is_no_memory_panel():
     config = stream.ui.get_config_file()
 
     assert [c["props"]["label"] for c in config["components"] if c["type"] == "accordion"] == ["Tool activity"]
-    assert len(tick_fn(stream)("")) == 8  # chatbot, tool panel, confirm x4, browse row, seen: no memory column
+    assert len(tick_fn(stream)("")) == 9  # chatbot, tool panel, confirm x4, browse row, line, seen: no memory column
 
 
 def test_the_timer_fills_the_memory_panel_when_the_notes_change_and_is_silent_otherwise():
     memory = Memory(None)
     stream = build_stream(MemoryAssistant(memory), Conversation())
     tick = tick_fn(stream)
-    assert len(tick("")) == 9  # chatbot, tool panel, confirm x4, browse row, memory panel, seen
+    assert len(tick("")) == 10  # chatbot, tool panel, confirm x4, browse row, status line, memory panel, seen
 
     *_, shown, seen = tick("")
     assert shown == "Nothing remembered."
@@ -1611,28 +1611,145 @@ def test_the_agent_is_closed_even_when_startup_fails_after_it(browse_on, monkeyp
     assert FakeAgent.closed == 1
 
 
+def task_view(**changes):
+    """What `Assistant.browse_view` gives for a task that runs."""
+    return {"goal": "best drip coffee makers under 100 dollars", "seconds": 134, "steps": 7, "host": "www.bing.com",
+            "asking": True, "ended": False, "limit": 600.0, **changes}
+
+
 def test_the_stop_row_follows_whether_a_browser_task_runs():
     conversation = Conversation(None, window=10)
 
-    def view(known, running):
-        return app.refresh_view(conversation, known, pending=lambda: None, browsing=lambda: running)
+    def view(known, task):
+        return app.refresh_view(conversation, known, pending=lambda: None, browse_view=lambda: task)
 
-    off, on = view("", False), view("", True)
+    off, on = view("", None), view("", task_view())
 
-    assert off[-2]["visible"] is False and on[-2]["visible"] is True  # the row after the confirmation panel
+    assert off[-3]["visible"] is False and on[-3]["visible"] is True  # the row after the confirmation panel
+    assert off[-2] == "" and on[-2].startswith("**Browser task running**")  # and its line
     assert off[-1] != on[-1]  # the view is part of the dedup key: a change is redrawn
-    assert view(on[-1], True)[-2] == app.gr.skip()
+    assert view(on[-1], task_view())[-3] == app.gr.skip()
+
+
+def test_the_status_line_reads_goal_time_steps_host_and_the_wait_for_run():
+    assert app.browse_markdown(task_view()) == (
+        "**Browser task running** · best drip coffee makers under 100 dollars · 2:14 of 10:00 · 7 steps · "
+        "on www\\.bing\\.com · waiting for Run")
+    assert app.browse_markdown(None) == ""
+
+
+def test_the_status_line_leaves_out_what_is_absent():
+    line = app.browse_markdown(task_view(steps=0, host=None, asking=False))
+    assert line == "**Browser task running** · best drip coffee makers under 100 dollars · 2:14 of 10:00"
+    assert "1 step ·" in app.browse_markdown(task_view(steps=1)) and "1 steps" not in app.browse_markdown(
+        task_view(steps=1))
+    assert app.browse_markdown(task_view(goal="")).startswith("**Browser task running** · 2:14 of 10:00")
+
+
+@pytest.mark.parametrize("seconds, shown", [(0, "0:00"), (5, "0:05"), (59.9, "0:59"), (60, "1:00"), (134, "2:14"),
+                                            (600, "10:00"), (3725, "62:05")])
+def test_the_status_line_shows_minutes_and_seconds(seconds, shown):
+    assert app._clock(seconds) == shown
+    assert f"{shown} of 10:00" in app.browse_markdown(task_view(seconds=seconds))
+
+
+def test_the_goal_and_the_host_are_plain_text_on_one_line():
+    line = app.browse_markdown(task_view(goal="[x](http://e) <b>hi</b> **bold**\n![i](http://e/i.png)\r\nnext",
+                                         host="e_x*.com"))
+
+    assert "\n" not in line and "\r" not in line
+    assert "[x](http://e)" not in line and "<b>" not in line and "**bold**" not in line  # nothing is live
+    assert "\\[x\\]\\(http\\:\\/\\/e\\) \\<b\\>hi\\<\\/b\\> \\*\\*bold\\*\\*" in line
+    assert "on e\\_x\\*\\.com" in line
+    assert line.startswith("**Browser task running** · ")  # only vaice's own emphasis is live
+
+
+def test_a_long_goal_is_cut():
+    line = app.browse_markdown(task_view(goal="word " * 100))
+
+    goal = line.split(" · ")[1]
+    assert goal.endswith("…") and len(goal) <= app.BROWSE_GOAL_CHARS
+    assert app.browse_markdown(task_view(goal="x" * app.BROWSE_GOAL_CHARS)).split(" · ")[1] == "x" * 80
+
+
+def ticks(conversation):
+    """`refresh_view` with a task view that can change between calls: a function of the known state and the view."""
+    def tick(known, task=None, **kwargs):
+        return app.refresh_view(conversation, known, pending=lambda: None, browse_view=lambda: task, **kwargs)
+    return tick
+
+
+def test_only_the_elapsed_time_changing_re_sends_only_the_status_line():
+    tick = ticks(Conversation(None, window=10))
+    *_, seen = tick("", task_view(seconds=5))
+
+    *outputs, seen_next = tick(seen, task_view(seconds=6))
+
+    assert [o == app.gr.skip() for o in outputs] == [True] * 7 + [False]  # only the line: not the row beside it
+    assert outputs[-1].startswith("**Browser task running**") and "0:06 of 10:00" in outputs[-1]
+    assert seen_next != seen
+    assert tick(seen_next, task_view(seconds=6))[-1] == seen_next  # and the same time again sends nothing
+    assert all(o == app.gr.skip() for o in tick(seen_next, task_view(seconds=6))[:-1])
+
+
+def test_a_conversation_change_re_sends_the_chat_but_not_the_status_line():
+    conversation = Conversation(None, window=10)
+    tick = ticks(conversation)
+    *_, seen = tick("", task_view())
+
+    conversation.start_turn()
+    chat, _tools, *rest = tick(seen, task_view())[:-1]
+
+    assert chat != app.gr.skip()
+    assert all(o == app.gr.skip() for o in rest[4:])  # the Stop row and its line stay
+    assert all(o == app.gr.skip() for o in rest[:4])  # and the confirmation panel
+
+
+def test_the_confirmation_panel_is_re_sent_as_one_group():
+    responder = ConfirmingAssistant()
+    conversation = Conversation(None, window=10)
+
+    def tick(known):
+        return app.refresh_view(conversation, known, pending=responder.pending, browse_view=lambda: None)
+
+    *_, seen = tick("")
+    responder.waiting = waiting_request()
+
+    outputs = tick(seen)[:-1]
+
+    assert [o == app.gr.skip() for o in outputs] == [True, True, False, False, False, False, True, True]
+
+
+def test_a_blank_or_unreadable_state_re_sends_everything():
+    tick = ticks(Conversation(None, window=10))
+    *_, seen = tick("", task_view())
+
+    for known in ("", "not json", "{}", "[]"):
+        outputs = tick(known, task_view())[:-1]
+        assert all(o != app.gr.skip() for o in outputs) and len(outputs) == 8
+    assert all(o == app.gr.skip() for o in tick(seen, task_view())[:-1])  # while the real one sends nothing
+
+
+def test_the_memory_panel_is_its_own_group():
+    tick = ticks(Conversation(None, window=10))
+    notes = ["a note"]
+    *_, seen = tick("", task_view(), memory=lambda: notes)
+
+    notes.append("another note")
+    outputs = tick(seen, task_view(), memory=lambda: notes)[:-1]
+
+    assert [o == app.gr.skip() for o in outputs] == [True] * 8 + [False]
 
 
 class BrowsingAssistant(ConfirmingAssistant):
-    """A responder with a browser task (the Stop button's two methods), as Assistant has."""
+    """A responder with a browser task (the status line's `browse_view` and the Stop button), as Assistant has."""
 
     def __init__(self):
         super().__init__()
         self.running, self.stopped = False, 0
 
-    def browsing(self):
-        return self.running
+    def browse_view(self):
+        return task_view() if self.running else None
 
     def stop_task(self):
         self.stopped += 1
@@ -1647,10 +1764,10 @@ def test_a_browser_task_shows_a_stop_button_that_ends_it_and_hides_at_once():
 
     assert components[stop_click["targets"][0][0]]["props"]["variant"] == "stop"
     first = page.tick("")
-    assert first[-2] == HIDDEN  # [..., confirm rows, browse row, seen]: nothing runs yet
+    assert first[-3] == HIDDEN and first[-2] == ""  # [..., confirm rows, browse row, line, seen]: nothing runs yet
 
     responder.running = True
     shown = page.tick(first[-1])
-    assert shown[-2] == SHOWN
+    assert shown[-3] == SHOWN and shown[-2].startswith("**Browser task running** · best drip coffee")
 
     assert stop_fn() == (HIDDEN, "") and responder.stopped == 1  # hidden at once, the blank `seen` redraws

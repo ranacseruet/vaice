@@ -313,6 +313,37 @@ def test_how_long_ago_is_rounded_to_seconds_then_minutes(seconds, said):
     assert browse_task._ago(seconds) == said
 
 
+def test_the_status_view_is_a_snapshot_of_goal_time_steps_host_and_the_wait():
+    clock = Clock()
+    status = browse_task.BrowseStatus("open python.org", clock)
+    assert status.view() == {"goal": "open python.org", "seconds": 0, "steps": 0, "host": None, "asking": False,
+                             "ended": False}
+    status.tool("mcp__chrome__navigate_page", {"url": "https://www.python.org/downloads"})
+    status.tool("mcp__chrome__take_snapshot", {})
+    status.tool("mcp__chrome__new_page", {"url": "https://example.com/a?b=1"})
+    status.tool("mcp__chrome__take_snapshot", {})
+    status.asking("mcp__chrome__click")
+    clock.now += 42.9
+
+    assert status.view() == {"goal": "open python.org", "seconds": 42, "steps": 4, "host": "example.com",
+                             "asking": True, "ended": False}  # the latest host a tool opened, www. dropped
+    status.asking(None)
+    assert status.view()["asking"] is False
+
+
+def test_the_status_view_is_ended_after_end_and_stops_counting_seconds():
+    clock = Clock()
+    status = browse_task.BrowseStatus("open python.org", clock)
+    status.asking("mcp__chrome__click")
+    clock.now += 7
+    status.end(browse_task.FINISHED, "done")
+    clock.now += 100
+
+    assert status.view() == {"goal": "open python.org", "seconds": 7, "steps": 0, "host": None, "asking": False,
+                             "ended": True}
+    assert status.result().speech.startswith("the last browser task, open python.org, finished ")  # unchanged
+
+
 def test_the_status_reports_goal_time_tools_pages_the_waiting_step_and_the_latest_words():
     clock = Clock()
     status = browse_task.BrowseStatus("open python.org and read the title", clock)

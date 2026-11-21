@@ -57,6 +57,8 @@ UI_TITLE = "vaice"  # the heading above the mic
 UI_SUBTITLE = "llama-server · assistant"  # the line under it names the voice service
 NOTHING_REMEMBERED = "Nothing remembered."
 BROWSE_ASK_EXTRA_SECONDS = 30.0  # a browser question waits this much longer than the confirmation's own expiry
+BROWSE_GOAL_CHARS = 80  # the goal in the status line is cut to this many characters
+BROWSE_HOST_CHARS = 60  # and the host
 _MARKDOWN_PUNCTUATION = re.compile(r"([!-/:-@\[-`{-~])")  # every ASCII punctuation character
 
 
@@ -101,41 +103,83 @@ def confirmation_panel(view: dict | None) -> tuple:
             gr.update(visible=True))
 
 
+def _plain_markdown(text: str) -> str:
+    """`text` as plain Markdown text: every punctuation character is backslash-escaped (CommonMark), which leaves no
+    link, image, HTML or emphasis."""
+    return _MARKDOWN_PUNCTUATION.sub(lambda m: "\\" + m.group(1), text)
+
+
 def memory_markdown(notes: list[str]) -> str:
-    """The Memory panel's text: the notes as a list. They are model-written, so each is shown as plain text: every
-    punctuation character is backslash-escaped (CommonMark), which leaves no link, image, HTML or emphasis."""
+    """The Memory panel's text: the notes as a list. They are model-written, so each is shown as plain text."""
     if not notes:
         return NOTHING_REMEMBERED
-    return "\n".join("- " + _MARKDOWN_PUNCTUATION.sub(lambda m: "\\" + m.group(1), note) for note in notes)
+    return "\n".join("- " + _plain_markdown(note) for note in notes)
+
+
+def _clock(seconds: float) -> str:
+    """Seconds as `m:ss` (minutes are not capped)."""
+    minutes, rest = divmod(max(0, int(seconds)), 60)
+    return f"{minutes}:{rest:02d}"
+
+
+def browse_markdown(view: dict | None) -> str:
+    """The line beside *Stop the browser task* (empty without a `view`, see `Assistant.browse_view`): the goal, the
+    time run against the limit, the tool calls so far, the latest host and a pointer to the confirmation panel while a
+    step waits for Run. The goal comes from the model's call and the host from a page, so both are shown as plain
+    text on one line, the goal cut at `BROWSE_GOAL_CHARS`."""
+    if view is None:
+        return ""
+    goal = " ".join(str(view["goal"]).split())
+    if len(goal) > BROWSE_GOAL_CHARS:
+        goal = goal[: BROWSE_GOAL_CHARS - 1].rstrip() + "…"
+    host = " ".join(str(view["host"] or "").split())[:BROWSE_HOST_CHARS]
+    parts = ["**Browser task running**"]
+    if goal:
+        parts.append(_plain_markdown(goal))
+    parts.append(f"{_clock(view['seconds'])} of {_clock(view['limit'])}")
+    if view["steps"]:
+        parts.append(f"{view['steps']} step{'' if view['steps'] == 1 else 's'}")
+    if host:
+        parts.append(f"on {_plain_markdown(host)}")
+    if view["asking"]:
+        parts.append("waiting for Run")
+    return " · ".join(parts)
 
 
 def refresh_view(conversation: Conversation, known: str, pending: Callable[[], Pending | None],
-                 browsing: Callable[[], bool], memory: Callable[[], list[str]] | None = None) -> tuple:
-    """The timer's tick: the chatbot's and tool panel's new views when the conversation changed.
+                 browse_view: Callable[[], dict | None], memory: Callable[[], list[str]] | None = None) -> tuple:
+    """The timer's tick: the components whose view changed since the last one; the others are `gr.skip()`.
 
     The reply can finish before its parallel transcription session reports the transcript, so
-    without this the "…" would sit in the chatbot until the next exchange or a page reload. Views
-    are compared as JSON so an unchanged transcript is never re-rendered.
+    without this the "…" would sit in the chatbot until the next exchange or a page reload.
 
-    The confirmation panel (`pending`: the request waiting for the user) is part of the view: its visibility, text,
-    the request's id (which the buttons pass back) and its button row's visibility come after the two views.
-    `browsing` (whether a browser task runs) gives the visibility of the task's *Stop* row, after those.
-    With `memory` (the notes, with memory on) the Memory panel's text comes after those.
+    `known` (the State) is the JSON of one entry per component group, each itself JSON, so a view that did not change
+    is never re-sent (the elapsed time of a browser task changes every second and must not redraw the chatbot). The
+    groups, in the order of the outputs: the chatbot, the tool panel, the confirmation panel (`pending`: the request
+    waiting for the user; its visibility, text, the request's id, which the buttons pass back, and its button row's
+    visibility change together), the task's *Stop* row (visible while `browse_view()` gives a view), the status line
+    (`browse_markdown` of it) and, with `memory` (the notes, with memory on), the Memory panel's text. A blank or
+    unreadable `known` redraws everything. The last output is the new `known`.
     """
     asked = pending_view(pending())
-    view = (conversation.messages_for_ui(), conversation.tool_activity_for_ui(), asked)
-    components = (*view[:2], *confirmation_panel(asked))
-    running = browsing()
-    view += (running,)
-    components += (gr.update(visible=running),)
+    task = browse_view()
+    messages, tools, line = conversation.messages_for_ui(), conversation.tool_activity_for_ui(), browse_markdown(task)
+    keys = [messages, tools, asked, task is not None, line]  # what decides whether a group changed
+    sends = [[messages], [tools], [*confirmation_panel(asked)], [gr.update(visible=task is not None)], [line]]
     if memory is not None:
         notes = memory()
-        view += (notes,)
-        components += (memory_markdown(notes),)
-    rendered = json.dumps(view, ensure_ascii=False)
-    if rendered == known:
-        return (*(gr.skip() for _ in components), known)  # gr.skip(): leave the components alone
-    return (*components, rendered)
+        keys.append(notes)
+        sends.append([memory_markdown(notes)])
+    rendered = [json.dumps(key, ensure_ascii=False) for key in keys]
+    try:
+        old = json.loads(known) if known else None
+    except ValueError:
+        old = None
+    if not isinstance(old, list) or len(old) != len(rendered):
+        old = [None] * len(rendered)
+    changed = [now != before for now, before in zip(rendered, old, strict=True)]
+    outputs = [send if flag else [gr.skip()] * len(send) for send, flag in zip(sends, changed, strict=True)]
+    return (*(output for send in outputs for output in send), json.dumps(rendered) if any(changed) else known)
 
 
 def make_handler(responder: Assistant, conversation: Conversation):
@@ -218,9 +262,11 @@ def build_stream(responder: Assistant, conversation: Conversation) -> Stream:
                 cancel_button = gr.Button("Cancel")
         pending_id = gr.State("")  # the request the panel shows: a click can only settle that one
         confirm_outputs = [confirm_panel, confirm_text, pending_id, run_row]
-        # A Stop button while a browser task runs (the 1 s timer shows and hides it)
+        # A Stop button and a status line while a browser task runs (the 1 s timer shows and hides the row, and
+        # updates the line)
         with gr.Row(visible=False) as browse_row:
             browse_stop_button = gr.Button("Stop the browser task", variant="stop")
+            browse_line = gr.Markdown()
         # Tool calls and their results, kept out of the conversation: collapsed by default, and the
         # 1 s timer (below) fills it when a tool round lands
         with gr.Accordion("Tool activity", open=False):
@@ -260,9 +306,10 @@ def build_stream(responder: Assistant, conversation: Conversation) -> Stream:
         browse_stop_button.click(stop_browsing, outputs=[browse_row, seen])
 
         gr.Timer(VIEW_REFRESH_SECONDS).tick(
-            partial(refresh_view, conversation, pending=responder.pending, browsing=responder.browsing,
+            partial(refresh_view, conversation, pending=responder.pending, browse_view=responder.browse_view,
                     memory=None if memory is None else memory.notes),
-            inputs=[seen], outputs=[chatbot, tool_panel, *confirm_outputs, browse_row, *memory_outputs, seen])
+            inputs=[seen],
+            outputs=[chatbot, tool_panel, *confirm_outputs, browse_row, browse_line, *memory_outputs, seen])
     return stream
 
 

@@ -428,7 +428,7 @@ def test_browse_is_off_by_default(monkeypatch):
     try:
         reloaded = importlib.reload(config)
         assert (reloaded.BROWSE_URL, reloaded.BROWSE_MODEL, reloaded.BROWSE_API_KEY) == ("", "", "")
-        assert reloaded.BROWSE == "off" and reloaded.BROWSE_SECONDS == 180.0 and reloaded.BROWSE_HEADLESS is False
+        assert reloaded.BROWSE == "off" and reloaded.BROWSE_SECONDS == 600.0 and reloaded.BROWSE_HEADLESS is False
         assert reloaded.BROWSE_CONFIRM == "ask" and reloaded.BROWSE_AGENT == ""
     finally:
         monkeypatch.undo()

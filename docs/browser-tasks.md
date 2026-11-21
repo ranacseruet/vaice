@@ -85,8 +85,13 @@ a version it cannot parse only warns), and for `acp` that the agent's program is
   that answer is not kept. The last result lives in memory only (not in `conversation.json`, never in the model's history or instructions): a new `browse` task replaces
   it at once (while that runs, the status is the running one), *New conversation* forgets it, and so does
   restarting vaice. With no task yet, it says "no browser task is running".
-- **Stop.** Say "Stop the browser task" (`stop_browsing`) or press the **Stop the browser task** button. *New
-  conversation*, closing vaice and `VAICE_BROWSE_SECONDS` (default 180) stop it too; a new utterance does not. Only one
+- **Stop.** Say "Stop the browser task" (`stop_browsing`) or press the **Stop the browser task** button. While
+  a task runs, a line beside the button shows what it is doing: **Browser task running** · the goal (cut at 80
+  characters) · the time run against the limit (`2:14 of 10:00`) · the tool calls so far (`7 steps`, left out at 0) ·
+  the latest host it opened (`on bing.com`) · `waiting for Run` while a step waits for your approval (the
+  confirmation panel has the details). The goal and the host are shown as plain text. The row, and so the line, goes
+  when the agent is done: there is no "finished" line, the outcome is in the chat. *New
+  conversation*, closing vaice and `VAICE_BROWSE_SECONDS` (default 600) stop it too; a new utterance does not. Only one
   task runs at a time: a second `browse` request while one works is refused, and one made while the previous task's
   outcome is still being said replaces it (the old outcome is dropped). A stop is quiet.
 - **What you hear.** The reply that calls `browse` ends there: vaice has the voice model say "I'm working on it in the browser. I'll
@@ -117,7 +122,8 @@ a version it cannot parse only warns), and for `acp` that the agent's program is
   `evals/browse_cases.json` (5 repeats, LFM3-Omni-2B Q8_0); 30 of 30 both ways with the new one, and no `browse` call on
   a question it should answer itself. `evals/browse_live.py` checks the agent's side: Pi 1.5.2 with a local Sage-A1.5 model
   answered 3 of 3 research goals in each of two runs (79 to 302 s, 16 to 43 tool calls), with nothing left holding
-  the profile. Two of those six took longer than the default `VAICE_BROWSE_SECONDS` (180): raise it for research.
+  the profile. Two of those six took longer than 180 s, the former default of `VAICE_BROWSE_SECONDS`, which is why the default is now 600; lower it
+  if you want tasks cut off sooner.
 - **Measured end to end.** `evals/browse_flow.py` (8 cases x 3, the real voice model, a fake agent replaying six
   recorded Pi answers; screen skill on / off) before and after this behaviour: the start reply invented results in
   14/24 and 16/24 runs before, 0/24 and 0/24 after; the spoken outcome named a finding in 13/24 and 13/24 before (in
