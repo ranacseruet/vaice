@@ -137,10 +137,13 @@ a version it cannot parse only warns), and for `acp` that the agent's program is
   both before and after, but it answered "no browser task is running" before, so it named a finding 0/3 before and
   3/3 after. A new request after the task still started one in 6/6 runs both ways. Still open: a follow-up that
   should be answered from the result started a new task in 8/24 and 8/24 runs (11/24 and 10/24 before), mostly "What
-  did you find?". On `evals/browse_cases.json` x 5, "What did the browser task find?" called `browser_status` 5/5 and
-  5/5 (3/5 and 0/5 before, with the old description); "Tell me what you found in the browser." 0/5 both before and
-  after; all 29 cases 132/145 and 133/145 (132 and 129 before), the no-browse cases 51/55 and 52/55 (53 and 54 before,
-  `disk_space`/`battery_status` misses).
+  did you find?". The new `browser_status` description carries part of this: with the
+  new code and the old description, the follow-up was right in 22/36 and 25/36 runs. On `evals/browse_cases.json` x 5,
+  "What did the browser task find?" called `browser_status` 5/5 and 5/5 with the new description (3/5 and 0/5
+  before, 2/5 and 2/5 on a rerun with the old one); "Tell me what you found in the browser." 0/5 both ways. All 29
+  cases: 132/145 and 133/145 (132 and 129 before). The no-browse cases were 51/55 and 52/55 (53 and 54 before). A
+  rerun of the old description, which for these single-turn cases is the same setup as before, gave 52 and 51, so
+  that difference is noise.
 
 Not verified: speaker echo (the microphone hearing the heads-up and the VAD cutting a reply, #36; headphones assumed),
 any model other than the one named above driving Pi, ACP agents other than Pi (the protocol is generic, vaice's tests
