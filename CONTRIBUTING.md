@@ -58,6 +58,7 @@ Unit tests run completely offline without a real `llama-server` or microphone by
 
 - Any behavior or configuration change must update the page in `docs/` that describes it (and `README.md` when the quickstart or the feature list changes) in the same pull request. `docs/README.md` is the index.
 - Adding, removing, or changing the default of a `VAICE_*` environment variable must also update `.env.example`.
+- A change to a module, a symbol or thread the architecture views name, a hand-off between threads, a state or a step of a drawn flow updates both `docs/architecture.md` (its Mermaid diagrams) and `docs/architecture-explorer.html` (its JSON data). `tests/test_architecture_docs.py` fails when either names something that no longer exists or misses a module or thread; see AGENTS.md, "Architecture views".
 - If you change `pyproject.toml` dependencies, run `uv lock` and commit the updated `uv.lock` (CI runs `uv sync --locked` and will fail if `uv.lock` is out of date).
 
 ## Submitting a Pull Request

@@ -8,7 +8,8 @@ everything else.
 | Page | What it covers |
 |---|---|
 | [Vision](vision.md) | The north star (a Jarvis-style assistant that gets things done on your computer), the principles, where the project is today and what comes next |
-| [Architecture](architecture.md) | The processes, how a reply works, the safety model, threading, state on disk, and the code map |
+| [Architecture](architecture.md) | The processes, how a reply works, the safety model, threading, state on disk, and the code map, with diagrams of each flow and state machine |
+| [Architecture explorer](architecture-explorer.html) | The same, interactive: every module's job, key symbols and rules; a step-through of each flow by thread; the threads and the state machines (open the file in a browser) |
 
 ## Setting up and running
 
@@ -42,6 +43,6 @@ everything else.
 ## Keeping the docs in sync
 
 A change to behavior, a setting or a contract updates the page that describes it in the same pull request:
-[Configuration](configuration.md) for a `VAICE_*` variable (and `.env.example`), [Architecture](architecture.md)
+[Configuration](configuration.md) for a `VAICE_*` variable (and `.env.example`), [Architecture](architecture.md) and the [explorer](architecture-explorer.html)
 for a change to how the pieces fit or to the code layout, and [Vision](vision.md) when a roadmap item lands or the
 direction changes.
