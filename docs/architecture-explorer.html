@@ -206,7 +206,7 @@ footer { color: var(--muted); font-size: 13px; }
 
 <script type="application/json" id="architecture-data">
 {
-  "as_of": "2026-11-21, main after #137",
+  "as_of": "2026-11-22, main after #141",
   "repo": "https://github.com/ranacseruet/vaice/blob/main/",
   "layers": [
     {"id": "front", "title": "Front end"},
@@ -396,6 +396,7 @@ footer { color: var(--muted); font-size: 13px; }
        {"ref": "skills.Skill", "what": "The definition, with kind, ask, run_stoppable and direct_only."},
        {"ref": "skills.Skills.definitions", "what": "The tools in the Responses API's flat format."},
        {"ref": "skills.Skills.prepare", "what": "Question for confirm, Started for background, else None."},
+       {"ref": "skills.Question", "what": "The panel's question; its arguments, when set, are the call Run runs (quit_app binds the app it found)."},
        {"ref": "skills.Skills.run", "what": "Parse, validate, run; a failure becomes the result."},
        {"ref": "skills.SkillResult", "what": "speech for the model, detail for the panel."},
        {"ref": "skills.default_skills", "what": "The set offered, in order, from the settings."}
@@ -596,7 +597,7 @@ footer { color: var(--muted); font-size: 13px; }
        {"lane": "session thread", "text": "At MAX_TOOL_ROUNDS a call is ignored and the reply ends; otherwise a round marker goes on the queue.", "ref": "realtime.MAX_TOOL_ROUNDS", "why": "The round marker restarts the recorded text: words before a tool result are spoken but not recorded, so a wrong first pass cannot enter history."},
        {"lane": "executor", "text": "remember after any other skill in this reply is refused.", "ref": "assistant._Executor.__call__", "why": "A file name, a page or a command's output must not become a note."},
        {"lane": "skills", "text": "prepare: a Question for a confirm skill, Started for a background one, None for the rest.", "ref": "skills.Skills.prepare"},
-       {"lane": "confirmations", "text": "A confirm call becomes one Pending (refused for a stale epoch); the model reads WAITING.", "ref": "confirm.Confirmations.ask"},
+       {"lane": "confirmations", "text": "A confirm call becomes one Pending, holding the Question's arguments when it set them, else the model's (refused for a stale epoch); the model reads WAITING.", "ref": "confirm.Confirmations.ask", "why": "The stored call names what the question named: quit_app asked as Google Chrome quits that app or nothing, never another app the short name matches by Run."},
        {"lane": "executor", "text": "A background call starts the browser task and returns EndReply; the same goal twice in a reply is one task.", "ref": "assistant.Assistant._start_browse"},
        {"lane": "skills", "text": "A read or action skill runs at once; a failure is the result.", "ref": "skills.Skills.run"},
        {"lane": "executor", "text": "Every call is recorded on the turn for Tool activity.", "ref": "conversation.Turn.add_tool_event"},
