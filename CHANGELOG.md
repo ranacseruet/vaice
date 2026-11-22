@@ -90,7 +90,7 @@ the pull requests (#53 to #126).
 ### Fixed
 - `open_app` said an app was not installed when it was asked for by its short name ("Chrome" for Google
   Chrome): it now opens the one installed app whose name has those words, or names the apps it could be; `quit_app`
-  matches running apps the same way (#130).
+  matches running apps the same way, and Run quits only the app its request named (#130).
 - The transcript and the end of every reply were reported 1 s late, waiting on a close handshake `llama-server` never
   completes (#90).
 - A transcription session whose server never answered the upgrade held its thread for the whole timeout (#71).

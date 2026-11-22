@@ -96,7 +96,8 @@ def test_prepare_is_nothing_for_skills_that_need_no_confirmation_and_for_unknown
 def test_prepare_returns_the_question_of_a_confirm_skill_and_quits_nothing(apps):
     asked = default_skills().prepare("quit_app", '{"name": "safari"}')
 
-    assert asked == Question("Shall I quit Safari?")  # the running app's own name, whatever the model's case
+    # the running app's own name, whatever the model's case, and the call Run runs names it
+    assert asked == Question("Shall I quit Safari?", '{"name": "Safari"}')
     assert apps.ran == [["lsappinfo", "list"]]  # looked, did not quit
 
 
@@ -379,24 +380,38 @@ def test_open_app_lists_at_most_five_apps(script, app_folders):
         "the open app skill failed: Tool could be Tool 1, Tool 2, Tool 3, Tool 4, Tool 5 and 2 more: say which one")
 
 
-def test_quit_app_asks_about_and_quits_the_running_app_a_short_name_stands_for(apps):
+def test_quit_app_asks_about_the_running_app_a_short_name_stands_for_and_binds_run_to_it(apps):
     skills = default_skills()
 
-    assert skills.prepare("quit_app", '{"name": "chrome"}') == Question("Shall I quit Google Chrome?")
-    assert skills.run("quit_app", '{"name": "chrome"}') == SkillResult("quit Google Chrome")
+    assert skills.prepare("quit_app", '{"name": "chrome"}') == Question(
+        "Shall I quit Google Chrome?", '{"name": "Google Chrome"}')
+    assert skills.run("quit_app", '{"name": "Google Chrome"}') == SkillResult("quit Google Chrome")
     assert apps.ran[-1][-1] == "Google Chrome"
 
 
-def test_quit_app_names_the_running_apps_a_short_name_could_be_and_quits_none(script):
-    running = LSAPPINFO.replace('41) "Safari"', '41) "Safari Technology Preview"').replace(
-        '"Finder"', '"Safari"')
+def test_quit_app_names_the_running_apps_a_short_name_could_be_and_asks_nothing(script):
+    running = LSAPPINFO.replace('"Finder"', '"Safari Beta"').replace('41) "Safari"', '41) "Safari Technology Preview"')
     script.answer = lambda argv: running
 
-    result = default_skills().run("quit_app", '{"name": "Safari"}')
-    assert result == SkillResult("quit Safari")  # the exact name wins over a longer one
+    result = default_skills().prepare("quit_app", '{"name": "safari"}')
 
-    script.answer = lambda argv: running.replace('"Safari" ASN', '"Safari Beta" ASN')
-    result = default_skills().run("quit_app", '{"name": "safari"}')
-    assert result.speech == ("the quit app skill failed: safari could be Safari Beta or Safari Technology Preview: "
-                             "say which one")
-    assert not any(argv[0] == "osascript" for argv in script.ran[2:])
+    assert result == SkillResult("the quit app skill failed: safari could be Safari Beta or Safari Technology "
+                                 "Preview: say which one")
+    assert not any(argv[0] == "osascript" for argv in script.ran)
+
+
+def test_quit_app_never_quits_another_app_than_the_one_its_question_named(script):
+    """Asked about Safari while Safari Technology Preview also runs; Safari quits before Run: Run quits nothing
+    (Codex on #141: the stored "Safari" would have matched Safari Technology Preview)."""
+    both = LSAPPINFO.replace('"Finder"', '"Safari Technology Preview"')
+    script.answer = lambda argv: both
+    skills = default_skills()
+
+    asked = skills.prepare("quit_app", '{"name": "Safari"}')
+    assert asked == Question("Shall I quit Safari?", '{"name": "Safari"}')  # the exact name wins
+
+    script.answer = lambda argv: both.replace('41) "Safari" ASN', '41) "Mail" ASN')
+    result = skills.run("quit_app", asked.arguments)
+
+    assert result.speech == "the quit app skill failed: Safari is not running"
+    assert not any(argv[0] == "osascript" for argv in script.ran)

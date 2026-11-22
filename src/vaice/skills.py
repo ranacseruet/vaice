@@ -52,9 +52,11 @@ class SkillResult:
 @dataclass(frozen=True)
 class Question:
     """What the panel asks the user before a `confirm` skill runs: built only from the skill's validated arguments.
-    Only the UI's Run button approves it."""
+    Only the UI's Run button approves it. `arguments`, when set, is the JSON call Run runs instead of the model's: the
+    target the question names, so Run cannot pick another one ("Chrome" asked as Google Chrome)."""
 
     text: str
+    arguments: str = ""
 
 
 @dataclass(frozen=True)
@@ -492,22 +494,28 @@ def parse_foreground_apps(output: str) -> list[str]:
     return names
 
 
-def _running_app(name: str) -> str:
-    """The running app's own name for `name` (case ignored; a short name such as "Chrome" when one running app has
-    it, see `matching_apps`). `lsappinfo` rather than AppleScript's `is running`: asked about an app that does not
-    exist, that hangs on a "Where is <name>?" chooser (checked on macOS 26)."""
+def _running_app(name: str, *, exact: bool = False) -> str:
+    """The running app's own name for `name` (case ignored; unless `exact`, a short name such as "Chrome" when one
+    running app has it, see `matching_apps`). `lsappinfo` rather than AppleScript's `is running`: asked about an app
+    that does not exist, that hangs on a "Where is <name>?" chooser (checked on macOS 26)."""
     running = parse_foreground_apps(_command(["lsappinfo", "list"]))
+    if exact:
+        running = [app for app in running if app.casefold() == name.casefold()]
     return _one_app(name, matching_apps(name, running), f"{name} is not running")
 
 
-def _ask_quit(args: dict) -> str:
+def _ask_quit(args: dict) -> Question:
+    """The question, bound to the app it names: Run quits that app or nothing, never another the short name now
+    matches (Safari asked about, Safari quit meanwhile, Safari Technology Preview still running)."""
     _require_macos("quitting an app")
-    return f"Shall I quit {_running_app(_app_name(args))}?"
+    app = _running_app(_app_name(args))
+    return Question(f"Shall I quit {app}?", json.dumps({"name": app}))
 
 
 def _quit_app(args: dict) -> SkillResult:
     _require_macos("quitting an app")
-    name = _running_app(_app_name(args))  # `quit` on an app that is not running would launch it first
+    # The exact name: the question's resolved one. `quit` on an app that is not running would launch it first.
+    name = _running_app(_app_name(args), exact=True)
     _command(["osascript", "-e", "on run argv", "-e", "tell application (item 1 of argv) to quit",
               "-e", "end run", name])
     return SkillResult(f"quit {name}")
