@@ -410,16 +410,68 @@ def _app_name(args: dict) -> str:
     return name
 
 
+APP_FOLDERS = (Path("/Applications"), Path("/Applications/Utilities"), Path("/System/Applications"),
+               Path("/System/Applications/Utilities"), Path.home() / "Applications")
+MAX_LISTED_APPS = 5  # apps named back when a spoken name matches several
+
+
+def _words(name: str) -> list[str]:
+    return re.findall(r"\w+", name.casefold())
+
+
+def matching_apps(name: str, apps: Sequence[str]) -> list[str]:
+    """The apps in `apps` that `name` stands for: the one with exactly that name (case ignored), else every app whose
+    name holds `name` as whole words ("Chrome" is Google Chrome, "Word" is Microsoft Word but not WordPerfect).
+    People say an app's short name; `open -a` and AppleScript know only the full one."""
+    exact = [app for app in apps if app.casefold() == name.casefold()]
+    if exact:
+        return exact[:1]
+    wanted = _words(name)
+    if not wanted:
+        return []
+    found = []
+    for app in apps:
+        words = _words(app)
+        if app not in found and any(words[i:i + len(wanted)] == wanted for i in range(len(words))):
+            found.append(app)
+    return found
+
+
+def _one_app(name: str, matches: list[str], none: str) -> str:
+    """The single app `matches` holds; otherwise a `SkillError` that says `none`, or names the apps it could be."""
+    if len(matches) == 1:
+        return matches[0]
+    if not matches:
+        raise SkillError(none)
+    listed = matches[:MAX_LISTED_APPS]
+    more = f" and {len(matches) - len(listed)} more" if len(matches) > len(listed) else ""
+    names = ", ".join(listed) + more if more else ", ".join(listed[:-1]) + " or " + listed[-1]
+    raise SkillError(f"{name} could be {names}: say which one")
+
+
+def installed_apps() -> list[str]:
+    """The names of the apps in the usual app folders (`APP_FOLDERS`), sorted, without duplicates."""
+    names: set[str] = set()
+    for folder in APP_FOLDERS:
+        try:
+            names.update(path.stem for path in folder.glob("*.app"))
+        except OSError:
+            continue
+    return sorted(names, key=str.casefold)
+
+
 def _open_app(args: dict) -> SkillResult:
     _require_macos("opening an app")
     name = _app_name(args)
     try:
         _command(["open", "-a", name])
+        return SkillResult(f"opened {name}")
     except SkillError as exc:
-        if "Unable to find application" in str(exc):
-            raise SkillError(f"there is no app called {name}") from None
-        raise
-    return SkillResult(f"opened {name}")
+        if "Unable to find application" not in str(exc):
+            raise
+    app = _one_app(name, matching_apps(name, installed_apps()), f"there is no app called {name}")
+    _command(["open", "-a", app])
+    return SkillResult(f"opened {app}")
 
 
 _APP_HEADER = re.compile(r'^\s*\d+\) "(.*)" ASN:')
@@ -441,12 +493,11 @@ def parse_foreground_apps(output: str) -> list[str]:
 
 
 def _running_app(name: str) -> str:
-    """The running app's own name for `name` (case ignored). `lsappinfo` rather than AppleScript's `is running`:
-    asked about an app that does not exist, that hangs on a "Where is <name>?" chooser (checked on macOS 26)."""
-    for running in parse_foreground_apps(_command(["lsappinfo", "list"])):
-        if running.casefold() == name.casefold():
-            return running
-    raise SkillError(f"{name} is not running")
+    """The running app's own name for `name` (case ignored; a short name such as "Chrome" when one running app has
+    it, see `matching_apps`). `lsappinfo` rather than AppleScript's `is running`: asked about an app that does not
+    exist, that hangs on a "Where is <name>?" chooser (checked on macOS 26)."""
+    running = parse_foreground_apps(_command(["lsappinfo", "list"]))
+    return _one_app(name, matching_apps(name, running), f"{name} is not running")
 
 
 def _ask_quit(args: dict) -> str:
