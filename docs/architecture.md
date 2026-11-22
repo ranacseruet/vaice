@@ -199,7 +199,7 @@ flowchart TD
   direct -->|"yes"| refused["REFUSED_AFTER_TOOL, nothing runs"]
   direct -->|"no"| kind{"Skill.kind"}
   kind -->|"read or action"| run["Skills.run at once, never raises"]
-  kind -->|"confirm"| ask["Skills.prepare gives a Question, Confirmations.ask, result WAITING"]
+  kind -->|"confirm"| ask["Skills.prepare gives a Question, its arguments (if set) become the stored call, Confirmations.ask, result WAITING"]
   kind -->|"background"| bg["Skills.prepare gives Started, Assistant._start_browse, result EndReply"]
   refused --> fed
   run --> fed
@@ -215,7 +215,7 @@ flowchart TD
    `tool_choice: "required"`, later ones with `auto`, and after `MAX_TOOL_ROUNDS` (2) with `none`, which forces an answer.
 2. **A per-reply executor** (`_Executor`) handles each call on the session thread. A `read` or `action` skill runs at
    once through `Skills.run`, which never raises: a failure is the result the model reads. A `confirm` skill goes through
-   `Skills.prepare`, which checks the arguments and builds the question; the executor creates the pending request and the
+   `Skills.prepare`, which checks the arguments and builds the question (a `Question` may carry `arguments`, the call bound to what it names: `quit_app` asked with "chrome" stores `{"name": "Google Chrome"}`, and Run quits only that exact running app); the executor creates the pending request with those arguments, else the model's, and the
    result tells the model that only the Run button runs it. A `background` skill (`browse`) starts the task and ends the reply: its output is an `EndReply`, so no further response is requested (the other calls of that round still run, but are not spoken) and vaice has a fixed sentence (`browse_task.STARTED`) said through a fresh speech session (`SAY`). `remember` is
    refused once any other skill was called in the same reply, so a file name or a command's output cannot become a note.
 3. **Results are compacted** (`_speech_friendly`) before they go back, because the model reads a fed-back result aloud.

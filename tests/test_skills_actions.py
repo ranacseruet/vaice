@@ -96,7 +96,8 @@ def test_prepare_is_nothing_for_skills_that_need_no_confirmation_and_for_unknown
 def test_prepare_returns_the_question_of_a_confirm_skill_and_quits_nothing(apps):
     asked = default_skills().prepare("quit_app", '{"name": "safari"}')
 
-    assert asked == Question("Shall I quit Safari?")  # the running app's own name, whatever the model's case
+    # the running app's own name, whatever the model's case, and the call Run runs names it
+    assert asked == Question("Shall I quit Safari?", '{"name": "Safari"}')
     assert apps.ran == [["lsappinfo", "list"]]  # looked, did not quit
 
 
@@ -298,3 +299,119 @@ def test_the_new_skills_say_so_off_a_mac(monkeypatch, script):
         assert "only available on macOS" in skills.run(name, arguments).speech, name
     assert "only available on macOS" in skills.prepare("quit_app", '{"name": "Safari"}').speech
     assert script.ran == []
+
+
+# -- short app names (#130)
+
+
+@pytest.fixture(autouse=True)
+def app_folders(monkeypatch, tmp_path):
+    """The app folders `open_app` looks in: two empty folders under `tmp_path` (and one that does not exist);
+    `app_folders.add(name)` installs an app."""
+
+    class Folders:
+        def __init__(self):
+            self.paths = [tmp_path / "Applications", tmp_path / "System", tmp_path / "missing"]
+            for folder in self.paths[:2]:
+                folder.mkdir()
+
+        def add(self, name, folder=0):
+            (self.paths[folder] / f"{name}.app").mkdir()
+
+    folders = Folders()
+    monkeypatch.setattr(skills_module, "APP_FOLDERS", tuple(folders.paths))
+    return folders
+
+
+def not_found_unless(*exact):
+    """An `open` that knows only the apps named in `exact`, as `open -a` does."""
+    return lambda argv: "" if argv[-1] in exact else SkillError(
+        f"open failed with status 1: Unable to find application named '{argv[-1]}'")
+
+
+@pytest.mark.parametrize(("name", "expected"), [
+    ("Chrome", ["Google Chrome"]), ("chrome", ["Google Chrome"]), ("Word", ["Microsoft Word"]),
+    ("visual studio", ["Visual Studio Code"]), ("zoom", ["zoom.us"]), ("Safari", ["Safari"]),
+    ("Studio", ["Visual Studio Code", "LM Studio"]), ("Wor", []), ("Code Visual", []), ("...", [])])
+def test_matching_apps_takes_the_exact_name_or_whole_words_of_a_longer_one(name, expected):
+    apps = ["Google Chrome", "Microsoft Word", "WordPerfect", "Visual Studio Code", "LM Studio", "zoom.us", "Safari",
+            "Safari Technology Preview"]
+    assert skills_module.matching_apps(name, apps) == expected
+
+
+def test_installed_apps_lists_the_apps_of_every_folder_once_and_skips_a_missing_folder(app_folders):
+    app_folders.add("Safari")
+    app_folders.add("Google Chrome")
+    app_folders.add("Safari", folder=1)
+    (app_folders.paths[0] / "Notes.txt").write_text("not an app")
+
+    assert skills_module.installed_apps() == ["Google Chrome", "Safari"]
+
+
+def test_open_app_opens_the_one_installed_app_a_short_name_stands_for(script, app_folders):
+    app_folders.add("Google Chrome")
+    app_folders.add("Safari")
+    script.answer = not_found_unless("Google Chrome")
+
+    result = default_skills().run("open_app", '{"name": "Chrome"}')
+
+    assert script.ran == [["open", "-a", "Chrome"], ["open", "-a", "Google Chrome"]]
+    assert result == SkillResult("opened Google Chrome")  # the result names the app that opened
+
+
+def test_open_app_names_the_apps_a_short_name_could_be_and_opens_none(script, app_folders):
+    for name in ("LM Studio", "Visual Studio Code", "Safari"):
+        app_folders.add(name)
+    script.answer = not_found_unless()
+
+    result = default_skills().run("open_app", '{"name": "Studio"}')
+
+    assert result.speech == ("the open app skill failed: Studio could be LM Studio or Visual Studio Code: "
+                             "say which one")
+    assert script.ran == [["open", "-a", "Studio"]]
+
+
+def test_open_app_lists_at_most_five_apps(script, app_folders):
+    for n in range(1, 8):
+        app_folders.add(f"Tool {n}")
+    script.answer = not_found_unless()
+
+    assert default_skills().run("open_app", '{"name": "Tool"}').speech == (
+        "the open app skill failed: Tool could be Tool 1, Tool 2, Tool 3, Tool 4, Tool 5 and 2 more: say which one")
+
+
+def test_quit_app_asks_about_the_running_app_a_short_name_stands_for_and_binds_run_to_it(apps):
+    skills = default_skills()
+
+    assert skills.prepare("quit_app", '{"name": "chrome"}') == Question(
+        "Shall I quit Google Chrome?", '{"name": "Google Chrome"}')
+    assert skills.run("quit_app", '{"name": "Google Chrome"}') == SkillResult("quit Google Chrome")
+    assert apps.ran[-1][-1] == "Google Chrome"
+
+
+def test_quit_app_names_the_running_apps_a_short_name_could_be_and_asks_nothing(script):
+    running = LSAPPINFO.replace('"Finder"', '"Safari Beta"').replace('41) "Safari"', '41) "Safari Technology Preview"')
+    script.answer = lambda argv: running
+
+    result = default_skills().prepare("quit_app", '{"name": "safari"}')
+
+    assert result == SkillResult("the quit app skill failed: safari could be Safari Beta or Safari Technology "
+                                 "Preview: say which one")
+    assert not any(argv[0] == "osascript" for argv in script.ran)
+
+
+def test_quit_app_never_quits_another_app_than_the_one_its_question_named(script):
+    """Asked about Safari while Safari Technology Preview also runs; Safari quits before Run: Run quits nothing
+    (Codex on #141: the stored "Safari" would have matched Safari Technology Preview)."""
+    both = LSAPPINFO.replace('"Finder"', '"Safari Technology Preview"')
+    script.answer = lambda argv: both
+    skills = default_skills()
+
+    asked = skills.prepare("quit_app", '{"name": "Safari"}')
+    assert asked == Question("Shall I quit Safari?", '{"name": "Safari"}')  # the exact name wins
+
+    script.answer = lambda argv: both.replace('41) "Safari" ASN', '41) "Mail" ASN')
+    result = skills.run("quit_app", asked.arguments)
+
+    assert result.speech == "the quit app skill failed: Safari is not running"
+    assert not any(argv[0] == "osascript" for argv in script.ran)

@@ -93,6 +93,7 @@ class _Executor:
             return EndReply(browse_task.WORKING)  # the model asked twice: nothing more to start or record
         prepared = self._skills.prepare(name, arguments)
         if isinstance(prepared, Question):
+            arguments = prepared.arguments or arguments  # the call the question names is the one Run runs
             if not self._confirmations.ask(Pending(name, arguments, prepared.text, self._turn), self._epoch):
                 log.info("assistant dropped %s: a new conversation began while it was prepared", name)
                 return self._record(name, arguments, SkillResult(DROPPED))

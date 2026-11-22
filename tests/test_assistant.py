@@ -19,7 +19,7 @@ from vaice.confirm import Confirmations
 from vaice.conversation import WAITING_FOR_CONFIRMATION, Turn
 from vaice.memory import REFUSED_AFTER_TOOL, Memory, memory_skills
 from vaice.outbox import Marker, Outbox
-from vaice.skills import Skill, SkillError, SkillResult, Skills
+from vaice.skills import Question, Skill, SkillError, SkillResult, Skills
 
 AUDIO = (48000, np.zeros((1, 480), dtype=np.int16))
 SPEECH = [("text", "All done."), ("audio", pcm(1, 2, 3)), ("done",)]  # a reply that only speaks
@@ -208,6 +208,29 @@ def test_a_confirm_call_that_cannot_be_asked_about_is_an_ordinary_failed_call(re
 
     assert resp.pending() is None and ran == []
     assert outputs(sessions(server)[0]) == ["the quit app skill failed: Ghost is not running"]
+
+
+def test_run_runs_the_call_the_question_named_when_the_question_resolved_it(realtime):
+    """`quit_app` asked with a short name: the question names the real app and its `arguments` replace the model's,
+    so Run cannot reach another app the short name matches by then (Codex on #141)."""
+    ran = []
+
+    def question(args):
+        return Question("Shall I quit Google Chrome?", '{"name": "Google Chrome"}')
+
+    name = {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}
+    skills = Skills([Skill("quit_app", "Quit an app.", name, lambda args: ran.append(args) or SkillResult("quit"),
+                           kind="confirm", ask=question)])
+    server = realtime(reply=calls_then_speech(("quit_app", '{"name": "chrome"}')))
+    resp = assistant_over(server, skills)
+    turn = Turn()
+    drive(resp, turn)
+
+    assert resp.pending().arguments == '{"name": "Google Chrome"}'
+    assert tool_events(turn) == [("quit_app", WAITING_FOR_CONFIRMATION)]
+    resp.approve(resp.pending().id)
+    assert ran == [{"name": "Google Chrome"}]
+    wait_until(speech_over)
 
 
 def test_run_runs_the_stored_call_and_the_outcome_is_spoken_through_the_outbox_and_recorded(realtime):

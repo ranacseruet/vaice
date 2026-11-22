@@ -18,8 +18,8 @@ exception is `run_shell` (`VAICE_SHELL`, off by default; see [Shell commands](#s
 | `system_info` | answers: macOS version, uptime, memory |
 | `top_processes` | answers: the apps using the most memory or CPU (`by`, `count`) |
 | `find_files` | answers: files whose name contains a word, in your home, desktop, documents or downloads folder |
-| `open_app` | opens an app by name (`open -a`); runs at once |
-| `quit_app` | quits a running app by name; **needs the Run button first** (see [Confirmation](#confirmation) below) |
+| `open_app` | opens an app by name (`open -a`); a short name works when one installed app has it as whole words ("Chrome" opens Google Chrome; "Studio" with several matches names them instead); runs at once |
+| `quit_app` | quits a running app by name, short names as for `open_app` (the request names the app it found, and Run quits that app or nothing); **needs the Run button first** (see [Confirmation](#confirmation) below) |
 | `set_volume` | sets the output volume to a `level` from 0 to 100; runs at once |
 | `volume_up`, `volume_down` | turn the output volume up or down by 10 points; no arguments; run at once |
 | `mute_sound` | mutes or unmutes the sound; runs at once |
