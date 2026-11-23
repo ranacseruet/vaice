@@ -188,7 +188,7 @@ class _BrowseHooks:
 
 def _browse(agent: BrowseAgent, confirmations: Confirmations, turn: Turn, name: str, arguments: str, seconds: float,
             cancelled: threading.Event, status: browse_task.BrowseStatus,
-            say: Callable[[str, Callable[[], bool]], None], ended: Callable[[str, str], None],
+            say: Callable[..., None], ended: Callable[[str, str], None],
             done: Callable[[], None], epoch: int) -> None:
     """Daemon thread: a `browse` task, started by the reply whose call returned `WORKING`. The agent works for at most
     `seconds`, quietly (`_BrowseHooks`); a new utterance does not stop it. Every end is recorded on the asking turn,
@@ -202,7 +202,9 @@ def _browse(agent: BrowseAgent, confirmations: Confirmations, turn: Turn, name: 
     def stop() -> bool:
         return cancelled.is_set() or lifecycle.stopping.is_set()
 
-    hooks = _BrowseHooks(confirmations, lambda request: say(request, stop), status, stop, epoch)
+    # a step's heads-up is spoken but recorded on no turn: in the asking turn it would reach every later reply's
+    # history, a question for the model to imitate (#127); the panel shows the step
+    hooks = _BrowseHooks(confirmations, lambda request: say(request, stop, record=False), status, stop, epoch)
     begun = time.monotonic()
     outcome, answer = browse_task.FAILED_KIND, ""
     try:
@@ -414,10 +416,10 @@ class Assistant:
             finally:
                 announced.set()
 
-        def say(request: str, stop: Callable[[], bool]) -> None:
+        def say(request: str, stop: Callable[[], bool], record: bool = True) -> None:
             taken = generation()  # before the wait, as in `_say`: a clear while waiting still cancels it
             announced.wait()
-            self._say(turn, request, stop, taken)
+            self._say(turn if record else Turn(), request, stop, taken)
 
         threading.Thread(target=announce, args=(generation(),), name="vaice-assistant-speech", daemon=True).start()
         threading.Thread(

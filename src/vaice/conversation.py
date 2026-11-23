@@ -116,7 +116,7 @@ class Turn:
 
     def append_assistant_text(self, text: str) -> None:
         """Add `text` to what was said, joined by one space: speech that came after the reply that asked had ended
-        (the outcome of a call the user approved with Run, a browser task's heads-up or outcome). The one deliberate
+        (the outcome of a call the user approved with Run, a browser task's start or outcome). The one deliberate
         exception to the freeze (a closed turn takes it): it is an explicit follow-up of this turn, never a late write
         by a dropped generator."""
         text = text.strip()
