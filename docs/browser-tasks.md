@@ -75,14 +75,17 @@ a version it cannot parse only warns), and for `acp` that the agent's program is
   what vaice already receives from Pi: the goal, how long it has run, the tools it called with the pages it visited,
   the page it is on, a step that waits for approval, and Pi's latest words between tools (cleaned and capped; the
   screen shows more). No new command is sent to Pi.
-- **Follow-ups after the task ended.** The model does not see a finished task's result except as the summary that was
-  said, so "What did you find?" or "Which one was the cheapest?" is answered through `browser_status`, which also
+- **Follow-ups after the task ended.** The model does not see a finished task's whole result: it sees the summary that
+  was said and, in the system block of every reply while the task is kept, one line with the task's goal, how long ago
+  it ended and its spoken summary, the agent's `Summary:` line or the start of its report ("You know what the last browser task found. It was asked: ...", cleaned
+  of chat markers and capped at 400 characters; nothing for a stopped, declined or failed task), so "What did you
+  find?" or "Which one was the cheapest?" can be answered from it; the model can also call `browser_status`, which
   reports the **last ended task**: its goal, how long ago it ended ("42 seconds ago", then minutes) and how it ended. A
   finished task adds its spoken summary and then more of the answer, cleaned for speech and capped at 700 characters
   as a whole (the summary comes first); a task that was stopped, declined at a step or failed is one sentence
   ("the last browser task, ..., was stopped 2 minutes ago", no error text: the panel has it). A task
   cancelled by the Stop button, `stop_browsing` or exit counts as stopped even if its agent still returned an answer:
-  that answer is not kept. The last result lives in memory only (not in `conversation.json`, never in the model's history or instructions): a new `browse` task replaces
+  that answer is not kept. The last result lives in memory only (not in `conversation.json`, never in the model's history; only the summary line above is in its instructions): a new `browse` task replaces
   it at once (while that runs, the status is the running one), *New conversation* forgets it, and so does
   restarting vaice. With no task yet, it says "no browser task is running".
 - **Stop.** Say "Stop the browser task" (`stop_browsing`) or press the **Stop the browser task** button. While

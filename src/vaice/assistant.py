@@ -285,7 +285,17 @@ class Assistant:
         self._realtime = RealtimeResponder(
             url, prompt, timeout, max_output_tokens, tools=self.skills.definitions(),
             executor_for=lambda turn, stop: _Executor(self.skills, self._confirmations, self._start_browse, turn, stop),
-            prompt_extra=lambda: _notes_block(self.memory.notes()) if self.memory is not None else "")
+            prompt_extra=self._prompt_extra)
+
+    def _prompt_extra(self) -> str:
+        """What is added to the prompt at the start of every reply: the user's notes (memory on), then, while the last
+        browser task finished with something to say, a line with what it found (`browse_task.last_result_line`).
+        Nothing when there is neither, so the prompt is what it was."""
+        notes = _notes_block(self.memory.notes()) if self.memory is not None else ""
+        with self._task_lock:
+            last = self._last_ended
+        line = browse_task.last_result_line(last)
+        return f"{notes}\n{line}" if line else notes
 
     def attach_outbox(self, outbox: Outbox) -> None:
         """Where an outcome is spoken: no reply is in flight then (a click, a browser task), so the audio goes to
