@@ -81,6 +81,8 @@ the pull requests (#53 to #126).
 - `VAICE_LLAMACPP_PROMPT` is now `VAICE_PROMPT`, with a default written for the assistant. An old or removed setting
   that is still set is ignored and named in one startup warning (#124, #125; see `docs/configuration.md`).
 - **Python 3.12 only** (was 3.10 to 3.12, #102). CI can be started by hand (#105).
+- CI on a push to `main` skips the macOS job when a passed run already tested the same tree, usually the PR's last
+  run: the squash merge is a new commit, and the second run often found no macOS runner (#150, #91).
 - The documentation lives in `docs/` (#106); the code in `src/vaice` is flat (`realtime.py`, `assistant.py`, #126).
 
 - **Browser tasks speak ACP.** vaice talks to the browser agent with the Agent Client Protocol (the official Python SDK,
