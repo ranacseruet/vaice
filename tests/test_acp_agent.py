@@ -97,6 +97,14 @@ class Harness:
     def fact(self, key: str) -> list:
         return [f[key] for f in self.facts() if key in f]
 
+    def eventual_fact(self, key: str, seconds: float = 3.0) -> list:
+        """`fact(key)` once the fake has written it: a notification handler runs as its own task in the fake, so its
+        record can land after `run()` has already returned (#139)."""
+        end = time.monotonic() + seconds
+        while not (found := self.fact(key)) and time.monotonic() < end:
+            time.sleep(0.02)
+        return found
+
     def pids(self) -> list[int]:
         return [f["start"]["pid"] for f in self.facts() if "start" in f]
 
@@ -261,7 +269,7 @@ def test_a_no_answers_with_the_reject_option_then_cancels_and_ends_as_declined(h
         h.run()
     assert h.fact("permission")[0]["option"] == "reject" and h.fact("permission")[0]["outcome"] == "selected"
     assert h.wire() == ["permission_response", "cancel"]  # the answer goes out before the cancel
-    assert h.fact("cancel") == [1]
+    assert h.eventual_fact("cancel") == [1]  # the script ends on its own, so the prompt can end before this lands
     assert h.pids() and alive(h.pids()[0])  # the agent is kept: it settled the cancel
 
 
