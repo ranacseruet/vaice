@@ -461,7 +461,7 @@ sequenceDiagram
   U->>RX: speaks over the reply
   EM->>G: next, already in flight
   U->>RX: stops: VAD pause detected
-  RX->>RX: close generator fails, generator set to None, playback queue cleared
+  RX->>RX: close generator fails, generator set to None, playback queue clear scheduled on the connection's loop
   G-->>EM: the chunk it was making
   EM->>EM: generator changed since the call began: the chunk is dropped
   Note over G: finalized later, its finally sets cancelled and the session closes
@@ -471,6 +471,11 @@ sequenceDiagram
 
 If the old reply runs out in the same moment, fastrtc's own `reset()` would wipe the new pause and its audio (#13):
 `emit()` snapshots the state first and restores it, only for its own end-of-reply reset and never over newer audio.
+
+fastrtc's playback queue is an `asyncio.Queue` that the connection's event loop fills and plays from. Every clear of it
+(this barge-in, speech over proactive audio, *New conversation*) comes from another thread, so
+`interruptible._clear_playback` schedules fastrtc's clear on that loop instead of running it on the caller's thread
+(#67).
 
 ## State on disk
 

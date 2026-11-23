@@ -5,6 +5,7 @@ with tuned VAD options to reject brief room noise and pre-roll preservation to p
 It also serves an `Outbox` (outbox.py): speech queued by a worker thread outside any reply (the outcome of a call
 the user approved with a click) is returned by the idle `emit()`, paced by the estimated end
 of its playback, and dropped when the user starts talking."""
+import asyncio
 import logging
 import threading
 import time
@@ -45,6 +46,38 @@ PREROLL_SECONDS = 0.3
 # audio played. The next item is served only while the audio served so far is estimated to finish less than this far
 # ahead, which keeps markers (the recorded text) within this of the real playback.
 LEAD_SECONDS = 0.4
+
+
+def _clear_playback(handler) -> None:
+    """Drop the audio fastrtc queued for playback on `handler`'s connection; a no-op before its audio track starts.
+
+    fastrtc's `AudioCallback.clear_queue()` (wired up as `_clear_queue`) empties an `asyncio.Queue` and resets the
+    playback clock (`_start`). The connection's event loop fills that queue (`player_worker_decode`) and drains it
+    (`recv`), and neither is thread-safe, but the clear is asked for from other threads: fastrtc's barge-in in
+    `receive()` (a worker thread), the drop of proactive speech there, and the "New conversation" button (a Gradio
+    thread), #67. So it runs on the connection's loop (`_loop`, which fastrtc sets before it wires `_clear_queue`):
+    directly when already there, else scheduled to run there next, without waiting: the loop never blocks on the
+    caller, and nothing the caller does after it depends on the queue being empty yet. A handler with no loop
+    (fastrtc's websocket path sets one too; only tests' rigs lack it) is cleared on the calling thread.
+    """
+    clear = getattr(handler, "_clear_queue", None)
+    if clear is None:
+        return
+    loop = getattr(handler, "_loop", None)
+    if loop is None or _running_loop() is loop:
+        clear()
+        return
+    try:
+        loop.call_soon_threadsafe(clear)
+    except RuntimeError:  # the connection's loop is closed: the connection is gone and nothing plays
+        log.debug("playback queue not cleared: its event loop is closed")
+
+
+def _running_loop() -> asyncio.AbstractEventLoop | None:
+    try:
+        return asyncio.get_running_loop()
+    except RuntimeError:
+        return None
 
 
 class InterruptSafeReplyOnPause(ReplyOnPause):
@@ -115,6 +148,12 @@ class InterruptSafeReplyOnPause(ReplyOnPause):
         self._emit_thread: threading.Thread | None = None
         self._own_resets = 0  # end-of-reply resets, counted on the emit thread
         self._foreign_resets = 0  # explicit resets, counted on any other thread
+
+    @property
+    def clear_queue(self):
+        # fastrtc's barge-in in ReplyOnPause.receive() calls self.clear_queue() on its receive thread: run it on the
+        # connection's loop like every other clear (#67)
+        return lambda: _clear_playback(self)
 
     def reset(self):
         # reached by every reset on this handler, including super().emit()'s end-of-reply one
@@ -220,9 +259,7 @@ class InterruptSafeReplyOnPause(ReplyOnPause):
             playing = self._clock() < self._proactive_until
             self._proactive_until = 0.0
         if clear_playing_audio and playing:
-            clear_queue = getattr(self, "_clear_queue", None)  # wired up when the audio track starts
-            if clear_queue is not None:
-                clear_queue()
+            _clear_playback(self)
 
     def emit(self):
         if self.outbox is not None:
@@ -296,7 +333,8 @@ def stop_playing_reply(handler: ReplyOnPause) -> None:
     "New conversation" button, which runs on a Gradio thread like fastrtc's own clean_up does:
     reset() drops the reply generator (a chunk it is still generating is dropped by emit() above,
     as on a barge-in) and clears the pause event, so the next reply only starts after the next
-    utterance; the queue clear drops the audio fastrtc had already queued for playback.
+    utterance; the queue clear drops the audio fastrtc had already queued for playback (on the connection's event
+    loop, `_clear_playback`).
     """
     if not hasattr(handler, "reset"):  # the internals this relies on; a fastrtc upgrade may restructure them
         log.warning("cannot stop the reply: fastrtc's ReplyOnPause has no reset()")
@@ -305,6 +343,4 @@ def stop_playing_reply(handler: ReplyOnPause) -> None:
     drop_proactive = getattr(handler, "_drop_proactive_speech", None)
     if drop_proactive is not None:  # speech queued with no reply (a click's outcome) belongs to the old conversation
         drop_proactive(clear_playing_audio=False)
-    clear_queue = getattr(handler, "_clear_queue", None)  # wired up when the audio track starts
-    if clear_queue is not None:
-        clear_queue()
+    _clear_playback(handler)

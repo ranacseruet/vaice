@@ -95,6 +95,10 @@ the pull requests (#53 to #126).
   with the screen skill on). Each task's prompt also carries today's date, so "this week" means now.
 
 ### Fixed
+- Clearing fastrtc's playback queue (a barge-in, talking over a Run outcome or a browser task's outcome, *New
+  conversation*) now runs on the connection's event loop, which fills and plays that queue, instead of on the
+  thread that asked for it; the clear raced the loop's own reads and writes of the queue and of its playback
+  clock (#67).
 - A browser step's spoken heads-up ("... Press Run to allow it, or Cancel.") is no longer added to the turn that
   asked for the task, so it is not in that chat bubble, in `conversation.json` or in the history of later replies;
   the confirmation panel still shows the step (#127).

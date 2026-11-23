@@ -1,13 +1,16 @@
 """The real fastrtc ReplyOnPause, driven the way fastrtc drives it: emit() on a fresh thread per chunk
 (`loop.run_in_executor`), receive() on another thread. Only the VAD model and the playback queue are fakes."""
+import asyncio
 import inspect
 import logging
 import threading
 import time
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 from fastrtc import AdditionalOutputs, ReplyOnPause
+from fastrtc.tracks import AudioCallback
 from fastrtc.utils import WebRTCError, webrtc_error_handler
 from threads import run_on_thread, start_thread
 
@@ -505,6 +508,114 @@ def test_stop_playing_reply_without_a_queue_or_reset_does_not_raise():
 
     stop_playing_reply(Bare())
     stop_playing_reply(ReplyOnPause(lambda _audio: iter([]), model=FakeVad()))  # no audio track yet
+
+
+
+class ConnectionLoop:
+    """The connection's event loop on a thread of its own, as fastrtc runs it, with fastrtc's real playback queue:
+    `AudioCallback.clear_queue` on a stand-in holding an `asyncio.Queue` and the playback clock (`_start`)."""
+
+    def __init__(self):
+        self.loop = asyncio.new_event_loop()
+        self.thread = threading.Thread(target=self.loop.run_forever, name="connection-loop", daemon=True)
+        self.thread.start()
+        self.track = SimpleNamespace(queue=asyncio.Queue(), _start=None)
+        self.cleared_on: list[str] = []
+
+    def wire(self, handler):
+        """What fastrtc does for a connection: the handler's loop, then the track's clear (webrtc_connection_mixin)."""
+        handler._loop = self.loop
+        handler._clear_queue = self.clear
+        return handler
+
+    def clear(self):
+        self.cleared_on.append(threading.current_thread().name)
+        AudioCallback.clear_queue(self.track)
+
+    def queue_frames(self, count):
+        """Frames queued for playback the way player_worker_decode does it: on the loop."""
+
+        async def put():
+            for i in range(count):
+                await self.track.queue.put(i)
+            self.track._start = 1.0  # playback has begun
+
+        asyncio.run_coroutine_threadsafe(put(), self.loop).result(10)
+
+    def settle(self):
+        """Wait until the callbacks already scheduled on the loop have run (they run before this coroutine)."""
+        asyncio.run_coroutine_threadsafe(asyncio.sleep(0), self.loop).result(10)
+
+    def close(self):
+        self.loop.call_soon_threadsafe(self.loop.stop)
+        self.thread.join(10)
+        self.loop.close()
+
+
+@pytest.fixture
+def connection():
+    loop = ConnectionLoop()
+    yield loop
+    if not loop.loop.is_closed():
+        loop.close()
+
+
+def test_the_new_conversation_button_clears_the_playback_queue_on_the_connections_loop(connection):
+    rig = Rig(InterruptSafeReplyOnPause, lambda _audio: iter([]))
+    handler = connection.wire(rig.handler)
+    connection.queue_frames(5)
+
+    run_on_thread(lambda: stop_playing_reply(handler), "gradio-click")  # #67: not on the click's thread
+    connection.settle()
+
+    assert connection.cleared_on == ["connection-loop"]
+    assert connection.track.queue.empty() and connection.track._start is None
+
+
+def test_fastrtcs_own_barge_in_clears_the_playback_queue_on_the_connections_loop(connection):
+    rig = Rig(InterruptSafeReplyOnPause, lambda _audio: iter([chunk(1.0), chunk(2.0)]))
+    connection.wire(rig.handler)
+    rig.user_speaks_then_pauses()
+    assert rig.start_emit().join()[1][0] == 1.0  # the reply is playing
+    connection.queue_frames(5)
+
+    rig.user_speaks_then_pauses()  # ReplyOnPause.receive() calls self.clear_queue() on its receive thread
+    connection.settle()
+
+    assert connection.cleared_on and set(connection.cleared_on) == {"connection-loop"}
+    assert connection.track.queue.empty()
+
+
+def test_speech_over_playing_proactive_audio_clears_the_playback_queue_on_the_connections_loop(monkeypatch, connection):
+    rig = proactive_rig(monkeypatch)
+    connection.wire(rig.handler)
+    rig.outbox.put(second_of_speech(1.0))
+    assert rig.start_emit().join() is not None  # proactive audio is playing
+    connection.queue_frames(5)
+
+    speech_only(rig)
+    connection.settle()
+
+    assert connection.cleared_on == ["connection-loop"] and connection.track.queue.empty()
+
+
+def test_a_clear_asked_for_on_the_connections_loop_runs_at_once(connection):
+    handler = connection.wire(Rig(InterruptSafeReplyOnPause, lambda _audio: iter([])).handler)
+
+    async def clear_and_look():
+        handler.clear_queue()
+        return list(connection.cleared_on)  # before this coroutine yields: it ran inline, nothing was scheduled
+
+    assert asyncio.run_coroutine_threadsafe(clear_and_look(), connection.loop).result(10) == ["connection-loop"]
+
+
+def test_stop_playing_reply_after_the_connections_loop_closed_does_not_raise(connection):
+    handler = connection.wire(Rig(InterruptSafeReplyOnPause, lambda _audio: iter([])).handler)
+    connection.close()
+
+    stop_playing_reply(handler)  # the connection is gone: nothing is playing, nothing to clear
+
+    assert connection.cleared_on == []
 
 
 def test_a_reply_error_that_escapes_reaches_fastrtc_as_a_webrtc_error():
