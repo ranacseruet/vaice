@@ -98,6 +98,9 @@ the pull requests (#53 to #126).
 - A start no longer sends any request to `huggingface.co` once the Silero voice-activity model is downloaded: vaice
   loads it from the Hugging Face cache instead of letting fastrtc check for a newer revision every time. The first
   start still downloads it; with `HF_HUB_OFFLINE` set (either way) fastrtc's own loader runs as before (#143).
+- `open_app` and `quit_app` know a few names that are not words of the app's name: "VS Code" and "VSCode" (Visual
+  Studio Code, which runs as "Code"), "System Preferences" (System Settings) and "iTunes" (Music). It is a short fixed
+  list, `APP_ALIASES` in `skills.py`; initials are not matched (#140).
 - While a browser step waits for **Run**, a request from an ordinary reply that also needs Run (`quit_app`,
   `run_shell`, `forget_everything`, an MCP `click` tool) no longer replaces the step, which answered it no and stopped
   the browser task although you never declined. The new request is refused, and the model tells you a step is
