@@ -274,6 +274,23 @@ def test_ui_has_the_transcript_a_reset_button_and_loads_the_stored_conversation(
     assert conversation.messages_for_ui() == []
 
 
+def test_gradio_analytics_and_its_version_check_are_off_unless_the_user_turned_them_on(monkeypatch):
+    # fastrtc's Stream builds its own gr.Blocks(), whose constructor reads this variable: left alone, gradio sends
+    # telemetry to huggingface.co and checks api.gradio.app for a newer version at every start (#98)
+    monkeypatch.setenv("GRADIO_ANALYTICS_ENABLED", "unset")  # registers the undo that restores "not set"
+    monkeypatch.delenv("GRADIO_ANALYTICS_ENABLED")
+    stream = build_stream(StubAssistant(), Conversation())
+    assert os.environ["GRADIO_ANALYTICS_ENABLED"] == "False"
+    assert stream.ui.analytics_enabled is False
+
+    # a user's own setting (the environment, or the .env that config loads) is kept; no Blocks is built here,
+    # since an enabled one starts the version check
+    for value in ("True", "False"):
+        monkeypatch.setenv("GRADIO_ANALYTICS_ENABLED", value)
+        app._disable_gradio_analytics()
+        assert os.environ["GRADIO_ANALYTICS_ENABLED"] == value
+
+
 def one_component(components, type_name, place):
     found = [c for c in components if c["type"] == type_name]
     assert len(found) == 1, f"expected exactly one {type_name} component for {place}, found {len(found)}"

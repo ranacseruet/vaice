@@ -88,6 +88,10 @@ the pull requests (#53 to #126).
   with the screen skill on). Each task's prompt also carries today's date, so "this week" means now.
 
 ### Fixed
+- Gradio's telemetry and its "newer version" check (three requests to `huggingface.co` and `api.gradio.app` at every
+  start) are off: `vaice` sets `GRADIO_ANALYTICS_ENABLED=False` unless you set it yourself. The one startup request
+  left is the Silero VAD model's revision check at `huggingface.co`; `HF_HUB_OFFLINE=1` stops it once the model is
+  cached (see [Privacy](docs/privacy.md)) (#98).
 - `open_app` said an app was not installed when it was asked for by its short name ("Chrome" for Google
   Chrome): it now opens the one installed app whose name has those words, or names the apps it could be; `quit_app`
   matches running apps the same way, and Run quits only the app its request named (#130).

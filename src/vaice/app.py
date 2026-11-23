@@ -2,6 +2,7 @@
 import argparse
 import json
 import logging
+import os
 import re
 import shlex
 import shutil
@@ -233,7 +234,16 @@ def make_handler(responder: Assistant, conversation: Conversation):
     return reply
 
 
+def _disable_gradio_analytics() -> None:
+    """Gradio's telemetry and its "newer version" check call out to huggingface.co and api.gradio.app (#98). fastrtc's
+    `Stream` builds its own `gr.Blocks()` without passing `analytics_enabled`, and Blocks reads this variable in its
+    constructor, so it is set before `build_stream`. A value the user already set (the environment or the `.env`
+    loaded by `config`) wins: `GRADIO_ANALYTICS_ENABLED=True` turns it back on."""
+    os.environ.setdefault("GRADIO_ANALYTICS_ENABLED", "False")
+
+
 def build_stream(responder: Assistant, conversation: Conversation) -> Stream:
+    _disable_gradio_analytics()
     chatbot = gr.Chatbot(type="messages", label="Conversation", height=CHATBOT_HEIGHT, allow_tags=False)
     # what the responder says with no reply in flight (the outcome of a Run click, a browser task) goes to the outbox
     # the audio handler drains
