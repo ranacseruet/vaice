@@ -107,7 +107,8 @@ a version it cannot parse only warns), and for `acp` that the agent's program is
   characters, `"reports"` in `conversation.json`) but is not part of what the model sees later. The *Tool activity*
   panel shows two rows per task: the start (`WORKING`) and the outcome (`finished: ...`, `stopped`, `declined`, `failed: ...`).
 - **Quiet.** Nothing is spoken while the task works except the step heads-up and the outcome (or, when it fails or is
-  declined, a fixed sentence). The outcome (and each step's heads-up, [#127](https://github.com/ranacseruet/vaice/issues/127)) is added to the turn that asked for the task even if you spoke meanwhile.
+  declined, a fixed sentence). The outcome is added to the turn that asked for the task even if you spoke meanwhile; a step's
+  heads-up is not (the panel shows the step), so it never becomes part of what the model sees later.
 - **One browser path.** Do not also configure a browser MCP server (such as `chrome-devtools-mcp`) in
   `VAICE_MCP_CONFIG`: with both, the model mixed the two browsers' tools. vaice does not filter such a server out; it
   is up to the config file (see [MCP tools](mcp-tools.md)).

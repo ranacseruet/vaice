@@ -93,6 +93,9 @@ the pull requests (#53 to #126).
   with the screen skill on). Each task's prompt also carries today's date, so "this week" means now.
 
 ### Fixed
+- A browser step's spoken heads-up ("... Press Run to allow it, or Cancel.") is no longer added to the turn that
+  asked for the task, so it is not in that chat bubble, in `conversation.json` or in the history of later replies;
+  the confirmation panel still shows the step (#127).
 - Gradio's telemetry and its "newer version" check (three requests to `huggingface.co` and `api.gradio.app` at every
   start) are off: `vaice` sets `GRADIO_ANALYTICS_ENABLED=False` unless you set it yourself. The one startup request
   left is the Silero VAD model's revision check at `huggingface.co`; `HF_HUB_OFFLINE=1` stops it once the model is

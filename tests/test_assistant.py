@@ -710,6 +710,24 @@ def test_a_step_that_needs_the_button_is_a_button_only_request_with_a_spoken_hea
     assert s.resp.browsing() and s.agent.approved is None
 
 
+def test_a_steps_heads_up_is_spoken_but_not_recorded_on_the_asking_turn_and_the_outcome_is(realtime):
+    """The heads-up is a prompt to press a button, not something the assistant said in the conversation: on the
+    asking turn it would be in every later reply's history for the model to imitate (#127). The fake speaks `SPEECH`
+    for every utterance, so each one recorded on the turn adds one "All done."."""
+    s = browsing(realtime, asks_then_answers)
+    wait_until(lambda: s.resp.pending() is not None)
+    wait_until(lambda: spoken_requests(s.server))
+    wait_until(speech_over)
+    serve(s.outbox)  # the heads-up's audio was served: its marker ran
+
+    assert s.turn.assistant_text == "All done."  # STARTED only
+
+    s.resp.approve(s.resp.pending().id)
+    wait_until(browse_over)
+    serve(s.outbox)
+    assert s.turn.assistant_text == "All done. All done."  # STARTED and the outcome
+
+
 def test_run_is_the_yes_to_a_step_and_cancel_the_no_and_neither_runs_a_skill(realtime):
     s = browsing(realtime, asks_then_answers)
     wait_until(lambda: s.resp.pending() is not None)
