@@ -14,8 +14,46 @@ concurrency:
   group: ci-${{ github.event_name == 'pull_request' && github.head_ref || github.sha }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+  actions: read  # `tested` looks up an earlier run's artifacts
+
 jobs:
+  # A push to main whose tree a passed run already tested (usually the PR's last run, on refs/pull/N/merge) does not
+  # run the macOS job again: the squash merge is a new commit, so the PR's result would not carry over, and macOS
+  # runners are scarce (#91, #150). Pull requests and runs started by hand always run `check`; so does a push when
+  # nothing matches or the lookup fails.
+  tested:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    outputs:
+      run: ${{ steps.find.outputs.run }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/scripts
+      - id: find
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          if tree=$(gh api "repos/$REPO/git/commits/$SHA" --jq .tree.sha) &&
+             run=$(bash .github/scripts/tested-run.sh "$REPO" "$tree"); then
+            if [ -n "$run" ]; then
+              echo "run=$run" >> "$GITHUB_OUTPUT"
+              echo "Tree \`$tree\` already passed in $run: the macOS check is skipped (#150)." >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "No passed run tested tree \`$tree\`: the macOS check runs." >> "$GITHUB_STEP_SUMMARY"
+            fi
+          else
+            echo "::warning::Could not look up an earlier run of this tree; the macOS check runs."
+          fi
+
   check:
+    needs: tested
+    # runs when `tested` was skipped (not a push), found nothing or failed; never when the workflow was cancelled
+    if: ${{ !cancelled() && needs.tested.outputs.run == '' }}
     # macos-14 retired 2026-11-02 (actions/runner-images#13518); macos-15 is the closest supported image
     runs-on: macos-15
     steps:
@@ -25,3 +63,15 @@ jobs:
       - run: uv sync --locked --extra dev --extra mcp --extra browse --python 3.12  # the one supported version; mcp, browse: their tests run
       - run: .venv/bin/ruff check src tests
       - run: .venv/bin/pytest -q
+      # Last, so only a pass records it: the tree this run tested (on a pull request, the PR merged into its base), for
+      # `tested` to find when a push to main has the same tree (#150). Overwritten by a re-run of the same run.
+      - id: tree
+        run: |
+          echo "sha=$(git rev-parse 'HEAD^{tree}')" >> "$GITHUB_OUTPUT"
+          git rev-parse HEAD > "$RUNNER_TEMP/tested-commit.txt"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tested-tree-${{ steps.tree.outputs.sha }}
+          path: ${{ runner.temp }}/tested-commit.txt
+          retention-days: 30
+          overwrite: true
