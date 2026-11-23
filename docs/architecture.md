@@ -322,7 +322,7 @@ flowchart TD
 | `run_shell` (opt-in) | `shell.py` | Always a confirm skill: through `zsh -c` after Run, with a 30 s timeout, an output cap and a process group that stopping kills; `sudo` is refused |
 | `remember`, `forget`, `forget_everything` (opt-in) | `memory.py` | Explicit notes only, saved to `memory.json` and appended to the instructions. A note is text that outlives its conversation, so it is cleaned, capped, and refused if a tool ran earlier in the same reply |
 | `look_at_screen` (opt-in) | `vision.py` | One `screencapture` + `sips` shrink, asked of a vision model, never kept or logged. See [Screen vision](screen-vision.md) |
-| `browse` (opt-in) | `browse_task.py`, `browse.py`, `acp_agent.py` | A `background` skill: the reply ends at the call (vaice has a fixed sentence said through `SAY`), then a task thread runs the browser agent (Pi through pi-acp, or any ACP agent) quietly. A step that changes a page is a button-only pending request with a spoken heads-up; the outcome (the agent's `Summary:` line) is spoken by a text-input session through the outbox and recorded on the asking turn, and the whole answer is added to the turn as a report that the chat shows (`Turn.reports`, saved in `conversation.json`, not in the model's history). A new utterance does not stop the task; the Stop button, `stop_browsing`, *New conversation* and exit do, and `browser_status` reports on it: the running task, or else the last ended one (how it ended and, if finished, its spoken summary and more of the answer, kept in memory only until a new task or *New conversation*). One task at a time. See [Browser tasks](browser-tasks.md) |
+| `browse` (opt-in) | `browse_task.py`, `browse.py`, `acp_agent.py` | A `background` skill: the reply ends at the call (vaice has a fixed sentence said through `SAY`), then a task thread runs the browser agent (Pi through pi-acp, or any ACP agent) quietly. A step that changes a page is a button-only pending request with a spoken heads-up; the outcome (the agent's `Summary:` line) is spoken by a text-input session through the outbox and recorded on the asking turn, and the whole answer is added to the turn as a report that the chat shows (`Turn.reports`, saved in `conversation.json`, not in the model's history). A new utterance does not stop the task; the Stop button, `stop_browsing`, *New conversation* and exit do, and `browser_status` reports on it: the running task, or else the last ended one (how it ended and, if finished, its spoken summary and more of the answer, kept in memory only; the finished task's `Summary:` line, cleaned and capped, also goes into every reply's system block as a context line (`browse_task.last_result_line`) so that "What did you find?" is answered without a tool call until a new task or *New conversation*). One task at a time. See [Browser tasks](browser-tasks.md) |
 | MCP tools (opt-in) | `mcp_skills.py` | Each listed tool of each stdio server becomes `<server>__<tool>` with a `run` or `click` policy. See [MCP tools](mcp-tools.md) |
 
 ### The browser task
@@ -496,8 +496,9 @@ audio was served:
    "reports": [], "error": "", "interrupted": false, "complete": true}]}
 ```
 
-What the model gets as `instructions` for a reply (`realtime._instructions`): the prompt, the user's notes and the clock
-line in the system block, then each windowed past turn as a ChatML turn. `tools` and `reports` are never in it: a
+What the model gets as `instructions` for a reply (`realtime._instructions`): the prompt, the user's notes, the last
+finished browser task's line (`assistant.Assistant._prompt_extra`, `browse_task.last_result_line`; only while one is
+kept, so absent here) and the clock line in the system block, then each windowed past turn as a ChatML turn. `tools` and `reports` are never in it: a
 follow-up calls the skill again. llama-server wraps the whole string as the system turn and appends the user's audio:
 
 ```text
@@ -538,7 +539,7 @@ src/vaice/
   shell.py          Opt-in: the run_shell skill and the runner (timeout, output cap, process group)
   acp_agent.py      Opt-in (the `browse` extra): `AcpAgent`, an ACP client (the official SDK) that drives a browser agent over its stdin/stdout: one long-lived process, a session per task, permission requests to Run/Cancel, `session/cancel` on a no, a stop or the deadline, the gate tripwire
   browse.py         Opt-in: the errors and the `BrowseAgent` protocol, the two presets that build an `AcpAgent` (Pi through pi-acp with its config directory, launcher and environment, and the gate preflight; any ACP agent) and the cleanup of Chrome processes on the browser profile
-  browse_task.py    Opt-in: the `browse`, `browser_status` and `stop_browsing` skill definitions and the pure pieces (fixed lines, step questions, result text, the status record and the last ended task's report)
+  browse_task.py    Opt-in: the `browse`, `browser_status` and `stop_browsing` skill definitions and the pure pieces (fixed lines, step questions, result text, the status record, the last ended task's report and the line that carries a finished task's summary into the prompt)
   browse_gate.ts    The Pi extension the Pi preset loads: the approval policy for the browser's tools (read-only run, page-changing ask, the rest ask) and the marker notification the tripwire waits for; shipped in the package
   audio.py          Mic frame → mono PCM16 at the model's rate (resampled via scipy) and back to float32; the `AudioFrame` type
   realtime.py       llama-server /v1/realtime: `RealtimeResponder` (the reply session: tool rounds, repetition breaker), the parallel transcription session, text-input speech (`speak`), `spoken_part`, startup check

@@ -206,7 +206,7 @@ footer { color: var(--muted); font-size: 13px; }
 
 <script type="application/json" id="architecture-data">
 {
-  "as_of": "2026-11-22, main after #141",
+  "as_of": "2026-11-22, main after #144, plus the last browser result line (#136)",
   "repo": "https://github.com/ranacseruet/vaice/blob/main/",
   "layers": [
     {"id": "front", "title": "Front end"},
@@ -298,7 +298,7 @@ footer { color: var(--muted); font-size: 13px; }
 
     {"id": "assistant", "file": "src/vaice/assistant.py", "layer": "reply",
      "summary": "The assistant: a RealtimeResponder whose tools are the skills, plus Run/Cancel and the browser task.",
-     "role": "Builds the instructions (prompt plus memory notes) and a per-reply _Executor that runs the model's tool calls on the session thread and decides by skill kind: run now, ask (one Pending, button only), or start a browser task and end the reply. Owns the UI side of confirmation (approve, cancel, clear_pending) and the browser task (one at a time, its thread, its status, the last ended task). All speech outside a reply goes through _say, one utterance at a time.",
+     "role": "Builds the instructions (prompt plus memory notes and, while the last browser task finished with something to say, a line with what it found) and a per-reply _Executor that runs the model's tool calls on the session thread and decides by skill kind: run now, ask (one Pending, button only), or start a browser task and end the reply. Owns the UI side of confirmation (approve, cancel, clear_pending) and the browser task (one at a time, its thread, its status, the last ended task). All speech outside a reply goes through _say, one utterance at a time.",
      "symbols": [
        {"ref": "assistant.Assistant", "what": "Wires skills, Confirmations, the responder and the browser agent."},
        {"ref": "assistant._Executor.__call__", "what": "One tool call: direct_only check, the same-goal guard, prepare, ask or start or run, record."},
@@ -308,6 +308,7 @@ footer { color: var(--muted); font-size: 13px; }
        {"ref": "assistant.Assistant._start_browse", "what": "Register the task, cancel an older one, say STARTED, start the task thread."},
        {"ref": "assistant._browse", "what": "The task thread: agent.run, then record and speak how it ended."},
        {"ref": "assistant._BrowseHooks.ask", "what": "A gated step: a Pending with a Waiter, a spoken heads-up, wait for the button."},
+       {"ref": "assistant.Assistant._prompt_extra", "what": "The notes block, then the last finished task's line, added to the prompt of every reply."},
        {"ref": "assistant.Assistant._browse_ended", "what": "Decides under the task lock how the task ended and whether it is the last ended one."},
        {"ref": "assistant.Assistant._say", "what": "Speak through the outbox under the speech lock, generation taken before the wait."},
        {"ref": "assistant.WAITING", "what": "What the model reads for a confirm call: only the Run button runs it."},
@@ -457,12 +458,13 @@ footer { color: var(--muted); font-size: 13px; }
 
     {"id": "browse_task", "file": "src/vaice/browse_task.py", "layer": "browser",
      "summary": "The browse skills and the pure pieces of a task: sentences, status, results.",
-     "role": "browse is a background skill whose ask returns WORKING (or refuses while busy); browser_status reads BrowseStatus (the running task, or the last ended one); stop_browsing ends it. spoken_summary takes the agent's Summary line, or the answer with its narration dropped.",
+     "role": "browse is a background skill whose ask returns WORKING (or refuses while busy); browser_status reads BrowseStatus (the running task, or the last ended one); last_result_line turns a finished one into the prompt line; stop_browsing ends it. spoken_summary takes the agent's Summary line, or the answer with its narration dropped.",
      "symbols": [
        {"ref": "browse_task.browse_skills", "what": "browse, browser_status and stop_browsing, offered together."},
        {"ref": "browse_task.BrowseStatus", "what": "What a task reported: tools, pages, words, an asking step, how it ended."},
        {"ref": "browse_task.BrowseStatus.result", "what": "The browser_status answer, running or last ended."},
        {"ref": "browse_task.spoken_summary", "what": "What the outcome speaks."},
+       {"ref": "browse_task.last_result_line", "what": "The context line with the last finished task's goal, how long ago and Summary, cleaned and capped; empty otherwise."},
        {"ref": "browse_task.step_question", "what": "The heads-up for a gated step."},
        {"ref": "browse_task.STARTED", "what": "The fixed sentence vaice says when a task starts."}
      ],
@@ -576,7 +578,7 @@ footer { color: var(--muted); font-size: 13px; }
        {"lane": "handler", "text": "history() returns the windowed turns before this one, waiting up to 5 s for the last transcript.", "ref": "conversation.Conversation.history", "why": "The previous transcript runs off the critical path; a turn whose transcript has not arrived is dropped rather than shown as inaudible."},
        {"lane": "generator", "text": "respond() starts the transcription thread first, so nothing the reply does can stop the question being transcribed.", "ref": "realtime.RealtimeResponder.respond"},
        {"lane": "asr thread", "text": "A transcription session: no language pinned, the audio, commit.", "ref": "realtime._transcribe_into", "why": "Pinning en measurably repeated the passage."},
-       {"lane": "generator", "text": "Builds the instructions (prompt, notes, clock line, ChatML history) and the reply's executor, then starts the session thread.", "ref": "realtime._instructions"},
+       {"lane": "generator", "text": "Builds the instructions (prompt, notes, the last finished browser task's line, clock line, ChatML history) and the reply's executor, then starts the session thread.", "ref": "realtime._instructions"},
        {"lane": "session thread", "text": "Opens the WebSocket, reads the sample rates from session.created, sends session.update with instructions, tools and tool_choice required.", "ref": "realtime._converse", "why": "With auto the model announced a check and stopped; required makes it follow a tool request through."},
        {"lane": "llama-server", "text": "Streams output_text.delta and output_audio.delta.", "ref": "realtime._Session.receive"},
        {"lane": "session thread", "text": "Text goes through the markup stripper and the loop detector; each audio frame goes on the queue with its round's accumulator.", "ref": "realtime._MarkupStripper"},
@@ -725,7 +727,7 @@ footer { color: var(--muted); font-size: 13px; }
        {"from": "declined", "to": "last", "label": "same"},
        {"from": "stopped", "to": "last", "label": "same; a cancelled run is stopped whatever the agent returned"},
        {"from": "failed", "to": "last", "label": "same"},
-       {"from": "last", "to": "gone", "label": "A new task or New conversation forgets it; browser_status reads it until then", "ref": "assistant.Assistant._browser_status"}
+       {"from": "last", "to": "gone", "label": "A new task or New conversation forgets it; browser_status and the prompt line read it until then", "ref": "assistant.Assistant._browser_status"}
      ]},
 
     {"id": "turn", "title": "A turn", "ref": "conversation.Turn",

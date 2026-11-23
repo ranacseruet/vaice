@@ -57,17 +57,27 @@ def _squash(text: str) -> str:
     return " ".join("".join(" " if unicodedata.category(c).startswith("C") else c for c in text).split())
 
 
+def strip_markers(text: str) -> str:
+    """`text` without chat markers (`<|im_start|>`, a token that was never closed), role or thinking tags and code
+    fences; its line breaks stay."""
+    text = _CONTROL_TOKEN.sub(" ", text)
+    text = text.replace("<|", " ").replace("|>", " ")  # a token that was never closed
+    return _FENCE.sub(" ", _ROLE_TAG.sub(" ", text))
+
+
+def clean_line(text: str) -> str:
+    """`text` as one line that is safe in a prompt: no control characters, chat markers, role or thinking tags or
+    code fences (`strip_markers`). Also used for the last browser task's line (`browse_task.last_result_line`)."""
+    return " ".join(strip_markers(_squash(text)).split())
+
+
 def clean_note(text) -> str:
     """The note as it may be stored and put into a prompt: one line, no control characters, chat markers or
     code fences, no leading list marker. Raises `SkillError` (spoken) for text that is empty after that or longer
     than `MAX_NOTE_CHARS`."""
     if not isinstance(text, str):
         raise SkillError("the note must be text")
-    note = _squash(text)
-    note = _CONTROL_TOKEN.sub(" ", note)
-    note = note.replace("<|", " ").replace("|>", " ")  # a token that was never closed
-    note = _FENCE.sub(" ", _ROLE_TAG.sub(" ", note))
-    note = " ".join(note.split())
+    note = clean_line(text)
     while True:  # "- - x", "1. # x"
         stripped = _ROLE_LABEL.sub("", _LIST_MARKER.sub("", note)).strip()
         if stripped == note:

@@ -16,6 +16,7 @@ import unicodedata
 from collections.abc import Callable
 from urllib.parse import urlsplit
 
+from vaice.memory import clean_line, strip_markers
 from vaice.skills import Skill, SkillError, SkillResult
 
 WORKING = "Working in the browser."  # the result of the `browse` call: the model is told, and the reply ends
@@ -38,6 +39,11 @@ STATUS_TOOLS_KEPT = 200  # the status record keeps this many tool calls, the lat
 RESULT_CHARS = 2000  # characters of the answer that are spoken when it has no `Summary:` line
 SUMMARY_CHARS = 400  # ... and of a `Summary:` line
 CUT = "(more on screen)"
+# The system-block line for the last finished task (`last_result_line`), so that "What did you find?" is answered
+# from it and does not start a new task (#136). Imperative like `realtime._clock_line` (a declarative line was
+# ignored there) and with no clause that forbids anything (those broke the audio, #77).
+LAST_RESULT = ('You know what the last browser task found. It was asked: "{goal}". It finished {ago} and found: '
+               '{summary} Use this when asked what the browser task found.')
 NARRATION_CHARS = 400  # a rule or a heading this early ends the agent's narration ("I now have ... Let me compile")
 
 # how a task ended, for `BrowseStatus.end` (the last ended task is reported by it)
@@ -287,6 +293,15 @@ class BrowseStatus:
             self._outcome, self._answer = outcome, answer if outcome == FINISHED else ""
             self._ended_at = self._clock()
 
+    def finding(self) -> tuple[str, str, int] | None:
+        """(goal, answer, seconds since it ended) of a task that ended by finishing, else None (running, stopped,
+        declined or failed). One look under the lock."""
+        with self._lock:
+            if not self._ended or self._outcome != FINISHED:
+                return None
+            goal, answer, ended_at = self._goal, self._answer, self._ended_at
+        return goal, answer, int(self._clock() - ended_at)
+
     def tool(self, title: str, args: object) -> None:
         url = args.get("url") if isinstance(args, dict) else None
         with self._lock:
@@ -361,3 +376,19 @@ class BrowseStatus:
         text = " ".join(part for part in (spoken_summary(answer), more) if part)
         speech = _fit(f"{head}: {text}" if text else head, LAST_SPEECH_CHARS)
         return SkillResult(speech, f"goal: {self._goal}\nended {_ago(seconds)}\n\n{answer}"[:STATUS_DETAIL_CHARS])
+
+
+def last_result_line(status: BrowseStatus | None) -> str:
+    """The `LAST_RESULT` line for the system block of a reply, built per reply so that the "ago" stays current;
+    empty (nothing is added to the prompt) unless `status` is a task that finished with something to say. The goal
+    and the summary are page-steerable text: each is cleaned to one line (`memory.clean_line`; the summary is
+    `spoken_summary`) and capped (`LAST_GOAL_CHARS`, `SUMMARY_CHARS`, the cut mark included). The rest of the answer
+    never goes in."""
+    found = status.finding() if status is not None else None
+    if found is None:
+        return ""
+    goal, answer, seconds = found
+    goal = _fit(clean_line(goal).replace('"', "'"), LAST_GOAL_CHARS)  # it stands in quotes
+    # markers first, on the answer as written: `_speakable` would turn `<|im_end|>` into `< im_end >`
+    summary = _fit(clean_line(spoken_summary(strip_markers(answer))), SUMMARY_CHARS)
+    return LAST_RESULT.format(goal=goal, ago=_ago(seconds), summary=summary) if goal and summary else ""

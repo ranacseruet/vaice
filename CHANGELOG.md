@@ -67,6 +67,11 @@ the pull requests (#53 to #126).
   everything in memory (#84).
 
 ### Changed
+- **The last browser result is in the prompt.** While the last browser task finished with an answer, every reply's
+  system block carries one line with its goal, how long ago it ended and the agent's `Summary:` line (cleaned of chat
+  markers, capped at 400 characters, nothing else of the answer), so "What did you find?" is answered from it instead
+  of starting a new task (#136). It goes with the task: a new task, *New conversation* or a restart forgets it, and a
+  stopped, declined or failed task adds nothing.
 - **`VAICE_BROWSE_SECONDS` defaults to 600** (was 180): research tasks took 79 to 302 s live and two of six ran past
   180.
 - **Default model: LFM3-Omni-2B `Q8_0`** (`VAICE_LLAMACPP_MODEL`; LFM3-Audio-2B still works). It also reads images, so
