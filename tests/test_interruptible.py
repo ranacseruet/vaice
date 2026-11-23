@@ -10,8 +10,10 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 from fastrtc import AdditionalOutputs, ReplyOnPause
+from fastrtc.pause_detection import silero
 from fastrtc.tracks import AudioCallback
 from fastrtc.utils import WebRTCError, webrtc_error_handler
+from huggingface_hub.errors import LocalEntryNotFoundError
 from threads import run_on_thread, start_thread
 
 from vaice import interruptible
@@ -1114,3 +1116,84 @@ def test_interrupting_an_ordinary_reply_forgets_its_audio_in_the_playback_estima
 
     assert rig.handler._proactive_until == 0.0
     assert dropped == []  # the outbox itself is for the reply path's own barge-in: untouched here
+
+
+# -- the Silero VAD model from the Hugging Face cache, with no request (#143)
+
+
+class FakeHub:
+    """`hf_hub_download` as `use_cached_vad_model` calls it, and fastrtc's own loader: which of the two ran."""
+
+    def __init__(self, cached):
+        self.cached, self.calls = cached, []
+
+    def hf_hub_download(self, *, repo_id, filename, local_files_only):
+        self.calls.append(("cache", repo_id, filename, local_files_only))
+        if not self.cached:
+            raise LocalEntryNotFoundError("not in the cache")
+        return "/cache/silero_vad.onnx"
+
+    def fastrtc_download(self):
+        self.calls.append(("fastrtc",))
+        return "/downloaded/silero_vad.onnx"
+
+
+@pytest.fixture
+def hub(monkeypatch):
+    def make(cached):
+        fake = FakeHub(cached)
+        monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
+        monkeypatch.setattr(interruptible, "hf_hub_download", fake.hf_hub_download)
+        # fastrtc's loader, restored after the test (use_cached_vad_model replaces it)
+        monkeypatch.setattr(silero.SileroVADModel, "download_model", staticmethod(fake.fastrtc_download))
+        return fake
+
+    return make
+
+
+def test_a_cached_vad_model_is_loaded_from_the_cache_without_fastrtcs_request(hub):
+    fake = hub(cached=True)
+
+    interruptible.use_cached_vad_model()
+
+    assert silero.SileroVADModel.download_model() == "/cache/silero_vad.onnx"
+    assert fake.calls == [("cache", "freddyaboulton/silero-vad", "silero_vad.onnx", True)]
+
+
+def test_a_vad_model_not_cached_yet_is_downloaded_by_fastrtc(hub):
+    fake = hub(cached=False)
+
+    interruptible.use_cached_vad_model()
+
+    assert silero.SileroVADModel.download_model() == "/downloaded/silero_vad.onnx"
+    assert [call[0] for call in fake.calls] == ["cache", "fastrtc"]
+
+
+@pytest.mark.parametrize("value", ["1", "0"])
+def test_a_users_hf_hub_offline_leaves_fastrtcs_loader_as_it_is(hub, monkeypatch, value):
+    fake = hub(cached=True)
+    monkeypatch.setenv("HF_HUB_OFFLINE", value)
+
+    interruptible.use_cached_vad_model()
+
+    assert silero.SileroVADModel.download_model() == "/downloaded/silero_vad.onnx" and fake.calls == [("fastrtc",)]
+
+
+def test_using_the_cached_vad_model_twice_wraps_the_loader_once(hub):
+    fake = hub(cached=False)
+
+    interruptible.use_cached_vad_model()
+    interruptible.use_cached_vad_model()
+
+    silero.SileroVADModel.download_model()
+    assert [call[0] for call in fake.calls] == ["cache", "fastrtc"]
+
+
+def test_a_fastrtc_without_the_loader_is_left_alone_with_a_warning(monkeypatch, caplog):
+    monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
+    monkeypatch.setattr(silero, "SileroVADModel", type("SileroVADModel", (), {}))
+
+    with caplog.at_level(logging.WARNING, logger="vaice.interruptible"):
+        interruptible.use_cached_vad_model()
+
+    assert "no download_model()" in caplog.text

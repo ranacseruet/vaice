@@ -38,7 +38,7 @@ from vaice.browse import (
 )
 from vaice.confirm import CONFIRM_SECONDS, Pending
 from vaice.conversation import Conversation, Turn
-from vaice.interruptible import InterruptSafeReplyOnPause, stop_playing_reply
+from vaice.interruptible import InterruptSafeReplyOnPause, stop_playing_reply, use_cached_vad_model
 from vaice.lifecycle import install_stop_handler, request_stop
 from vaice.memory import Memory
 from vaice.outbox import Outbox
@@ -244,6 +244,7 @@ def _disable_gradio_analytics() -> None:
 
 def build_stream(responder: Assistant, conversation: Conversation) -> Stream:
     _disable_gradio_analytics()
+    use_cached_vad_model()  # before the handler below loads the VAD model
     chatbot = gr.Chatbot(type="messages", label="Conversation", height=CHATBOT_HEIGHT, allow_tags=False)
     # what the responder says with no reply in flight (the outcome of a Run click, a browser task) goes to the outbox
     # the audio handler drains
