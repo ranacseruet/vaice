@@ -7,13 +7,17 @@ the user approved with a click) is returned by the idle `emit()`, paced by the e
 of its playback, and dropped when the user starts talking."""
 import asyncio
 import logging
+import os
 import threading
 import time
 
 import numpy as np
 from fastrtc import ReplyOnPause
+from fastrtc.pause_detection import silero
 from fastrtc.pause_detection.silero import SileroVadOptions
 from fastrtc.utils import split_output
+from huggingface_hub import hf_hub_download
+from huggingface_hub.errors import LocalEntryNotFoundError
 
 from vaice import config
 from vaice.outbox import Marker, Outbox, run_hook
@@ -46,6 +50,38 @@ PREROLL_SECONDS = 0.3
 # audio played. The next item is served only while the audio served so far is estimated to finish less than this far
 # ahead, which keeps markers (the recorded text) within this of the real playback.
 LEAD_SECONDS = 0.4
+# The Silero VAD model fastrtc 0.0.34 loads (`silero.SileroVADModel.download_model`), looked up in the cache first
+SILERO_REPO, SILERO_FILE = "freddyaboulton/silero-vad", "silero_vad.onnx"
+
+
+def use_cached_vad_model() -> None:
+    """Load fastrtc's Silero VAD model from the Hugging Face cache when it is there, with no request (#143).
+
+    fastrtc's `SileroVADModel.download_model()` calls `hf_hub_download` with no revision, which sends a `HEAD` to
+    huggingface.co at every start to check for a newer one, even when the model is cached. Wrapped here, the cached
+    copy is used as it is and only a missing one is downloaded (fastrtc's own call, the first start). Setting
+    `HF_HUB_OFFLINE` from vaice would not do it: huggingface_hub reads it once, when it is imported, which gradio and
+    fastrtc do before any vaice code runs. A user who set `HF_HUB_OFFLINE` (either way) gets fastrtc's loader as it is.
+    Call before the first `ReplyOnPause` is built (it loads the model); calling it again changes nothing.
+    """
+    if "HF_HUB_OFFLINE" in os.environ:
+        return
+    model_class = getattr(silero, "SileroVADModel", None)
+    download = getattr(model_class, "download_model", None)
+    if download is None:  # a fastrtc upgrade moved the loader: its own check then runs, one request at start
+        log.warning("cannot use the cached VAD model: fastrtc's SileroVADModel has no download_model()")
+        return
+    if getattr(download, "cached_first", False):
+        return
+
+    def download_model() -> str:
+        try:
+            return hf_hub_download(repo_id=SILERO_REPO, filename=SILERO_FILE, local_files_only=True)
+        except LocalEntryNotFoundError:  # not downloaded yet: fastrtc fetches it
+            return download()
+
+    download_model.cached_first = True  # type: ignore[attr-defined]
+    model_class.download_model = staticmethod(download_model)
 
 
 def _clear_playback(handler) -> None:
