@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from vaice import browse_task, config, lifecycle
 from vaice.audio import AudioFrame
 from vaice.browse import BrowseAgent, BrowseDeclined, BrowseError, BrowseStopped
-from vaice.confirm import Confirmations, Pending, Waiter
+from vaice.confirm import Asked, Confirmations, Pending, Waiter
 from vaice.conversation import WAITING_FOR_CONFIRMATION, Message, Turn
 from vaice.memory import REFUSED_AFTER_TOOL, Memory
 from vaice.outbox import Outbox
@@ -50,6 +50,9 @@ APPROVAL = "{question} Press Run to allow it, or Cancel."  # the heads-up of a b
 FINISHED = "finished: "  # starts the outcome row of the Tool activity panel (the start row says `WORKING`)
 # What the model reads when "New conversation" came while its call was being prepared: no request was made
 DROPPED = "not done: the conversation was started over, so nothing was asked"
+# What the model reads when a browser step waits for the Run button: the step's request is not replaced (#120)
+STEP_WAITING = ("not done: a step of the browser task is waiting on the screen for Run or Cancel, so nothing else was "
+                "asked. Tell the user to answer that step or stop the browser task first, then ask again.")
 
 
 def _notes_block(notes: Sequence[str]) -> str:
@@ -94,9 +97,13 @@ class _Executor:
         prepared = self._skills.prepare(name, arguments)
         if isinstance(prepared, Question):
             arguments = prepared.arguments or arguments  # the call the question names is the one Run runs
-            if not self._confirmations.ask(Pending(name, arguments, prepared.text, self._turn), self._epoch):
+            asked = self._confirmations.ask(Pending(name, arguments, prepared.text, self._turn), self._epoch)
+            if asked is Asked.STALE:
                 log.info("assistant dropped %s: a new conversation began while it was prepared", name)
                 return self._record(name, arguments, SkillResult(DROPPED))
+            if asked is Asked.TASK_WAITING:
+                log.info("assistant did not ask %s: a browser step is waiting for the Run button", name)
+                return self._record(name, arguments, SkillResult(STEP_WAITING))
             self._turn.add_tool_event(name, arguments, WAITING_FOR_CONFIRMATION)
             return WAITING
         if isinstance(prepared, Started):

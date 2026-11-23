@@ -69,6 +69,8 @@ Run button settles it**; nothing is decided by voice:
   added to the same chat bubble when its audio plays. **Cancel** records `cancelled` and says nothing.
 - A request expires 60 seconds after it was made, and *New conversation* drops it. A panel left on screen cannot
   approve a newer request: the buttons pass the id of the request they showed.
+- While a browser task's step waits for **Run**, a new request is not asked: the model is told a step is waiting and
+  says so, and the step stays on the screen. Answer the step or stop the browser task, then ask again.
 - Starting to talk while the outcome is being said drops what was not played yet.
 
 ## Shell commands

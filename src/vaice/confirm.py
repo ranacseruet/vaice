@@ -8,8 +8,11 @@ A request that nobody settles expires `CONFIRM_SECONDS` after it was asked.
 A request with a `waiter` is a different kind: a question of a task that is already running (a step of the browser
 agent), not a skill call to run. Its answer goes to the waiter, which the task blocks on. Whoever settles the request
 settles the waiter in the same step, under the lock: `answer` is yes or no, and every other way out (`take`, `clear`,
-a newer request, expiry) is a no, so the task can never see a request that is gone but not answered.
+a newer request, expiry) is a no, so the task can never see a request that is gone but not answered. A newer request
+replaces an earlier one, except that a waiter's request is never replaced by a plain one: the task's question stays
+until it is answered (#120), and the plain request is refused instead.
 """
+import enum
 import threading
 import time
 import uuid
@@ -19,6 +22,18 @@ from dataclasses import dataclass, field
 from vaice.conversation import Turn
 
 CONFIRM_SECONDS = 60  # how long an asked question stays answerable, counted from when it was asked
+
+
+class Asked(enum.Enum):
+    """What `Confirmations.ask` did with a request. Only `ASKED` is true, so `if not confirmations.ask(...)` reads
+    "it was not asked"."""
+
+    ASKED = "asked"
+    STALE = "stale"  # a `clear` ("New conversation") came since the asker began
+    TASK_WAITING = "task waiting"  # a running task's question (a waiter's request) is waiting: it is not replaced
+
+    def __bool__(self) -> bool:
+        return self is Asked.ASKED
 
 
 class Waiter:
@@ -72,18 +87,23 @@ class Confirmations:
         with self._lock:
             return self._epoch
 
-    def ask(self, pending: Pending, epoch: int | None = None) -> bool:
-        """Hold `pending`, replacing any earlier request (a replaced waiter is answered no). With `epoch` (the
-        `epoch` the asker saw when it began), refused when a `clear` came since: a reply or a task that "New
-        conversation" abandoned must not leave a request that Run would still run. False when refused."""
+    def ask(self, pending: Pending, epoch: int | None = None) -> Asked:
+        """Hold `pending`, replacing any earlier request. With `epoch` (the `epoch` the asker saw when it began),
+        `STALE` when a `clear` came since: a reply or a task that "New conversation" abandoned must not leave a request
+        that Run would still run. `TASK_WAITING` when `pending` is a plain request and a waiter's request (a running
+        task's question) is live: replacing it would answer the task no for the user, who never decided (#120). A
+        refused `pending` with a waiter is answered no."""
         with self._lock:
             if epoch is not None and epoch != self._epoch:
                 _refuse(pending)
-                return False
-            replaced, self._pending = self._pending, pending
+                return Asked.STALE
+            current = self._live()
+            if pending.waiter is None and current is not None and current.waiter is not None:
+                return Asked.TASK_WAITING
+            self._pending = pending
             pending.asked_at = self._clock()
-            _refuse(replaced)
-            return True
+            _refuse(current)
+            return Asked.ASKED
 
     def current(self) -> Pending | None:
         """The request, unless it expired `CONFIRM_SECONDS` after it was asked (then it is dropped)."""

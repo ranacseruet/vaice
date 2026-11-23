@@ -95,6 +95,10 @@ the pull requests (#53 to #126).
   with the screen skill on). Each task's prompt also carries today's date, so "this week" means now.
 
 ### Fixed
+- While a browser step waits for **Run**, a request from an ordinary reply that also needs Run (`quit_app`,
+  `run_shell`, `forget_everything`, an MCP `click` tool) no longer replaces the step, which answered it no and stopped
+  the browser task although you never declined. The new request is refused, and the model tells you a step is
+  waiting (#120).
 - Clearing fastrtc's playback queue (a barge-in, talking over a Run outcome or a browser task's outcome, *New
   conversation*) now runs on the connection's event loop, which fills and plays that queue, instead of on the
   thread that asked for it; the clear raced the loop's own reads and writes of the queue and of its playback

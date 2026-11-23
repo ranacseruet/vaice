@@ -728,6 +728,33 @@ def test_a_steps_heads_up_is_spoken_but_not_recorded_on_the_asking_turn_and_the_
     assert s.turn.assistant_text == "All done. All done."  # STARTED and the outcome
 
 
+def test_a_confirm_call_while_a_step_waits_is_refused_and_the_step_and_its_task_go_on(realtime):
+    """#120: an utterance does not stop the task, so a reply can ask for something else while a step waits for Run.
+    That request is refused, not put in the step's place: replacing the step would answer the task no."""
+    memory = Memory(None)
+    memory.add("The user parks on level three.")
+    s = browsing(realtime, asks_then_answers, memory=memory)  # the default skills: forget_everything asks first
+    wait_until(lambda: s.resp.pending() is not None)
+    step = s.resp.pending()
+    asking_turn = Turn()
+
+    s.server.reply_scripts[:] = calls_then_speech(("forget_everything", "{}"))
+    s.server._replies_played = 0
+    drive(s.resp, asking_turn)
+
+    assert outputs(sessions(s.server)[-1]) == [assistant.STEP_WAITING]
+    assert tool_events(asking_turn) == [("forget_everything", assistant.STEP_WAITING)]
+    assert s.resp.pending() is step and s.resp.browsing() and s.agent.approved is None
+    assert memory.notes() == ["The user parks on level three."]
+
+    assert s.resp.approve(step.id) == "go ahead"  # the step is still answerable, and the task goes on
+    wait_until(browse_over)
+    assert s.agent.approved is True and ("browse", "declined") not in tool_events(s.turn)
+
+    ask_again(s, ("forget_everything", "{}"))  # with no step waiting, the request is asked as before
+    assert s.resp.pending() is not None and s.resp.pending().name == "forget_everything"
+
+
 def test_run_is_the_yes_to_a_step_and_cancel_the_no_and_neither_runs_a_skill(realtime):
     s = browsing(realtime, asks_then_answers)
     wait_until(lambda: s.resp.pending() is not None)
