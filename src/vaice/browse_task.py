@@ -390,5 +390,7 @@ def last_result_line(status: BrowseStatus | None) -> str:
     goal, answer, seconds = found
     goal = _fit(clean_line(goal).replace('"', "'"), LAST_GOAL_CHARS)  # it stands in quotes
     # markers first, on the answer as written: `_speakable` would turn `<|im_end|>` into `< im_end >`
-    summary = _fit(clean_line(spoken_summary(strip_markers(answer))), SUMMARY_CHARS)
+    summary = _fit(clean_line(spoken_summary(strip_markers(answer))), SUMMARY_CHARS - 1)
+    if summary and not summary.endswith(CUT) and summary[-1] not in ".!?":  # not run into the sentence after it
+        summary += "."
     return LAST_RESULT.format(goal=goal, ago=_ago(seconds), summary=summary) if goal and summary else ""
