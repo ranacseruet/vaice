@@ -95,6 +95,9 @@ the pull requests (#53 to #126).
   with the screen skill on). Each task's prompt also carries today's date, so "this week" means now.
 
 ### Fixed
+- A start no longer sends any request to `huggingface.co` once the Silero voice-activity model is downloaded: vaice
+  loads it from the Hugging Face cache instead of letting fastrtc check for a newer revision every time. The first
+  start still downloads it; with `HF_HUB_OFFLINE` set (either way) fastrtc's own loader runs as before (#143).
 - `open_app` and `quit_app` know a few names that are not words of the app's name: "VS Code" and "VSCode" (Visual
   Studio Code, which runs as "Code"), "System Preferences" (System Settings) and "iTunes" (Music). It is a short fixed
   list, `APP_ALIASES` in `skills.py`; initials are not matched (#140).
@@ -110,9 +113,7 @@ the pull requests (#53 to #126).
   asked for the task, so it is not in that chat bubble, in `conversation.json` or in the history of later replies;
   the confirmation panel still shows the step (#127).
 - Gradio's telemetry and its "newer version" check (three requests to `huggingface.co` and `api.gradio.app` at every
-  start) are off: `vaice` sets `GRADIO_ANALYTICS_ENABLED=False` unless you set it yourself. The one startup request
-  left is the Silero VAD model's revision check at `huggingface.co`; `HF_HUB_OFFLINE=1` stops it once the model is
-  cached (see [Privacy](docs/privacy.md)) (#98).
+  start) are off: `vaice` sets `GRADIO_ANALYTICS_ENABLED=False` unless you set it yourself (#98).
 - `open_app` said an app was not installed when it was asked for by its short name ("Chrome" for Google
   Chrome): it now opens the one installed app whose name has those words, or names the apps it could be; `quit_app`
   matches running apps the same way, and Run quits only the app its request named (#130).
