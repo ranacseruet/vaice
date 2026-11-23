@@ -339,6 +339,40 @@ def test_matching_apps_takes_the_exact_name_or_whole_words_of_a_longer_one(name,
     assert skills_module.matching_apps(name, apps) == expected
 
 
+@pytest.mark.parametrize(("name", "apps", "expected"), [
+    ("VS Code", ["Visual Studio Code", "Xcode"], ["Visual Studio Code"]),
+    ("vscode", ["Visual Studio Code"], ["Visual Studio Code"]),
+    ("VS-Code", ["Visual Studio Code"], ["Visual Studio Code"]),
+    ("VS Code", ["Code", "Safari"], ["Code"]),  # running, VS Code is "Code" (its bundle name)
+    ("Visual Studio Code", ["Code", "Safari"], ["Code"]),
+    ("System Preferences", ["System Settings", "Safari"], ["System Settings"]),
+    ("iTunes", ["Music"], ["Music"]),
+    ("VS Code", ["Safari"], []),  # not installed: the alias opens nothing else
+    ("VS", ["Visual Studio Code"], []),  # no initials matching: only the listed names
+])
+def test_matching_apps_knows_a_few_names_that_are_not_words_of_the_apps_name(name, apps, expected):
+    assert skills_module.matching_apps(name, apps) == expected
+
+
+def test_open_app_opens_visual_studio_code_for_vs_code(script, app_folders):
+    app_folders.add("Visual Studio Code")
+    app_folders.add("Xcode")
+    script.answer = not_found_unless("Visual Studio Code")
+
+    result = default_skills().run("open_app", '{"name": "VS Code"}')
+
+    assert script.ran == [["open", "-a", "VS Code"], ["open", "-a", "Visual Studio Code"]]
+    assert result == SkillResult("opened Visual Studio Code")
+
+
+def test_quit_app_finds_a_running_vs_code_by_the_name_it_runs_under(script):
+    running = LSAPPINFO.replace('"Finder"', '"Code"')
+    script.answer = lambda argv: running
+
+    assert default_skills().prepare("quit_app", '{"name": "VS Code"}') == Question(
+        "Shall I quit Code?", '{"name": "Code"}')
+
+
 def test_installed_apps_lists_the_apps_of_every_folder_once_and_skips_a_missing_folder(app_folders):
     app_folders.add("Safari")
     app_folders.add("Google Chrome")

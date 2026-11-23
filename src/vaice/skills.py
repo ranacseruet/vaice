@@ -415,6 +415,15 @@ def _app_name(args: dict) -> str:
 APP_FOLDERS = (Path("/Applications"), Path("/Applications/Utilities"), Path("/System/Applications"),
                Path("/System/Applications/Utilities"), Path.home() / "Applications")
 MAX_LISTED_APPS = 5  # apps named back when a spoken name matches several
+# Spoken names that are not words of the app's name (#140): an abbreviation, a former name, or the name a running app
+# goes by (`lsappinfo` lists Visual Studio Code as "Code", its bundle name). A short fixed list, so only these names
+# widen what a spoken name can open; keyed by the spoken name's words, joined without spaces ("VS Code" is "vscode").
+APP_ALIASES: dict[str, tuple[str, ...]] = {
+    "vscode": ("Visual Studio Code", "Code"),
+    "visualstudiocode": ("Visual Studio Code", "Code"),
+    "systempreferences": ("System Settings",),  # renamed in macOS 13
+    "itunes": ("Music",),  # replaced in macOS 10.15
+}
 
 
 def _words(name: str) -> list[str]:
@@ -422,13 +431,18 @@ def _words(name: str) -> list[str]:
 
 
 def matching_apps(name: str, apps: Sequence[str]) -> list[str]:
-    """The apps in `apps` that `name` stands for: the one with exactly that name (case ignored), else every app whose
-    name holds `name` as whole words ("Chrome" is Google Chrome, "Word" is Microsoft Word but not WordPerfect).
-    People say an app's short name; `open -a` and AppleScript know only the full one."""
+    """The apps in `apps` that `name` stands for: the one with exactly that name (case ignored), else the app an
+    `APP_ALIASES` entry names for it ("VS Code" is Visual Studio Code), else every app whose name holds `name` as whole
+    words ("Chrome" is Google Chrome, "Word" is Microsoft Word but not WordPerfect). People say an app's short name;
+    `open -a` and AppleScript know only the full one."""
     exact = [app for app in apps if app.casefold() == name.casefold()]
     if exact:
         return exact[:1]
     wanted = _words(name)
+    aliased = {alias.casefold() for alias in APP_ALIASES.get("".join(wanted), ())}
+    found = [app for app in apps if app.casefold() in aliased]
+    if found:
+        return found[:1]
     if not wanted:
         return []
     found = []

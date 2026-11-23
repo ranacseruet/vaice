@@ -95,6 +95,9 @@ the pull requests (#53 to #126).
   with the screen skill on). Each task's prompt also carries today's date, so "this week" means now.
 
 ### Fixed
+- `open_app` and `quit_app` know a few names that are not words of the app's name: "VS Code" and "VSCode" (Visual
+  Studio Code, which runs as "Code"), "System Preferences" (System Settings) and "iTunes" (Music). It is a short fixed
+  list, `APP_ALIASES` in `skills.py`; initials are not matched (#140).
 - While a browser step waits for **Run**, a request from an ordinary reply that also needs Run (`quit_app`,
   `run_shell`, `forget_everything`, an MCP `click` tool) no longer replaces the step, which answered it no and stopped
   the browser task although you never declined. The new request is refused, and the model tells you a step is
