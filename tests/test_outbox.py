@@ -1,6 +1,8 @@
 """The proactive-speech outbox: audio and markers queued by a worker thread, drained by the handler's idle emit()."""
 import logging
 import threading
+import time
+from functools import partial
 
 import numpy as np
 
@@ -181,38 +183,58 @@ def test_constants():
 
 
 def test_concurrent_puts_clears_and_polls_lose_nothing_and_raise_nothing():
+    """Three producers each put 200 numbered frames, each followed by its marker, while a consumer polls and clears
+    until they are done and the box is empty: no frame was served twice and every marker ended exactly one way, it ran
+    or its `on_drop` did. The threads start together and the producers yield after each put, so they interleave: before
+    that, each producer ran to its end in one time slice and the consumer's first clear dropped nearly everything. The
+    bound this replaced added `len(box)`, which counts markers too, to the frames served, and failed whenever the
+    producers got ahead of the consumer (#119)."""
     box = Outbox()
     box.poll(True)
-    errors, seen, dropped = [], [], []
+    errors, seen, ran, dropped = [], [], [], []
+    start_together = threading.Barrier(4)
 
     def producer(start):
         try:
-            for i in range(200):
-                box.put((24000, np.full(1, start + i, dtype=np.float32)))
-                box.put_marker(lambda: None, on_drop=lambda: dropped.append(1))
+            start_together.wait(5)
+            for i in range(start, start + 200):
+                box.put((24000, np.full(1, i, dtype=np.float32)))
+                box.put_marker(partial(ran.append, i), on_drop=partial(dropped.append, i))
+                time.sleep(0)  # let the other threads in
         except BaseException as exc:
             errors.append(exc)
+
+    def serve(item):
+        if isinstance(item, Marker):
+            item.callback()
+        elif item is not None:
+            seen.append(int(item[1][0]))
+
+    producers = [threading.Thread(target=producer, args=(n * 1000,)) for n in range(3)]
 
     def consumer():
         try:
-            for n in range(2000):
-                item = box.poll(True)
-                if item is not None and not isinstance(item, Marker):
-                    seen.append(item)
-                if n % 500 == 0:
+            start_together.wait(5)
+            polls = 0
+            while any(p.is_alive() for p in producers) or len(box):
+                serve(box.poll(True))
+                polls += 1
+                if polls % 97 == 0:
                     box.clear()
+                time.sleep(0)
         except BaseException as exc:
             errors.append(exc)
 
-    threads = [threading.Thread(target=producer, args=(n * 1000,)) for n in range(3)] + [
-        threading.Thread(target=consumer)]
+    threads = [*producers, threading.Thread(target=consumer)]
     for t in threads:
         t.start()
     for t in threads:
         t.join(10)
-
     assert not any(t.is_alive() for t in threads) and errors == []
-    assert len(seen) + len(box) <= 600  # never more frames than were put (3 x 200)
+
+    numbers = [n * 1000 + i for n in range(3) for i in range(200)]
+    assert len(seen) == len(set(seen)) and set(seen) <= set(numbers)  # no frame twice, none made up
+    assert sorted(ran + dropped) == numbers  # every marker ran or was dropped, once
 
 
 def test_a_producer_that_captured_the_generation_is_refused_after_a_clear():
