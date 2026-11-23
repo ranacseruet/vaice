@@ -68,7 +68,7 @@ the pull requests (#53 to #126).
 
 ### Changed
 - **The last browser result is in the prompt.** While the last browser task finished with an answer, every reply's
-  system block carries one line with its goal, how long ago it ended and the agent's `Summary:` line (cleaned of chat
+  system block carries one line with its goal, how long ago it ended and its spoken summary (the agent's `Summary:` line, or the start of its report; cleaned of chat
   markers, capped at 400 characters, nothing else of the answer), so "What did you find?" is answered from it instead
   of starting a new task (#136). It goes with the task: a new task, *New conversation* or a restart forgets it, and a
   stopped, declined or failed task adds nothing.

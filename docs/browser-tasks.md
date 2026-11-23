@@ -77,9 +77,9 @@ a version it cannot parse only warns), and for `acp` that the agent's program is
   screen shows more). No new command is sent to Pi.
 - **Follow-ups after the task ended.** The model does not see a finished task's whole result: it sees the summary that
   was said and, in the system block of every reply while the task is kept, one line with the task's goal, how long ago
-  it ended and the agent's `Summary:` line ("You know what the last browser task found. It was asked: ...", cleaned
+  it ended and its spoken summary, the agent's `Summary:` line or the start of its report ("You know what the last browser task found. It was asked: ...", cleaned
   of chat markers and capped at 400 characters; nothing for a stopped, declined or failed task), so "What did you
-  find?" can be answered from it. "Which one was the cheapest?" is answered through `browser_status`, which also
+  find?" or "Which one was the cheapest?" can be answered from it; the model can also call `browser_status`, which
   reports the **last ended task**: its goal, how long ago it ended ("42 seconds ago", then minutes) and how it ended. A
   finished task adds its spoken summary and then more of the answer, cleaned for speech and capped at 700 characters
   as a whole (the summary comes first); a task that was stopped, declined at a step or failed is one sentence
