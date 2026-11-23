@@ -206,7 +206,7 @@ footer { color: var(--muted); font-size: 13px; }
 
 <script type="application/json" id="architecture-data">
 {
-  "as_of": "2026-11-23, main after #151, plus the playback-queue clear on the connection's loop (#67)",
+  "as_of": "2026-11-23, main after #152, plus a plain request refused while a browser step waits (#120)",
   "repo": "https://github.com/ranacseruet/vaice/blob/main/",
   "layers": [
     {"id": "front", "title": "Front end"},
@@ -374,7 +374,7 @@ footer { color: var(--muted); font-size: 13px; }
 
     {"id": "confirm", "file": "src/vaice/confirm.py", "layer": "reply",
      "summary": "The one pending request, settled only by a button.",
-     "role": "Confirmations holds at most one Pending. ask replaces an older one and is refused for a stale epoch; take removes it atomically and only by its id; answer settles a browser step's Waiter; clear (New conversation) bumps the epoch. A request expires CONFIRM_SECONDS after it was asked. Every exit except answer is a no to a Waiter.",
+     "role": "Confirmations holds at most one Pending. ask replaces an older one and is refused for a stale epoch, and a plain request is refused while a browser step waits (TASK_WAITING: replacing the step would answer the task no); take removes it atomically and only by its id; answer settles a browser step's Waiter; clear (New conversation) bumps the epoch. A request expires CONFIRM_SECONDS after it was asked. Every exit except answer is a no to a Waiter.",
      "symbols": [
        {"ref": "confirm.Confirmations", "what": "The holder, shared by reply threads and click handlers."},
        {"ref": "confirm.Confirmations.ask", "what": "Hold a request; False for a stale epoch."},
@@ -694,12 +694,12 @@ footer { color: var(--muted); font-size: 13px; }
      ],
      "edges": [
        {"from": "start", "to": "current", "label": "Confirmations.ask: the panel shows it on the next tick", "ref": "confirm.Confirmations.ask"},
-       {"from": "start", "to": "refused", "label": "ask with a stale epoch: the reply began before New conversation"},
+       {"from": "start", "to": "refused", "label": "ask with a stale epoch (the reply began before New conversation), or a plain ask while a browser step waits (the model reads STEP_WAITING)", "ref": "assistant.STEP_WAITING"},
        {"from": "current", "to": "ran", "label": "Run: approve takes it by id and runs the stored call, then speaks APPROVED", "ref": "assistant.Assistant.approve"},
        {"from": "current", "to": "cancelled", "label": "Cancel: recorded as cancelled, nothing spoken", "ref": "assistant.Assistant.cancel"},
        {"from": "current", "to": "answered", "label": "A browser step: answer resolves its Waiter yes or no", "ref": "confirm.Confirmations.answer"},
        {"from": "current", "to": "expired", "label": "CONFIRM_SECONDS after asking, noticed by current() or take()", "ref": "confirm.Confirmations.current"},
-       {"from": "current", "to": "replaced", "label": "A newer ask replaces it"},
+       {"from": "current", "to": "replaced", "label": "A newer ask replaces it; a plain request never replaces a browser step"},
        {"from": "current", "to": "cleared", "label": "New conversation: clear bumps the epoch", "ref": "confirm.Confirmations.clear"}
      ]},
 

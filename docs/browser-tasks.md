@@ -62,7 +62,9 @@ a version it cannot parse only warns), and for `acp` that the agent's program is
   shows the tool and its exact arguments with **Run** and **Cancel**, and a fresh realtime session is asked to say a
   fixed sentence naming the action and the site ("The browser task wants to click something on example.com. The details are
   on the screen. Press Run to allow it, or Cancel."). **Run** lets the task go on; **Cancel** stops it, and the agent is told to stop as well, and says "Okay,
-  I stopped there." Nothing you say answers it, and silence expires after 60 s as a no. The agent's own words are
+  I stopped there." Nothing you say answers it, and silence expires after 60 s as a no. Asking for something else that
+  needs Run meanwhile (quitting an app, a shell command) does not replace the step: the model says a step is waiting,
+  and you answer the step or stop the task first. The agent's own words are
   never spoken: only fixed sentences and the final answer, which is the text after the agent's last tool call.
   `VAICE_BROWSE_CONFIRM=off` turns these questions off: every browser step then runs unasked, forms and purchases
   included (startup warns).

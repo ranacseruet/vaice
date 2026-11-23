@@ -3,7 +3,7 @@ import threading
 
 import pytest
 
-from vaice.confirm import CONFIRM_SECONDS, Confirmations, Pending, Waiter
+from vaice.confirm import CONFIRM_SECONDS, Asked, Confirmations, Pending, Waiter
 from vaice.conversation import Turn
 
 
@@ -178,7 +178,7 @@ def test_every_other_way_a_request_leaves_is_a_no_to_its_waiter(how):
     elif how == "clear":
         confirmations.clear()
     elif how == "replaced":
-        confirmations.ask(pending())
+        confirmations.ask(asking())  # a newer question of a task (a plain request does not replace it: below)
     else:
         clock.now += CONFIRM_SECONDS + 1
         assert confirmations.current() is None
@@ -221,8 +221,48 @@ def test_a_clear_refuses_a_request_from_an_asker_that_began_before_it():
 
     confirmations.clear()  # "New conversation" while the asker was still preparing its request
 
-    assert confirmations.ask(stale, began) is False
+    assert confirmations.ask(stale, began) is Asked.STALE
     assert confirmations.current() is None and waiter.wait(0) is False  # a refused step is a no
     fresh = pending()
-    assert confirmations.ask(fresh, confirmations.epoch) is True and confirmations.current() is fresh
-    assert confirmations.ask(pending()) is True  # without an epoch, as before
+    assert confirmations.ask(fresh, confirmations.epoch) is Asked.ASKED and confirmations.current() is fresh
+    assert confirmations.ask(pending()) is Asked.ASKED  # without an epoch, as before
+
+
+def test_only_asked_is_true():
+    assert Asked.ASKED and not Asked.STALE and not Asked.TASK_WAITING
+
+
+def test_a_plain_request_does_not_replace_a_tasks_question_that_waits():
+    """#120: replacing the question would answer the running task no although the user never decided."""
+    confirmations = Confirmations(Clock())
+    step = asking()
+    confirmations.ask(step)
+    request = pending()
+
+    assert confirmations.ask(request) is Asked.TASK_WAITING
+
+    assert confirmations.current() is step and step.waiter.wait(0) is None  # still waiting, unanswered
+    assert confirmations.take(request.id) is None  # the refused request was never held
+
+
+@pytest.mark.parametrize("how", ["answered", "expired"])
+def test_once_the_tasks_question_is_settled_a_plain_request_is_asked(how):
+    clock = Clock()
+    confirmations = Confirmations(clock)
+    step = asking()
+    confirmations.ask(step)
+    if how == "answered":
+        confirmations.answer(step.id, True)
+    else:
+        clock.now += CONFIRM_SECONDS + 1  # an expired question no longer holds the panel
+
+    request = pending()
+    assert confirmations.ask(request) is Asked.ASKED and confirmations.current() is request
+
+
+def test_a_tasks_question_still_replaces_a_plain_request():
+    confirmations = Confirmations(Clock())
+    confirmations.ask(pending())
+    step = asking()
+
+    assert confirmations.ask(step) is Asked.ASKED and confirmations.current() is step

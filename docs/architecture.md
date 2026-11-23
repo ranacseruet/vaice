@@ -229,7 +229,10 @@ flowchart TD
 A `confirm` skill (`quit_app`, `run_shell`, `forget_everything`, an MCP tool with the `click` policy) does not run when
 the model asks for it. `confirm.py` holds one pending request, shown in the UI at once with the skill and its exact
 arguments; **only the Run button settles it**, and nothing a user says does. It expires 60 s after it was made; a
-newer request replaces it, and a stale panel's buttons carry the old id and settle nothing. A pending request is taken
+newer request replaces it, and a stale panel's buttons carry the old id and settle nothing. A browser step that waits
+is the exception: a plain request does not replace it (that would answer the task no for the user) but is refused
+(`confirm.Asked.TASK_WAITING`), and the model reads `assistant.STEP_WAITING`: answer the step or stop the task first
+(#120). A pending request is taken
 atomically, so two clicks cannot both run it. A request, a browser task or a step from a reply that began before *New conversation*
 is refused (`Confirmations.epoch`), and outcomes and heads-ups are spoken one at a time, never interleaved.
 
@@ -251,13 +254,13 @@ The life of one `confirm.Pending`. Every way out other than an answer is a no to
 
 ```mermaid
 stateDiagram-v2
-  [*] --> Refused: ask with a stale epoch, a reply from before New conversation
+  [*] --> Refused: ask with a stale epoch (a reply from before New conversation), or a plain ask while a browser step waits
   [*] --> Current: Confirmations.ask, the panel shows it on the next tick
   Current --> Ran: Run, Assistant.approve takes it by id and runs the stored call
   Current --> Cancelled: Cancel, Assistant.cancel takes it
   Current --> Answered: a browser step, Confirmations.answer settles its Waiter
   Current --> Expired: CONFIRM_SECONDS after asking, noticed by current or take
-  Current --> Replaced: a newer ask
+  Current --> Replaced: a newer ask, never a plain one over a browser step
   Current --> Cleared: New conversation, clear bumps the epoch
   Ran --> [*]: the outcome is spoken with APPROVED
   Cancelled --> [*]
