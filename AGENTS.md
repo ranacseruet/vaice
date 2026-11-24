@@ -8,6 +8,15 @@ Guidance for coding agents (Claude Code, Codex, Cursor, …) working in this rep
 
 The architecture is deliberately small (decided 2026-11-19, after a spike measured the trade-off): one model, one session per reply, everything vaice must be sure of is a button. Do not reintroduce a second model, a separate STT/TTS step, spoken approval or multi-step task budgets without the user asking for it.
 
+## Choosing what to work on
+
+Put effort into work that stays valuable whatever model vaice runs (decided 2026-11-23). The default model is expected to be replaced by a larger, smarter audio model, and whatever that model gets right by itself no longer needs work here. Before picking, filing or prioritizing an issue, ask: **would a better model fix this by itself?**
+
+- **No: favour it.** Turn-taking and VAD, barge-in, speaker feedback, latency, playback and the outbox, the UI (state, Stop, Run/Cancel, settings), the browser task's plumbing, confirmation and other safety rules, reliability, install, tests and CI. Guards that hold whatever the model emits (the loop cut, markup stripping, result compaction) count here too.
+- **Yes: low priority (P3).** Tuning for the current model's quality: prompt wording, tool-choice and description tuning, invented answers, badly phrased goals or replies, and evals whose only purpose is that tuning. Take one on only when it is cheap, blocks other work or a test, or makes vaice do something the user did not ask for.
+
+When filing an issue, set its priority by this test and say in the body which side it is on.
+
 ## Commands
 
 ```bash
