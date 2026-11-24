@@ -588,12 +588,18 @@ def _transcribe_into(url: str, timeout: float, audio: AudioFrame, turn: Turn) ->
         turn.set_user_text(text)
 
 
-_CONTROL_TOKENS = ("<|im_start|>", "<|im_end|>", "@@USER@@", "@@REPLY@@")
+_SPECIAL_TOKEN = re.compile(r"<\|(?:(?!<\||\|>).)*\|>")
+_LEGACY_MARKERS = ("@@USER@@", "@@REPLY@@")
 
 
 def _clean_turn_text(said: str) -> str:
-    for token in _CONTROL_TOKENS:
-        said = said.replace(token, "")
+    """Strip special/control tokens and legacy turn markers iteratively so nested forms leave no residue."""
+    while (stripped := _SPECIAL_TOKEN.sub(" ", said)) != said:
+        said = stripped
+    said = said.replace("<|", " ").replace("|>", " ")
+    for marker in _LEGACY_MARKERS:
+        while marker in said:
+            said = said.replace(marker, "")
     return " ".join(said.split())
 
 

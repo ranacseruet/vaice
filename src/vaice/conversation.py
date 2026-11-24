@@ -33,6 +33,11 @@ REPORT_HEADING = "**From the browser task:**"
 # page-steerable text and an image in it would load from a remote address in the UI
 _IMAGE = re.compile(
     r"!\[([^\]]*)\](?:\(\s*(?:<[^<>\n]*>|(?:[^()\s]|\([^()]*\))*)(?:\s+(?:\"[^\"]*\"|'[^']*'))?\s*\)|\[[^\]]*\])?")
+# Raw HTML tags and comments: Gradio's Chatbot (`allow_tags=False`) and Markdown (`sanitize_html=True`) still allow
+# standard HTML elements such as <img>, <video>, <audio>, <style>, and <link>, which can load remote URLs.
+_HTML_TAG = re.compile(r"<(?=(?:/|!|\?|[A-Za-z][A-Za-z0-9-]*(?:[\s/>]|$)))")
+_FENCE_OPEN = re.compile(r"^[ ]{0,3}(`{3,}|~{3,})(.*)$")
+_PARAGRAPH_BREAK = re.compile(r"\n[ \t]*\n")
 # The output recorded for a call that asked the user first; its result is recorded as a second event (the Run click)
 WAITING_FOR_CONFIRMATION = "waiting for confirmation"
 
@@ -43,12 +48,81 @@ def _cap(text: str, limit: int) -> str:
     return text[: limit - len(_TRUNCATED)].rstrip() + _TRUNCATED
 
 
+def code_fence(text: str) -> str:
+    """A code fence longer than any run of backticks in `text`, so untrusted text cannot close it early."""
+    return "`" * max(3, max((len(run) for run in re.findall(r"`+", text)), default=0) + 1)
+
+
+def _inline_code(text: str) -> str:
+    """`text` as a CommonMark inline code span whose delimiter is longer than any backtick run inside `text`."""
+    ticks = "`" * (max((len(run) for run in re.findall(r"`+", text)), default=0) + 1)
+    pad = " " if text.startswith(("`", " ")) or text.endswith(("`", " ")) else ""
+    return f"{ticks}{pad}{text}{pad}{ticks}"
+
+
 def _without_images(text: str) -> str:
     """`text` with each markdown image replaced by its alt text (links stay). Repeated until none is left: replacing
     an inner image can complete an outer one (`![![x](a)](b)` becomes `![x](b)`); each pass shortens the text."""
     while (stripped := _IMAGE.sub(r"\1", text)) != text:
         text = stripped
     return text
+
+
+def _escape_inline_html(text: str) -> str:
+    """Escape raw HTML tag openers in non-fenced text while preserving properly closed CommonMark code spans."""
+    out: list[str] = []
+    pos = 0
+    for span in re.finditer(r"`+", text):
+        start = span.start()
+        if start < pos:
+            continue
+        out.append(_HTML_TAG.sub("&lt;", text[pos:start]))
+        opener = span.group(0)
+        pos = span.end()
+        # In CommonMark, a backtick run of length k closes only on an exact length-k run within the same paragraph.
+        for candidate in re.finditer(r"`+", text[pos:]):
+            if candidate.group(0) == opener:
+                close_end = pos + candidate.end()
+                if not _PARAGRAPH_BREAK.search(text[pos : pos + candidate.start()]):
+                    out.append(text[start:close_end])
+                    pos = close_end
+                    break
+        else:
+            out.append(opener)
+    out.append(_HTML_TAG.sub("&lt;", text[pos:]))
+    return "".join(out)
+
+
+def _escape_html(text: str) -> str:
+    """Escape raw HTML tag openers outside CommonMark fenced code blocks and inline code spans."""
+    out: list[str] = []
+    plain: list[str] = []
+    fence: tuple[str, int] | None = None
+    for line in text.splitlines(keepends=True):
+        if fence is not None:
+            out.append(line)
+            char, length = fence
+            stripped = line.rstrip("\r\n")
+            if re.match(rf"^[ ]{{0,3}}{re.escape(char)}{{{length},}}[ \t]*$", stripped):
+                fence = None
+            continue
+        match = _FENCE_OPEN.match(line.rstrip("\r\n"))
+        if match and (match.group(1)[0] == "~" or "`" not in match.group(2)):
+            if plain:
+                out.append(_escape_inline_html("".join(plain)))
+                plain.clear()
+            out.append(line)
+            fence = (match.group(1)[0], len(match.group(1)))
+            continue
+        plain.append(line)
+    if plain:
+        out.append(_escape_inline_html("".join(plain)))
+    return "".join(out)
+
+
+def _safe_ui_markdown(text: str) -> str:
+    """`text` safe to render in Gradio Markdown/Chatbot: Markdown images stripped and raw HTML tags escaped."""
+    return _escape_html(_without_images(text))
 
 
 def write_json_atomically(path: Path, data) -> None:
@@ -259,7 +333,8 @@ def tool_activity_for_ui(turns: list[Turn], events: int = 10) -> str:
             if len(arguments) > 120:
                 arguments = arguments[:120].rstrip() + "..."
             output = _cap(event["output"], TOOL_EVENT_OUTPUT_CHARS)
-            shown.append(f"**{event['name']}** `{arguments}`\n```\n{output}\n```")
+            fence = code_fence(output)
+            shown.append(f"**{event['name']}** {_inline_code(arguments)}\n{fence}\n{output}\n{fence}")
     return "\n\n".join(shown[-events:])
 
 
@@ -322,14 +397,14 @@ class Conversation:
             messages = []
             for turn in self._turns:
                 user = "…" if turn.user_text is None else turn.user_text or INAUDIBLE  # … = still transcribing
-                messages.append({"role": "user", "content": user})
+                messages.append({"role": "user", "content": _safe_ui_markdown(user)})
                 spoken = _spoken(turn)
                 if turn.error:  # a failed reply: what was heard of it, plus why it stopped
                     spoken = f"{spoken} (error: {turn.error})" if spoken else f"(error: {turn.error})"
                 if spoken:
-                    messages.append({"role": "assistant", "content": spoken})
+                    messages.append({"role": "assistant", "content": _safe_ui_markdown(spoken)})
                 # a browser task's whole answer, apart from what was said of it
-                messages.extend({"role": "assistant", "content": f"{REPORT_HEADING}\n\n{_without_images(report)}"}
+                messages.extend({"role": "assistant", "content": f"{REPORT_HEADING}\n\n{_safe_ui_markdown(report)}"}
                                 for report in turn.reports)
             return messages
 

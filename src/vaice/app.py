@@ -37,7 +37,7 @@ from vaice.browse import (
     write_pi_home,
 )
 from vaice.confirm import CONFIRM_SECONDS, Pending
-from vaice.conversation import Conversation, Turn
+from vaice.conversation import Conversation, Turn, code_fence
 from vaice.interruptible import InterruptSafeReplyOnPause, stop_playing_reply, use_cached_vad_model
 from vaice.lifecycle import install_stop_handler, request_stop
 from vaice.memory import Memory
@@ -76,7 +76,7 @@ def pending_view(pending: Pending | None) -> dict | None:
 
 def _fence(text: str) -> str:
     """A code fence longer than any run of backticks in `text`, so the text cannot close it early."""
-    return "`" * max(3, max((len(run) for run in re.findall(r"`+", text)), default=0) + 1)
+    return code_fence(text)
 
 
 def _shell_command(view: dict) -> str | None:
