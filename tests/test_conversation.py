@@ -739,6 +739,14 @@ def test_a_markdown_image_in_a_report_becomes_its_alt_text(markdown, shown):
     ('![<img src="https://evil.test/p.png">](https://evil.test/a.png)',
      '&lt;img src="https://evil.test/p.png">'),
     ('`unclosed <img src="https://evil.test/p.png">', '`unclosed &lt;img src="https://evil.test/p.png">'),
+    (r'\`<img src="https://evil.test/p.png">`', r'\`&lt;img src="https://evil.test/p.png">`'),
+    (r'\\\`<img src="https://evil.test/p.png">`', r'\\\`&lt;img src="https://evil.test/p.png">`'),
+    (r'\``<img src="https://evil.test/p.png">``', r'\``&lt;img src="https://evil.test/p.png">``'),
+    ('`foo\n\n<img src="https://evil.test/p.png">`', '`foo\n\n&lt;img src="https://evil.test/p.png">`'),
+    ('`foo\n> quote\n<img src="https://evil.test/p.png">`', '`foo\n> quote\n&lt;img src="https://evil.test/p.png">`'),
+    ('`foo\n# h\n<img src="https://evil.test/p.png">`', '`foo\n# h\n&lt;img src="https://evil.test/p.png">`'),
+    ('`foo\n---\n<img src="https://evil.test/p.png">`', '`foo\n---\n&lt;img src="https://evil.test/p.png">`'),
+    ('`foo\n- item\n<img src="https://evil.test/p.png">`', '`foo\n- item\n&lt;img src="https://evil.test/p.png">`'),
 ])
 def test_raw_html_tags_in_reports_and_messages_are_escaped_for_the_ui(raw, escaped):
     c = Conversation()
@@ -755,7 +763,11 @@ def test_html_escaping_keeps_links_autolinks_comparisons_and_code_blocks_intact(
     c = Conversation()
     report = (
         "3 < 5, see [docs](https://example.com) or <https://example.com>.\n\n"
-        'Inline `<img src="https://example.com/a.png">` and ```<img src="c.png">```.\n\n'
+        'Inline `<img src="https://example.com/a.png">` and ```<img src="c.png">```, '
+        r'escaped backslash \\`<img src="d.png">`, '
+        r'escaped first of two \``<img src="e.png">`, '
+        r'and backslash inside `<img src="f.png">\`.'
+        "\n\n"
         '```html\n<img src="https://example.com/b.png">\n```'
     )
     exchange(c, "q", "3 < 5").add_report(report)

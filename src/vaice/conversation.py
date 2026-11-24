@@ -37,7 +37,12 @@ _IMAGE = re.compile(
 # standard HTML elements such as <img>, <video>, <audio>, <style>, and <link>, which can load remote URLs.
 _HTML_TAG = re.compile(r"<(?=(?:/|!|\?|[A-Za-z][A-Za-z0-9-]*(?:[\s/>]|$)))")
 _FENCE_OPEN = re.compile(r"^[ ]{0,3}(`{3,}|~{3,})(.*)$")
-_PARAGRAPH_BREAK = re.compile(r"\n[ \t]*\n")
+_BACKTICK_RUN = re.compile(r"`+")
+# Any blank line or CommonMark block starter interrupts a paragraph, so an inline code span never crosses it.
+_PARAGRAPH_BREAK = re.compile(
+    r"\r?\n(?:[ \t]*\r?\n|[ ]{0,3}(?:>|#{1,6}[ \t]|#{1,6}\r?\n|(?:[*+-]|1[.)])[ \t]"
+    r"|(?:(?:\*[ \t]*){3,}|(?:_[ \t]*){3,}|(?:-[ \t]*){3,}|[-=]+)[ \t]*\r?\n|`{3,}|~{3,}))"
+)
 # The output recorded for a call that asked the user first; its result is recorded as a second event (the Run click)
 WAITING_FOR_CONFIRMATION = "waiting for confirmation"
 
@@ -68,25 +73,37 @@ def _without_images(text: str) -> str:
     return text
 
 
+def _is_escaped(text: str, index: int) -> bool:
+    """Whether `text[index]` is preceded by an odd number of ASCII backslashes."""
+    backslashes = 0
+    while index > backslashes and text[index - 1 - backslashes] == "\\":
+        backslashes += 1
+    return backslashes % 2 == 1
+
+
 def _escape_inline_html(text: str) -> str:
     """Escape raw HTML tag openers in non-fenced text while preserving properly closed CommonMark code spans."""
     out: list[str] = []
     pos = 0
-    for span in re.finditer(r"`+", text):
+    while span := _BACKTICK_RUN.search(text, pos):
         start = span.start()
-        if start < pos:
+        if _is_escaped(text, start):
+            # A backslash escapes only the first backtick; any remaining backticks in the run still start a span.
+            out.append(_HTML_TAG.sub("&lt;", text[pos : start + 1]))
+            pos = start + 1
             continue
         out.append(_HTML_TAG.sub("&lt;", text[pos:start]))
         opener = span.group(0)
         pos = span.end()
+        brk = _PARAGRAPH_BREAK.search(text, pos)
+        limit = brk.start() if brk else len(text)
         # In CommonMark, a backtick run of length k closes only on an exact length-k run within the same paragraph.
-        for candidate in re.finditer(r"`+", text[pos:]):
+        for candidate in _BACKTICK_RUN.finditer(text, pos, limit):
             if candidate.group(0) == opener:
-                close_end = pos + candidate.end()
-                if not _PARAGRAPH_BREAK.search(text[pos : pos + candidate.start()]):
-                    out.append(text[start:close_end])
-                    pos = close_end
-                    break
+                close_end = candidate.end()
+                out.append(text[start:close_end])
+                pos = close_end
+                break
         else:
             out.append(opener)
     out.append(_HTML_TAG.sub("&lt;", text[pos:]))
