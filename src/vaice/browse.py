@@ -14,8 +14,9 @@ How it fits together:
   out (`pi-acp` runs the executable named by `PI_ACP_PI_COMMAND`). The child sees an allowlisted environment, not
   vaice's (the other API keys stay out). The model's API key reaches Pi through that environment (`"$NAME"`
   interpolation in `models.json`), never a file.
-- **The gate** (`browse_gate.ts`, a Pi extension) classifies each tool call by `GATE_POLICY`: the read-only browser
-  tools run, the ones that change a page ask, anything else asks. An ask is a `confirm` dialog, which `pi-acp` turns
+- **The gate** (`browse_gate.ts`, a Pi extension) classifies each tool call by `GATE_POLICY`: an explicit allowlist of
+  read and http(s) navigation browser tools runs, and anything else asks (and `navigate_page` / `new_page` with
+  `initScript` or a non-`http(s)` URL also asks). An ask is a `confirm` dialog, which `pi-acp` turns
   into a `session/request_permission` that goes to `on_ask`. A gate that loads without hooking in (an edited or
   broken file) leaves the tools ungated (one that throws while loading stops Pi 1.5.2 from starting), so two checks
   keep an ungated Pi from running tasks: `check_gate` (before anything is offered) asks a real Pi for its commands
@@ -77,13 +78,17 @@ GATE_COMMAND = "vaice-gate"  # the command browse_gate.ts registers (and the sta
 LAUNCHER = "launch-pi"  # the script `write_launcher` writes into Pi's config directory
 PROVIDER = "vaice"  # the provider id in models.json
 
-_MUTATING_TOOLS = ("click", "fill", "fill_form", "type_text", "press_key", "evaluate_script", "upload_file", "drag",
-                   "handle_dialog")
+_READ_ONLY_TOOLS = (
+    "list_pages", "select_page", "close_page", "new_page", "navigate_page", "wait_for",
+    "take_snapshot", "take_screenshot",
+    "list_console_messages", "get_console_message",
+    "list_network_requests", "get_network_request",
+    "get_css_styles",
+)
 GATE_POLICY = {
-    "mcp__chrome__*": "run",
-    **{f"mcp__chrome__{name}": "ask" for name in _MUTATING_TOOLS},
+    **{f"mcp__chrome__{name}": "run" for name in _READ_ONLY_TOOLS},
     "default": "ask",
-}  # tools Pi knows by exact name win over the `*` pattern; anything not named asks
+}  # explicit allowlist of read/navigation browser tools; anything else (clicks, forms, unknown tools) asks
 # VAICE_BROWSE_CONFIRM=off: every browser tool runs unasked (clicks, typing, forms); anything else still asks
 UNGATED_POLICY = {"mcp__chrome__*": "run", "default": "ask"}
 
@@ -265,8 +270,10 @@ def write_pi_home(path: Path, *, base_url: str, model: str, api_key_env: str | N
 
 def chrome_args(browser_args: Sequence[str]) -> list[str]:
     """The arguments of `npx` for the pinned chrome-devtools server, `browser_args` after the package: no usage
-    statistics to Google, and no trace URLs to the CrUX API (no trace tool is wanted anyway)."""
-    return ["-y", CHROME_DEVTOOLS_MCP, "--no-usage-statistics", "--no-performance-crux", *browser_args]
+    statistics to Google, no trace URLs to the CrUX API, no `file:` URL navigations, and no caller-provided
+    JavaScript evaluation (`evaluate_script`, `set_logpoints`, `initScript`, `javascript:`/`data:` URLs)."""
+    return ["-y", CHROME_DEVTOOLS_MCP, "--no-usage-statistics", "--no-performance-crux",
+            "--no-file-navigations", "--no-javascript-evaluation", *browser_args]
 
 
 def launcher_path(pi_home: Path) -> Path:

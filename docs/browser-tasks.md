@@ -55,10 +55,15 @@ a version it cannot parse only warns), and for `acp` that the agent's program is
   that changes a page.
 - **Chrome gets a profile of its own**, `<VAICE_DATA_DIR>/browse/chrome-profile` (a temporary directory when
   `VAICE_DATA_DIR` is empty), in a visible window. Logins you make there persist between tasks; your own Chrome is
-  never touched. `VAICE_BROWSE_HEADLESS=1` hides the window. Navigation is unrestricted: the agent may open any site.
-- **Steps that change a page ask first, and only the Run button approves.** With Pi, reading and navigating run at once;
-  clicking, filling, typing, pressing a key, running a script, uploading, dragging and answering a dialog ask (the gate
-  that decides is a Pi extension vaice ships). With `acp`, a step asks when the agent asks. The panel
+  never touched. `VAICE_BROWSE_HEADLESS=1` hides the window. `chrome-devtools-mcp` runs with `--no-file-navigations`
+  and `--no-javascript-evaluation` (disabling `file://` navigations, `evaluate_script`, `set_logpoints`,
+  `navigate_page.initScript`, and `javascript:`/`data:` URLs); `http(s)` navigation is unrestricted, so the agent may
+  open any web site.
+- **Only explicit read and `http(s)` navigation tools run unasked, and only the Run button approves.** With Pi,
+  `GATE_POLICY` is an explicit allowlist of read-only and page-navigation tools (and `navigate_page` / `new_page` still
+  ask if passed `initScript` or a non-`http(s)` URL); clicking, filling, typing, pressing a key, running scripts,
+  uploading, dragging, answering a dialog, and any other or newly added tool ask (the gate that decides is a Pi
+  extension vaice ships). With `acp`, a step asks when the agent asks. The panel
   shows the tool and its exact arguments with **Run** and **Cancel**, and a fresh realtime session is asked to say a
   fixed sentence naming the action and the site ("The browser task wants to click something on example.com. The details are
   on the screen. Press Run to allow it, or Cancel."). **Run** lets the task go on; **Cancel** stops it, and the agent is told to stop as well, and says "Okay,
