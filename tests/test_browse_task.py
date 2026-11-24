@@ -36,7 +36,9 @@ def test_the_goal_is_one_line_of_bounded_length():
 
 
 def test_every_gated_tool_has_a_spoken_name():
-    assert set(browse._MUTATING_TOOLS) == set(browse_task.STEP_ACTIONS)  # every tool the gate asks about is named
+    assert set(browse_task.STEP_ACTIONS).isdisjoint(browse._READ_ONLY_TOOLS)
+    for name in browse_task.STEP_ACTIONS:
+        assert browse.GATE_POLICY.get(f"mcp__chrome__{name}", browse.GATE_POLICY["default"]) == "ask"
 
 
 def test_the_question_names_the_action_and_the_host_but_never_the_arguments():
