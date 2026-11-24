@@ -732,8 +732,10 @@ class _StubSilero(silero.SileroVADModel):
         return np.array([[prob]], dtype=np.float32), state
 
 
-def _make_streaming_handler(fn, probs, *, min_silence_ms=750, max_continuous_speech_s=float("inf"), rate=48000):
-    opts = silero.SileroVadOptions(threshold=0.6, min_silence_duration_ms=min_silence_ms, speech_pad_ms=30)
+def _make_streaming_handler(
+    fn, probs, *, threshold=0.6, min_silence_ms=750, max_continuous_speech_s=float("inf"), rate=48000,
+):
+    opts = silero.SileroVadOptions(threshold=threshold, min_silence_duration_ms=min_silence_ms, speech_pad_ms=30)
     algo = interruptible.ReplyOnPause(fn).algo_options
     algo.max_continuous_speech_s = max_continuous_speech_s
     handler = InterruptSafeReplyOnPause(
@@ -791,6 +793,15 @@ def test_streaming_vad_hysteresis_and_zero_min_silence():
     for _ in range(8):
         h_zero.receive(frame)
     assert h_zero.event.is_set()
+
+    # Low VAICE_VAD_THRESHOLD (<= 0.15) keeps neg_th positive (< threshold) so trailing silence (e.g. p=0.02) still ends
+    for low_th in (0.10, 0.15):
+        h_low = _make_streaming_handler(
+            lambda _a: iter([]), [0.5] * 7 + [0.02] * 3, threshold=low_th, min_silence_ms=90, rate=16000,
+        )
+        for _ in range(10):
+            h_low.receive(frame)
+        assert h_low.event.is_set()
 
 
 def test_streaming_vad_preroll_cap_onset_reset_and_new_conversation_reset():

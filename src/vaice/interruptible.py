@@ -191,7 +191,7 @@ class _StreamingVad:
 
         self._to_16k(raw_mono, sampling_rate)
         dt = STREAM_WINDOW_SAMPLES / STREAM_SAMPLE_RATE
-        neg_th = max(0.0, threshold - NEG_THRESHOLD_OFFSET)
+        neg_th = max(threshold * 0.5, threshold - NEG_THRESHOLD_OFFSET)
         just_started = False
         pause_detected = False
         offset = 0
