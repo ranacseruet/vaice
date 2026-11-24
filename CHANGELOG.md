@@ -95,6 +95,8 @@ the pull requests (#53 to #126).
   with the screen skill on). Each task's prompt also carries today's date, so "this week" means now.
 
 ### Fixed
+- *Tool activity* now uses dynamic backtick fencing for arguments and output so untrusted tool results cannot break out of code blocks, and UI chat/report rendering escapes raw HTML tags so `<img>` and similar elements cannot trigger remote fetches (#161).
+- `realtime._clean_turn_text` now strips all `<|...|>` special tokens, unclosed fragments, and legacy markers iteratively so nested tokens like `<|<|im_start|>im_start|>` cannot bypass history sanitization (#162).
 - The browser task gate (`browse.GATE_POLICY`, `browse_gate.ts`) now uses an explicit allowlist of read/navigation tools instead of a wildcard rule, escalates `navigate_page` / `new_page` with `initScript` or non-`http(s)` URLs to **Run**, and passes `--no-file-navigations` and `--no-javascript-evaluation` to `chrome-devtools-mcp` so `file://` navigations, `evaluate_script`, `set_logpoints`, `initScript`, and `javascript:`/`data:` URLs are blocked even if unasked (#160).
 - A start no longer sends any request to `huggingface.co` once the Silero voice-activity model is downloaded: vaice
   loads it from the Hugging Face cache instead of letting fastrtc check for a newer revision every time. The first

@@ -33,6 +33,9 @@ REPORT_HEADING = "**From the browser task:**"
 # page-steerable text and an image in it would load from a remote address in the UI
 _IMAGE = re.compile(
     r"!\[([^\]]*)\](?:\(\s*(?:<[^<>\n]*>|(?:[^()\s]|\([^()]*\))*)(?:\s+(?:\"[^\"]*\"|'[^']*'))?\s*\)|\[[^\]]*\])?")
+# Raw HTML tags and comments: Gradio's Chatbot (`allow_tags=False`) and Markdown (`sanitize_html=True`) still allow
+# standard HTML elements such as <img>, <video>, <audio>, <style>, and <link>, which can load remote URLs.
+_HTML_TAG = re.compile(r"<(?=(?:/|!|\?|[A-Za-z][A-Za-z0-9-]*(?:[\s/>]|$)))")
 # The output recorded for a call that asked the user first; its result is recorded as a second event (the Run click)
 WAITING_FOR_CONFIRMATION = "waiting for confirmation"
 
@@ -43,12 +46,33 @@ def _cap(text: str, limit: int) -> str:
     return text[: limit - len(_TRUNCATED)].rstrip() + _TRUNCATED
 
 
+def code_fence(text: str) -> str:
+    """A code fence longer than any run of backticks in `text`, so untrusted text cannot close it early."""
+    return "`" * max(3, max((len(run) for run in re.findall(r"`+", text)), default=0) + 1)
+
+
+def _inline_code(text: str) -> str:
+    """`text` as a CommonMark inline code span whose delimiter is longer than any backtick run inside `text`."""
+    ticks = "`" * (max((len(run) for run in re.findall(r"`+", text)), default=0) + 1)
+    pad = " " if text.startswith(("`", " ")) or text.endswith(("`", " ")) else ""
+    return f"{ticks}{pad}{text}{pad}{ticks}"
+
+
 def _without_images(text: str) -> str:
     """`text` with each markdown image replaced by its alt text (links stay). Repeated until none is left: replacing
     an inner image can complete an outer one (`![![x](a)](b)` becomes `![x](b)`); each pass shortens the text."""
     while (stripped := _IMAGE.sub(r"\1", text)) != text:
         text = stripped
     return text
+
+
+def _safe_ui_markdown(text: str) -> str:
+    """`text` safe to render in Gradio Markdown/Chatbot: Markdown images stripped and raw HTML tags escaped.
+
+    Escapes unconditionally (like `_without_images`) rather than exempting fenced or inline code, so
+    Markdown container boundaries, escaped delimiters, or parser differences cannot leave a raw tag unescaped.
+    """
+    return _HTML_TAG.sub("&lt;", _without_images(text))
 
 
 def write_json_atomically(path: Path, data) -> None:
@@ -259,7 +283,8 @@ def tool_activity_for_ui(turns: list[Turn], events: int = 10) -> str:
             if len(arguments) > 120:
                 arguments = arguments[:120].rstrip() + "..."
             output = _cap(event["output"], TOOL_EVENT_OUTPUT_CHARS)
-            shown.append(f"**{event['name']}** `{arguments}`\n```\n{output}\n```")
+            fence = code_fence(output)
+            shown.append(f"**{event['name']}** {_inline_code(arguments)}\n{fence}\n{output}\n{fence}")
     return "\n\n".join(shown[-events:])
 
 
@@ -322,14 +347,14 @@ class Conversation:
             messages = []
             for turn in self._turns:
                 user = "…" if turn.user_text is None else turn.user_text or INAUDIBLE  # … = still transcribing
-                messages.append({"role": "user", "content": user})
+                messages.append({"role": "user", "content": _safe_ui_markdown(user)})
                 spoken = _spoken(turn)
                 if turn.error:  # a failed reply: what was heard of it, plus why it stopped
                     spoken = f"{spoken} (error: {turn.error})" if spoken else f"(error: {turn.error})"
                 if spoken:
-                    messages.append({"role": "assistant", "content": spoken})
+                    messages.append({"role": "assistant", "content": _safe_ui_markdown(spoken)})
                 # a browser task's whole answer, apart from what was said of it
-                messages.extend({"role": "assistant", "content": f"{REPORT_HEADING}\n\n{_without_images(report)}"}
+                messages.extend({"role": "assistant", "content": f"{REPORT_HEADING}\n\n{_safe_ui_markdown(report)}"}
                                 for report in turn.reports)
             return messages
 
