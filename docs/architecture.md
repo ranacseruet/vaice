@@ -94,6 +94,7 @@ flowchart LR
   app --> vision
   app --> memory
   interruptible -->|"drains"| outbox
+  interruptible --> audio
   outbox --> audio
   assistant -->|"one session per reply"| realtime
   assistant -->|"one pending request"| confirm
@@ -135,7 +136,7 @@ Principles that decide most design questions (the long form is in the [vision](v
 | Piece | Job |
 |---|---|
 | `app.py` | The CLI (`vaice`, `vaice up`) and the Gradio page: the microphone, the transcript, the *Tool activity*, confirmation and *Memory* panels, the **New conversation** button, and, while a browser task runs, the **Stop the browser task** button with a status line (goal, time against the limit, steps, host). A 1 s timer re-sends a component only when its own view changed (the status line ticks every second; the chat is not redrawn with it). Wraps the assistant and logs time to first audio |
-| `interruptible.py` | `InterruptSafeReplyOnPause`, a fastrtc `ReplyOnPause` subclass. Tunes the VAD and loads its Silero model from the Hugging Face cache with no request (`use_cached_vad_model`, which `app.build_stream` calls before it builds the handler; only a model not cached yet is downloaded, by fastrtc), keeps 0.3 s of pre-roll so opening words are not clipped, fixes the races that made barge-in drop the interrupting question, and serves the outbox when no reply is playing |
+| `interruptible.py` | `InterruptSafeReplyOnPause`, a fastrtc `ReplyOnPause` subclass. Streams 32 ms Silero VAD windows (`_StreamingVad`, waiting `VAICE_VAD_MIN_SILENCE_MS` of trailing silence so breaths do not split turns) and loads its Silero model from the Hugging Face cache with no request (`use_cached_vad_model`, which `app.build_stream` calls before it builds the handler; only a model not cached yet is downloaded, by fastrtc), keeps 0.3 s of pre-roll so opening words are not clipped, fixes the races that made barge-in drop the interrupting question, and serves the outbox when no reply is playing |
 | `outbox.py` | `Outbox`: audio frames and callback markers that a worker thread queues for speech no reply carries (the outcome of a Run click, a browser task); the handler's idle `emit()` serves it |
 | `audio.py` | Browser frames to mono PCM16 at the model's rate, and replies back to float32; the `AudioFrame` type, `(sample_rate, samples)` |
 | `conversation.py` | `Conversation` and `Turn`: the windowed history that goes into each prompt, barge-in trimming, atomic JSON persistence |
@@ -535,7 +536,7 @@ repeats per build and quantization; only its scoring is unit-tested. See
 ```
 src/vaice/
   app.py            CLI + Gradio/WebRTC UI; wraps the assistant, logs time to first audio, transcript + reset, the panels
-  interruptible.py  ReplyOnPause subclass fixing fastrtc 0.0.34 barge-in races, VAD tuning, pre-roll buffer, reset silencing, idle CPU polling, and serving the outbox
+  interruptible.py  ReplyOnPause subclass fixing fastrtc 0.0.34 barge-in races, streaming 32 ms Silero VAD, pre-roll buffer, reset silencing, idle CPU polling, and serving the outbox
   outbox.py         Outbox: audio + markers for speech with no reply in flight (a Run click's or a browser task's outcome), drained by the idle emit()
   server.py         `vaice up`: reuse a running llama-server or start one (log in the data dir), wait for /health, stop it at exit
   lifecycle.py      Stop signal handler: Ctrl+C asks the app and the assistant to abandon in-flight calls

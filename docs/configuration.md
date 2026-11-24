@@ -14,8 +14,8 @@ Precedence: variables already in the environment (e.g. `set -a; source .env; set
 | `VAICE_DATA_DIR` | `~/.vaice` | Directory where `conversation.json` (and, with memory on, `memory.json`) is stored (created `0755`; the files themselves are `0600`). Set to empty (`VAICE_DATA_DIR=`) to keep the conversation and the notes in memory only — nothing is persisted |
 | `VAICE_HISTORY_TURNS` | `10` | Past exchanges included in each prompt (`0` = none); older ones are dropped in blocks |
 | `VAICE_VAD_THRESHOLD` | `0.6` | Silero VAD speech probability threshold — what counts as speech, and so what can interrupt a playing reply. Raise (e.g. `0.7`) if room noise or speaker feedback cuts replies short |
-| `VAICE_VAD_MIN_SILENCE_MS` | `150` | Silence that must follow speech before an utterance counts as ended — delays the reply start and barge-ins alike |
-| `VAICE_VAD_SPEECH_PAD_MS` | `30` | Padding added around detected speech |
+| `VAICE_VAD_MIN_SILENCE_MS` | `750` | Trailing silence that must follow speech in streaming VAD before an utterance ends (default `750` ms avoids 300–600 ms mid-sentence pause splits while keeping median reply latency ~0.8 s) |
+| `VAICE_VAD_SPEECH_PAD_MS` | `30` | Padding around detected speech used by chunked fallback VAD |
 | `VAICE_CAN_INTERRUPT` | `1` | Set `0` to disable barge-in: a reply always runs to the end |
 | `VAICE_LLAMACPP_URL` | `http://localhost:8001` | `llama-server` URL; only scheme, host and port are used (`/health`, `/v1/models` and `ws://…/v1/realtime` hang off it) |
 | `VAICE_LLAMACPP_MODEL` | `LiquidAI/LFM3-Omni-2B-GGUF:Q8_0` | `vaice up` only: the `-hf` model of the `llama-server` it starts |

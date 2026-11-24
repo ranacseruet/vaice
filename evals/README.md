@@ -156,6 +156,18 @@ To add a case: append an entry with a unique `id` (a slug, also the recording's 
 
 Synthesized speech is clean; a real microphone is not, and the two can differ a lot. To test with your own voice, record the sentence in the case file and save it as `evals/recordings/<case id>.wav`: 16-bit PCM WAV, mono, any sample rate (the assistant resamples). When a recording exists it is used instead of `say`. A partial set is fine: the other cases still use `say`.
 
+A real recording set beats `say`: put 16-bit PCM mono WAVs named `<case id>.wav` in `evals/recordings/`.
+
+## Offline VAD silence tuning
+
+`evals/vad.py` benchmarks `fastrtc`'s stateless chunked `ReplyOnPause` against `InterruptSafeReplyOnPause`'s 32 ms streaming Silero VAD offline (no `llama-server`, browser, or mic required, `#64`):
+
+```bash
+.venv/bin/python evals/vad.py
+```
+
+Options: `--recordings DIR` (optional 48 kHz mono PCM WAVs), `--voices Samantha,Daniel` (macOS `say` voices), `--out FILE` (default `evals/results/vad-<UTC timestamp>.json`). It measures reply-start latency on clean utterances (including 1-word commands), false mid-sentence turn splits across `300`–`800 ms` pauses, false triggers on brief noise/clap bursts, and steady-state CPU cost per second of audio.
+
 ## Caveats
 
 Results are per llama.cpp build, model and quantization, and they move with the prompt and the history. Even at `--temp 0` a 2B model is not perfectly repeatable across audio, so one run proves nothing: compare `k/N` over repeats, and record the `--label` and the server info with any number you quote. Each run also runs a transcription session in parallel, as the app does.
@@ -168,5 +180,6 @@ Numbers measured before the single realtime path (the old text-routing brain, sp
 |---|---|---|
 | 2026-11-19, before the switch | A spike harness (not this file) running both paths on the same cases: LFM3-Omni-2B Q8_0, llama-server b12359, `--temp 0`, the 53 cases without memory, 5 repeats | One-session path 219/265 correct (should call 139/170, must not call 80/95), first audio median 0.82 s; the earlier steps path 248/265, answer text after 1.07 s |
 | 2026-11-19, after the switch | This harness, the same server, `--repeats 1`, 6 cases | 5/6 correct (the miss: `disk-free`, also missed in the spike), first audio median 0.74 s |
+| 2026-11-24, offline VAD sweep (`#64`) | `evals/vad.py` on 48 kHz `say` corpus (`Samantha`, `Daniel`, 6 phase offsets; `SileroVADModel`) | Chunked `150`/`100`/`75 ms`: `581/782 ms` med/p90, `5/48` missed, `22/36` FS@300 ms, `34/36` FS@500 ms. Streaming `750 ms` (`VAICE_VAD_MIN_SILENCE_MS=750`): `814/862 ms`, `0/48` missed, `0/36` FS at 300/500/600 ms, `0/6` noise/clap FPs, `4.5 ms/s` CPU |
 
 A full run of this harness on the current path has not been recorded yet; quote one here with its label and server info when it is.

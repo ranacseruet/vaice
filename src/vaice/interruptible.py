@@ -1,12 +1,14 @@
 """fastrtc's ReplyOnPause, minus the two barge-in races of fastrtc 0.0.34: the stale chunk that
 plays after the interrupt, and the interrupting utterance lost when the reply ends mid-interrupt,
-with tuned VAD options to reject brief room noise and pre-roll preservation to prevent clipped opening words.
+with stateful 32 ms Silero streaming VAD (to reject brief noise while tolerating mid-sentence pauses
+within `VAICE_VAD_MIN_SILENCE_MS`) and pre-roll preservation to prevent clipped opening words.
 
 It also serves an `Outbox` (outbox.py): speech queued by a worker thread outside any reply (the outcome of a call
 the user approved with a click) is returned by the idle `emit()`, paced by the estimated end
 of its playback, and dropped when the user starts talking."""
 import asyncio
 import logging
+import math
 import os
 import threading
 import time
@@ -15,10 +17,12 @@ import numpy as np
 from fastrtc import ReplyOnPause
 from fastrtc.pause_detection import silero
 from fastrtc.pause_detection.silero import SileroVadOptions
-from fastrtc.utils import split_output
+from fastrtc.utils import create_message, split_output
 from huggingface_hub import hf_hub_download
 from huggingface_hub.errors import LocalEntryNotFoundError
+from scipy.signal import resample_poly
 
+from vaice import audio as audio_helpers
 from vaice import config
 from vaice.outbox import Marker, Outbox, run_hook
 
@@ -31,19 +35,22 @@ log = logging.getLogger(__name__)
 # The wait ends as soon as the pause is detected, so it costs no latency.
 IDLE_WAIT_SECONDS = 0.02
 
-# fastrtc's default SileroVadOptions uses min_silence_duration_ms=2000 and speech_pad_ms=400 inside
-# 600 ms chunks (AlgoOptions.audio_chunk_duration=0.6), so Silero never closes a triggered segment
-# inside a chunk and counts trailing silence as speech — inflating a 180 ms noise into 600 ms of
-# speech. Closing segments after 150 ms of silence with 30 ms padding and a 0.6 probability
-# threshold rejects brief noises while keeping normal speech detection intact. All three are
-# env-tunable (VAICE_VAD_THRESHOLD, VAICE_VAD_MIN_SILENCE_MS, VAICE_VAD_SPEECH_PAD_MS).
+# fastrtc's default stateless 600 ms chunking inflated short noise when min_silence_duration_ms=2000, while lowering
+# Silero's intra-chunk silence alone split natural mid-sentence pauses (300-600 ms) into separate turns (#64).
+# With SileroVADModel, InterruptSafeReplyOnPause streams 32 ms windows across chunks, ending a turn once trailing
+# silence reaches VAICE_VAD_MIN_SILENCE_MS (default 750 ms). Chunked fallback (fake/custom models) uses
+# DEFAULT_VAD_OPTIONS directly. All three are env-tunable (VAICE_VAD_THRESHOLD, VAICE_VAD_MIN_SILENCE_MS,
+# VAICE_VAD_SPEECH_PAD_MS).
 DEFAULT_VAD_OPTIONS = SileroVadOptions(
     threshold=config.VAD_THRESHOLD,
     min_silence_duration_ms=config.VAD_MIN_SILENCE_MS,
     speech_pad_ms=config.VAD_SPEECH_PAD_MS,
 )
-# Tail of the last pre-speech chunk kept and prepended when `started_talking` flips to True, so an
-# utterance that begins in the last ~250 ms of a 600 ms VAD chunk does not lose its opening words.
+STREAM_SAMPLE_RATE = 16000
+STREAM_WINDOW_SAMPLES = 512  # Silero v5 expects 512-sample (32 ms) chunks at 16 kHz
+ONSET_RESET_SECONDS = 0.096  # 3 silent windows reset an incomplete speech onset
+NEG_THRESHOLD_OFFSET = 0.15  # Silero Schmitt-trigger hysteresis offset below threshold
+# Tail of pre-speech audio kept before speech onset so opening consonants are not clipped.
 PREROLL_SECONDS = 0.3
 # Proactive speech is paced: fastrtc's playback queue is unbounded and emit() runs ~37 times a second, so serving
 # the outbox as fast as it is polled would queue a whole outcome at once, and its markers would fire long before the
@@ -116,6 +123,126 @@ def _running_loop() -> asyncio.AbstractEventLoop | None:
         return None
 
 
+class _StreamingVad:
+    """Per-utterance stateful 32 ms Silero VAD attached to `AppState` (reset automatically on `reset()`)."""
+
+    def __init__(self, silero_state):
+        self.silero_state = silero_state
+        self.rate = 0
+        self.raw_pending: np.ndarray | None = None
+        self.buf16 = np.empty(0, dtype=np.float32)
+        self.preroll_ring: np.ndarray | None = None
+        self.onset_speech = 0.0
+        self.onset_gap = 0.0
+        self.in_speech = False
+        self.silence_s = 0.0
+
+    def _to_16k(self, raw_mono: np.ndarray, sampling_rate: int) -> None:
+        if self.rate != sampling_rate:
+            self.rate = sampling_rate
+            self.raw_pending = None
+        samples = audio_helpers.to_mono_float(raw_mono)
+        self.raw_pending = samples if self.raw_pending is None else np.concatenate((self.raw_pending, samples))
+        if sampling_rate == STREAM_SAMPLE_RATE:
+            self.buf16 = np.concatenate((self.buf16, self.raw_pending))
+            self.raw_pending = None
+            return
+        divisor = math.gcd(STREAM_SAMPLE_RATE, sampling_rate)
+        up = STREAM_SAMPLE_RATE // divisor
+        down = sampling_rate // divisor
+        min_in = max(down, math.ceil(STREAM_WINDOW_SAMPLES * down / up))
+        if len(self.raw_pending) < min_in:
+            return
+        take = (len(self.raw_pending) // down) * down
+        resampled = resample_poly(self.raw_pending[:take], up, down, padtype="edge").astype(np.float32)
+        self.buf16 = np.concatenate((self.buf16, resampled))
+        rest = self.raw_pending[take:]
+        self.raw_pending = rest if len(rest) > 0 else None
+
+    def feed(
+        self,
+        audio: np.ndarray,
+        sampling_rate: int,
+        *,
+        model,
+        threshold: float,
+        min_silence_s: float,
+        started_talking_s: float,
+        preroll_s: float,
+        max_continuous_speech_s: float,
+        state,
+    ) -> tuple[bool, bool]:
+        """Process one incoming audio chunk; returns `(just_started_talking, pause_detected)`."""
+        raw = np.atleast_1d(np.squeeze(audio))
+        if raw.size == 0 or sampling_rate <= 0:
+            return False, False
+        raw_mono = raw.mean(axis=0).astype(raw.dtype) if raw.ndim > 1 else raw
+
+        if not state.started_talking:
+            self.preroll_ring = raw_mono if self.preroll_ring is None else np.concatenate((self.preroll_ring, raw_mono))
+            cap = max(
+                len(raw_mono),
+                int(sampling_rate * (started_talking_s + ONSET_RESET_SECONDS + preroll_s + 0.064)),
+            )
+            if cap > 0 and len(self.preroll_ring) > cap:
+                self.preroll_ring = self.preroll_ring[-cap:]
+        else:
+            state.stream = raw_mono if state.stream is None else np.concatenate((state.stream, raw_mono))
+
+        self._to_16k(raw_mono, sampling_rate)
+        dt = STREAM_WINDOW_SAMPLES / STREAM_SAMPLE_RATE
+        neg_th = max(threshold * 0.5, threshold - NEG_THRESHOLD_OFFSET)
+        just_started = False
+        pause_detected = False
+        offset = 0
+        while offset + STREAM_WINDOW_SAMPLES <= len(self.buf16):
+            window = self.buf16[offset : offset + STREAM_WINDOW_SAMPLES]
+            offset += STREAM_WINDOW_SAMPLES
+            prob, self.silero_state = model(window, self.silero_state, STREAM_SAMPLE_RATE)
+            p = float(np.asarray(prob).flat[0])
+            if not state.started_talking:
+                if p >= threshold:
+                    self.onset_speech += dt
+                    self.onset_gap = 0.0
+                    if self.onset_speech > started_talking_s:
+                        state.started_talking = True
+                        just_started = True
+                        state.stream = self.preroll_ring
+                        self.preroll_ring = None
+                        self.in_speech = True
+                        self.silence_s = 0.0
+                elif p < neg_th:
+                    self.onset_gap += dt
+                    if self.onset_gap >= ONSET_RESET_SECONDS:
+                        self.onset_speech = 0.0
+                        self.onset_gap = 0.0
+            else:
+                if p >= threshold:
+                    self.in_speech = True
+                    self.silence_s = 0.0
+                elif p < neg_th:
+                    self.in_speech = False
+                    self.silence_s += dt
+                elif self.in_speech:
+                    self.silence_s = 0.0
+                else:
+                    self.silence_s += dt
+                if not self.in_speech and self.silence_s >= min_silence_s:
+                    pause_detected = True
+                    break
+        if offset:
+            self.buf16 = self.buf16[offset:]
+
+        if (
+            not pause_detected
+            and state.started_talking
+            and state.stream is not None
+            and len(state.stream) / sampling_rate >= max_continuous_speech_s
+        ):
+            pause_detected = True
+        return just_started, pause_detected
+
+
 class InterruptSafeReplyOnPause(ReplyOnPause):
     """Drops the audio chunk that was being generated when the user interrupted the reply.
 
@@ -141,9 +268,10 @@ class InterruptSafeReplyOnPause(ReplyOnPause):
     can happen and its barge-in is lost as in plain fastrtc; `app.py` catches errors inside the
     generator, so replies normally end by running out.
 
-    It also defaults to tuned VAD options (`DEFAULT_VAD_OPTIONS`) so brief room noises are not
-    inflated into 600 ms speech segments, and keeps a 0.3 s pre-roll tail from the preceding
-    pre-speech chunk to avoid clipping words spoken near chunk boundaries.
+    It also defaults to tuned VAD options (`DEFAULT_VAD_OPTIONS`) and streams 32 ms Silero windows
+    across chunks so brief room noises are rejected while natural mid-sentence pauses shorter than
+    `VAICE_VAD_MIN_SILENCE_MS` do not split turns, keeping a 0.3 s pre-roll buffer before speech
+    onset to avoid clipping opening words.
 
     It also throttles the idle polling: fastrtc calls `emit()` in a tight loop while nobody is
     talking, which burns most of a core. The idle `emit()` waits for the pause event instead of
@@ -203,6 +331,34 @@ class InterruptSafeReplyOnPause(ReplyOnPause):
                 self._foreign_resets += 1
         super().reset()
 
+    def _uses_streaming_vad(self) -> bool:
+        return isinstance(self.model, silero.SileroVADModel)
+
+    def determine_pause(self, audio: np.ndarray, sampling_rate: int, state) -> bool:
+        if not self._uses_streaming_vad():
+            return super().determine_pause(audio, sampling_rate, state)
+        state.buffer = None
+        stream_vad = getattr(state, "_stream_vad", None)
+        if stream_vad is None:
+            stream_vad = _StreamingVad(self.model.get_initial_state(1))
+            state._stream_vad = stream_vad
+        opts = self.model_options or DEFAULT_VAD_OPTIONS
+        just_started, pause_detected = stream_vad.feed(
+            audio,
+            sampling_rate,
+            model=self.model,
+            threshold=opts.threshold,
+            min_silence_s=opts.min_silence_duration_ms / 1000.0,
+            started_talking_s=self.algo_options.started_talking_threshold,
+            preroll_s=PREROLL_SECONDS,
+            max_continuous_speech_s=self.algo_options.max_continuous_speech_s,
+            state=state,
+        )
+        if just_started:
+            log.debug("Started talking")
+            self.send_message_sync(create_message("log", "started_talking"))
+        return pause_detected
+
     def receive(self, frame):
         # one frame is one atomic step against the #13 restore in emit(): the state the restore
         # reads or replaces is never a half-processed frame. Holding the lock across the VAD work
@@ -223,7 +379,7 @@ class InterruptSafeReplyOnPause(ReplyOnPause):
                     if preroll is not None and state.stream is not None:
                         state.stream = np.concatenate((preroll, state.stream))
                         state._preroll = None
-                elif state.buffer is None:
+                elif state.buffer is None and not self._uses_streaming_vad():
                     # determine_pause() just evaluated and discarded a full pre-speech chunk;
                     # keep its tail so speech starting near the chunk boundary isn't clipped.
                     rate, array = frame
@@ -331,6 +487,7 @@ class InterruptSafeReplyOnPause(ReplyOnPause):
                 and not self.event.is_set()  # no newer pause was detected after the reset
                 and self.state.stream is None  # no newer audio is being collected ...
                 and self.state.buffer is None  # ... on the fresh state
+                and getattr(self.state, "_stream_vad", None) is None
                 and state_before.pause_detected  # receive() had detected the barge-in pause on it
             ):
                 self.state = state_before
