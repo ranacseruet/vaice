@@ -228,9 +228,14 @@ class _Client:
     def __init__(self, agent: "AcpAgent"):
         self._agent = agent
         self.state: _Task | None = None  # the running task, set from the prompt until the task ends
-        self.asking = False  # a permission request is being decided
+        self._asking_count = 0  # how many permission requests are currently in flight
+        self._ask_lock = asyncio.Lock()
         self.answered = 0  # permission responses handed to the connection
         self.sent = 0  # ... and seen going out
+
+    @property
+    def asking(self) -> bool:
+        return self._asking_count > 0
 
     def observe(self, event: Any) -> None:
         """A stream observer: counts the permission responses that have been written (they carry an `outcome`)."""
@@ -250,15 +255,16 @@ class _Client:
 
     async def request_permission(self, session_id: str, tool_call: ToolCallUpdate,
                                  options: list[PermissionOption], **kwargs: Any) -> RequestPermissionResponse:
-        self.asking = True
+        self._asking_count += 1
         try:
-            response = await self._decide(tool_call, options)
+            async with self._ask_lock:
+                response = await self._decide(tool_call, options)
         except Exception as exc:  # noqa: BLE001 - a failed question is a no, and nothing raised reaches the SDK
             log.warning("browse: could not answer a permission request (%s)", type(exc).__name__)
             response = CANCELLED
         finally:
             self.answered += 1
-            self.asking = False
+            self._asking_count -= 1
         return response
 
     async def _decide(self, tool_call: ToolCallUpdate,
@@ -477,30 +483,34 @@ class AcpAgent:
     async def _connect(self, proc: _Proc, state: _Task) -> None:
         """Hand the process's pipes to the SDK and `initialize` (once per process)."""
         loop = asyncio.get_running_loop()
-        reader = asyncio.StreamReader(limit=STREAM_LIMIT)
-        read_transport, _ = await loop.connect_read_pipe(lambda: asyncio.StreamReaderProtocol(reader),
-                                                         proc.proc.stdout)
-        write_transport, write_protocol = await loop.connect_write_pipe(asyncio.streams.FlowControlMixin,
-                                                                        proc.proc.stdin)
-        proc.attach([read_transport, write_transport])
-        writer = asyncio.StreamWriter(write_transport, write_protocol, None, loop)
-        proc.client = client = _Client(self)
-        proc.conn = connect_to_agent(client, writer, reader, observers=[client.observe])
         try:
-            version = metadata.version("vaice")
-        except metadata.PackageNotFoundError:
-            version = "unknown"
-        init = await self._guard(proc, state, proc.conn.initialize(
-            protocol_version=PROTOCOL_VERSION, client_capabilities=ClientCapabilities(),
-            client_info=Implementation(name="vaice", title="vaice", version=version)),
-            browse.START_TIMEOUT, "initialize", browse.CANT_START)
-        if init.protocol_version != PROTOCOL_VERSION:
+            reader = asyncio.StreamReader(limit=STREAM_LIMIT)
+            read_transport, _ = await loop.connect_read_pipe(lambda: asyncio.StreamReaderProtocol(reader),
+                                                             proc.proc.stdout)
+            write_transport, write_protocol = await loop.connect_write_pipe(asyncio.streams.FlowControlMixin,
+                                                                            proc.proc.stdin)
+            proc.attach([read_transport, write_transport])
+            writer = asyncio.StreamWriter(write_transport, write_protocol, None, loop)
+            proc.client = client = _Client(self)
+            proc.conn = connect_to_agent(client, writer, reader, observers=[client.observe])
+            try:
+                version = metadata.version("vaice")
+            except metadata.PackageNotFoundError:
+                version = "unknown"
+            init = await self._guard(proc, state, proc.conn.initialize(
+                protocol_version=PROTOCOL_VERSION, client_capabilities=ClientCapabilities(),
+                client_info=Implementation(name="vaice", title="vaice", version=version)),
+                browse.START_TIMEOUT, "initialize", browse.CANT_START)
+            if init.protocol_version != PROTOCOL_VERSION:
+                raise BrowseError(
+                    f"the browser agent speaks ACP version {init.protocol_version}, not {PROTOCOL_VERSION}",
+                    browse.CANT_START)
+            capabilities = init.agent_capabilities
+            sessions = capabilities.session_capabilities if capabilities else None
+            proc.can_close_session = sessions is not None and sessions.close is not None
+        except BaseException:
             await self._end(proc)
-            raise BrowseError(f"the browser agent speaks ACP version {init.protocol_version}, not {PROTOCOL_VERSION}",
-                              browse.CANT_START)
-        capabilities = init.agent_capabilities
-        sessions = capabilities.session_capabilities if capabilities else None
-        proc.can_close_session = sessions is not None and sessions.close is not None
+            raise
 
     # -- a task
 

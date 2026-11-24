@@ -206,7 +206,7 @@ footer { color: var(--muted); font-size: 13px; }
 
 <script type="application/json" id="architecture-data">
 {
-  "as_of": "2026-11-23, main after #160 (hardened browser gate allowlist and MCP flags)",
+  "as_of": "2026-11-24, main after #160, #161, #162, #163, #164",
   "repo": "https://github.com/ranacseruet/vaice/blob/main/",
   "layers": [
     {"id": "front", "title": "Front end"},
@@ -491,11 +491,14 @@ footer { color: var(--muted); font-size: 13px; }
 
     {"id": "acp_agent", "file": "src/vaice/acp_agent.py", "layer": "browser",
      "summary": "AcpAgent: the ACP client that drives a browser agent over its stdin and stdout.",
-     "role": "One long-lived agent process and one asyncio loop thread; a fresh session/new per task. run() hands the task to the loop and polls stop and the deadline. Every permission request goes to on_ask on a thread of its own. A no is answered, then session/cancel, then BrowseDeclined. The answer is the text after the last tool call. The tripwire wants the gate's marker before the first tool call.",
+     "role": "One long-lived agent process and one asyncio loop thread; a fresh session/new per task (if initialize fails, _connect cleans up the process). run() hands the task to the loop and polls stop and the deadline. Concurrent request_permission calls serialize under _ask_lock while _asking_count tracks queued callers, so on_ask runs one question at a time on a thread of its own and _settle drains in-flight requests and flushes answers before session/cancel. A no is answered, drained, then session/cancel, then BrowseDeclined. The answer is the text after the last tool call. The tripwire wants the gate's marker before the first tool call.",
      "symbols": [
        {"ref": "acp_agent.AcpAgent.run", "what": "One task, from the browse thread."},
-       {"ref": "acp_agent.AcpAgent._task", "what": "initialize once, session/new, the prompt."},
-       {"ref": "acp_agent.AcpAgent._settle", "what": "Ending early: let a pending answer go out, cancel, wait, end the agent if needed."},
+       {"ref": "acp_agent.AcpAgent._connect", "what": "Wires pipes and calls initialize once per process, ending the process on failure."},
+       {"ref": "acp_agent.AcpAgent._task", "what": "Calls _connect if needed, session/new, and the prompt."},
+       {"ref": "acp_agent.AcpAgent._settle", "what": "Ending early: drain asking and queued permission requests, flush answers, cancel, wait, end the agent if needed."},
+       {"ref": "acp_agent._Client.request_permission", "what": "Tracks active and queued requests (_asking_count) and serializes _decide under _ask_lock."},
+       {"ref": "acp_agent._Client._ask_lock", "what": "Asyncio lock ensuring only one on_ask dialog waits at a time."},
        {"ref": "acp_agent._Client._decide", "what": "A permission request: tripwire, ask, allow or reject."},
        {"ref": "acp_agent._Task.update", "what": "Message chunks and tool calls, in arrival order, never awaiting."},
        {"ref": "acp_agent._in_thread", "what": "Blocking work (on_ask, ending a process) off the loop."},
@@ -503,6 +506,7 @@ footer { color: var(--muted); font-size: 13px; }
      ],
      "rules": [
        "A no must also cancel: the reject option alone makes the model route around it.",
+       "Concurrent permission requests serialize under _ask_lock so _settle resolves queued callers before session/cancel.",
        "Handlers catch everything and log type names only: the SDK logs an exception's text.",
        "pi-acp ignores mcpServers in session/new and closes the other sessions' Pi on every session/new."
      ],
@@ -638,10 +642,10 @@ footer { color: var(--muted); font-size: 13px; }
        {"lane": "ACP loop", "text": "initialize once per process, a fresh session/new, then session/prompt.", "ref": "acp_agent.AcpAgent._task"},
        {"lane": "agent process", "text": "The gate's marker chunk arrives first; a tool call before it trips the wire and ends the agent.", "ref": "acp_agent._Task.update"},
        {"lane": "agent process", "text": "Tool calls stream in; on_progress fills BrowseStatus, which browser_status and the status line read.", "ref": "browse_task.BrowseStatus.tool"},
-       {"lane": "agent process", "text": "A page-changing step sends request_permission.", "ref": "acp_agent._Client.request_permission"},
-       {"lane": "question thread", "text": "on_ask runs on a thread of its own: a Pending with a Waiter, and a spoken heads-up.", "ref": "assistant._BrowseHooks.ask"},
+       {"lane": "agent process", "text": "A page-changing step sends request_permission; concurrent requests serialize under _ask_lock and _asking_count keeps _settle waiting until queued ones resolve.", "ref": "acp_agent._Client.request_permission"},
+       {"lane": "question thread", "text": "on_ask runs on a thread of its own (one at a time): a Pending with a Waiter, and a spoken heads-up.", "ref": "assistant._BrowseHooks.ask"},
        {"lane": "Gradio worker", "text": "Run answers yes; Cancel, expiry, a newer request or New conversation are a no.", "ref": "confirm.Confirmations.answer"},
-       {"lane": "ACP loop", "text": "A yes is allow_once. A no is reject_once, then session/cancel, then BrowseDeclined.", "ref": "acp_agent._Client._decide", "why": "The reject option alone made the model route around the refusal."},
+       {"lane": "ACP loop", "text": "A yes is allow_once. A no is reject_once; _settle resolves queued requests as cancelled and flushes answers, then session/cancel, then BrowseDeclined.", "ref": "acp_agent._Client._decide", "why": "The reject option alone made the model route around the refusal, and cancelling before queued requests drain aborts them silently."},
        {"lane": "agent process", "text": "The prompt ends with end_turn; the answer is the text after the last tool call.", "ref": "acp_agent._Task.answer"},
        {"lane": "browse thread", "text": "ended(): under the task lock, a cancelled run counts as stopped; the status becomes the last ended task.", "ref": "assistant.Assistant._browse_ended"},
        {"lane": "browse thread", "text": "The whole answer goes on the asking turn as a report; the outcome row starts with finished.", "ref": "conversation.Turn.add_report"},

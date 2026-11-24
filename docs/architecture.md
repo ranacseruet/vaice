@@ -351,7 +351,8 @@ stateDiagram-v2
 ```
 
 A task cancelled while its agent still returned an answer counts as stopped (decided in `assistant.Assistant._browse_ended`
-under the task lock). The ACP conversation with the agent process (`acp_agent.AcpAgent`), for a Pi agent with its gate:
+under the task lock). The ACP conversation with the agent process (`acp_agent.AcpAgent`), for a Pi agent with its gate
+(if `acp_agent.AcpAgent._connect` fails during setup or `initialize`, it ends the process so no stale connection remains):
 
 ```mermaid
 sequenceDiagram
@@ -370,6 +371,7 @@ sequenceDiagram
   end
   P-->>L: tool_call updates, on_progress fills BrowseStatus
   P->>L: request_permission for a page-changing step
+  Note over L: serialized by _Client._ask_lock while _asking_count tracks queued requests
   L->>W: on_ask on a thread of its own
   W->>K: Pending with a Waiter, a spoken heads-up
   K-->>W: Run is a yes, anything else a no
@@ -377,7 +379,7 @@ sequenceDiagram
   alt yes
     L-->>P: allow_once
   else no
-    L-->>P: reject_once, then session/cancel, BrowseDeclined
+    L-->>P: reject_once, queued requests resolve as cancelled in _settle, then session/cancel, BrowseDeclined
   end
   P-->>L: text after the last tool call is the answer
   L-->>B: the answer, or a BrowseError
@@ -442,7 +444,7 @@ flowchart TB
   sp -->|"Outbox.put under the speech lock"| fw
   br -->|"outcome through Outbox, same lock"| fw
   br -->|"run_coroutine_threadsafe, polls stop and deadline"| lp
-  lp -->|"on_ask"| wk
+  lp -->|"on_ask, one at a time via _ask_lock"| wk
   wk -->|"Pending with a Waiter"| gw
   gw -->|"Stop: the task's cancelled Event"| br
 ```
