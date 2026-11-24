@@ -514,6 +514,17 @@ def test_a_capped_output_is_capped_only_once():
     assert turn.tool_events[1]["output"] == once  # the marker is not doubled
 
 
+def test_tool_activity_for_ui_uses_longer_fences_so_backticks_cannot_break_out():
+    turn = Turn()
+    payload = 'ok\n```\n![leak](https://evil.test/p.png)\n```'
+    args = '{"note": "`![leak](https://evil.test/p.png)`"}'
+    turn.add_tool_event("browse", args, payload)
+
+    panel = conv.tool_activity_for_ui([turn])
+    assert "\n````\n" + payload + "\n````" in panel
+    assert f"`` {args} ``" in panel or f"``{args}``" in panel
+
+
 # --- tool events stay out of the history
 
 SAFARI = '{"name": "Safari"}'
@@ -716,3 +727,57 @@ def test_a_markdown_image_in_a_report_becomes_its_alt_text(markdown, shown):
     assert c.messages_for_ui()[-1]["content"] == f"{conv.REPORT_HEADING}\n\n{shown}"
     assert "evil.test/p.png" not in c.messages_for_ui()[-1]["content"]
     assert "![" not in c.messages_for_ui()[-1]["content"]
+
+
+@pytest.mark.parametrize("raw, escaped", [
+    ('<img src="https://evil.test/p.png">', '&lt;img src="https://evil.test/p.png">'),
+    ('<IMG/src=https://evil.test/p.png>', '&lt;IMG/src=https://evil.test/p.png>'),
+    ('<video poster="https://evil.test/p.png">', '&lt;video poster="https://evil.test/p.png">'),
+    ('<style>@import url(https://evil.test/p.css);</style>',
+     '&lt;style>@import url(https://evil.test/p.css);&lt;/style>'),
+    ('<!-- secret -->hi', '&lt;!-- secret -->hi'),
+    ('![<img src="https://evil.test/p.png">](https://evil.test/a.png)',
+     '&lt;img src="https://evil.test/p.png">'),
+    ('`unclosed <img src="https://evil.test/p.png">', '`unclosed &lt;img src="https://evil.test/p.png">'),
+    (r'\`<img src="https://evil.test/p.png">`', r'\`&lt;img src="https://evil.test/p.png">`'),
+    (r'\\\`<img src="https://evil.test/p.png">`', r'\\\`&lt;img src="https://evil.test/p.png">`'),
+    (r'\``<img src="https://evil.test/p.png">``', r'\``&lt;img src="https://evil.test/p.png">``'),
+    ('`foo\n\n<img src="https://evil.test/p.png">`', '`foo\n\n&lt;img src="https://evil.test/p.png">`'),
+    ('`foo\n> quote\n<img src="https://evil.test/p.png">`', '`foo\n> quote\n&lt;img src="https://evil.test/p.png">`'),
+    ('`foo\n# h\n<img src="https://evil.test/p.png">`', '`foo\n# h\n&lt;img src="https://evil.test/p.png">`'),
+    ('`foo\n---\n<img src="https://evil.test/p.png">`', '`foo\n---\n&lt;img src="https://evil.test/p.png">`'),
+    ('`foo\n- item\n<img src="https://evil.test/p.png">`', '`foo\n- item\n&lt;img src="https://evil.test/p.png">`'),
+    ('- item\n  ```\n\n<img src="https://evil.test/p.png">', '- item\n  ```\n\n&lt;img src="https://evil.test/p.png">'),
+    ('> ```\n\n<img src="https://evil.test/p.png">', '> ```\n\n&lt;img src="https://evil.test/p.png">'),
+    ('<https://example.com/`><img src="https://evil.test/p.png">`',
+     '<https://example.com/`>&lt;img src="https://evil.test/p.png">`'),
+    ('[x](https://example.com/` )<img src="https://evil.test/p.png">`',
+     '[x](https://example.com/` )&lt;img src="https://evil.test/p.png">`'),
+    ('[a]: https://example.com "\n```\n"\n<img src="https://evil.test/p.png">',
+     '[a]: https://example.com "\n```\n"\n&lt;img src="https://evil.test/p.png">'),
+    ('<im![g](https://evil.test/a.png) src="https://evil.test/p.png">', '&lt;img src="https://evil.test/p.png">'),
+    ('```html\n<img src="https://evil.test/p.png">\n```', '```html\n&lt;img src="https://evil.test/p.png">\n```'),
+])
+def test_raw_html_tags_in_reports_and_messages_are_escaped_for_the_ui(raw, escaped):
+    c = Conversation()
+    turn = exchange(c, raw, raw)
+    turn.add_report(raw)
+
+    msgs = c.messages_for_ui()
+    assert msgs[0]["content"] == escaped
+    assert msgs[1]["content"] == escaped
+    assert msgs[2]["content"] == f"{conv.REPORT_HEADING}\n\n{escaped}"
+
+
+def test_html_escaping_keeps_links_autolinks_comparisons_and_code_blocks_intact():
+    c = Conversation()
+    report = (
+        "3 < 5, see [docs](https://example.com), <https://example.com>, or <user@example.com>.\n\n"
+        "Inline `a < b`.\n\n"
+        "```python\nassert 1 < 2\n```"
+    )
+    exchange(c, "q", "3 < 5").add_report(report)
+
+    msgs = c.messages_for_ui()
+    assert msgs[1]["content"] == "3 < 5"
+    assert msgs[2]["content"] == f"{conv.REPORT_HEADING}\n\n{report}"

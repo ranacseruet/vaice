@@ -206,7 +206,7 @@ footer { color: var(--muted); font-size: 13px; }
 
 <script type="application/json" id="architecture-data">
 {
-  "as_of": "2026-11-24, ACP permission serialization and failed initialize cleanup (#163, #164)",
+  "as_of": "2026-11-24, main after #160, #161, #162, #163, #164",
   "repo": "https://github.com/ranacseruet/vaice/blob/main/",
   "layers": [
     {"id": "front", "title": "Front end"},
@@ -481,7 +481,7 @@ footer { color: var(--muted); font-size: 13px; }
        {"ref": "browse.pi_agent", "what": "The Pi preset."},
        {"ref": "browse.acp_agent", "what": "The generic ACP preset."},
        {"ref": "browse.check_gate", "what": "Startup check: Pi must list the gate command."},
-       {"ref": "browse.GATE_POLICY", "what": "Read-only browser tools run, page-changing ones ask."},
+       {"ref": "browse.GATE_POLICY", "what": "Explicit allowlist of read/navigation browser tools; everything else asks."},
        {"ref": "browse.task_prompt", "what": "The goal plus the instructions (Bing or DuckDuckGo, never Google)."},
        {"ref": "browse.end_profile_processes", "what": "Before a new agent process and after close()."},
        {"ref": "browse.BrowseDeclined", "what": "A no at a step."}
@@ -514,7 +514,7 @@ footer { color: var(--muted); font-size: 13px; }
 
     {"id": "browse_gate", "file": "src/vaice/browse_gate.ts", "layer": "browser",
      "summary": "The Pi extension that gates the browser's tools.",
-     "role": "Loaded by Pi (the Pi preset points it there). For every tool call it reads VAICE_GATE_POLICY: run, ask (a confirm dialog that pi-acp turns into a permission request, so the Run button) or deny. It registers the vaice-gate command that check_gate looks for and sends the marker notification the tripwire waits for when each prompt starts.",
+     "role": "Loaded by Pi (the Pi preset points it there). For every tool call it reads VAICE_GATE_POLICY (own properties only): run, ask (a confirm dialog that pi-acp turns into a permission request, so the Run button) or deny, and escalates navigate_page/new_page with initScript or non-http(s) URLs to ask. It registers the vaice-gate command that check_gate looks for and sends the marker notification the tripwire waits for when each prompt starts.",
      "symbols": [],
      "rules": ["A gate that loads without hooking in leaves the tools ungated: hence both checks."],
      "uses": []},

@@ -4,6 +4,7 @@ tested in test_acp_agent.py; the real agents are checked by hand (see the PR), n
 import json
 import logging
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -103,7 +104,7 @@ def test_the_acp_agent_passes_the_pinned_browser_server_and_the_environment_with
         (chrome,) = agent._mcp_servers
         assert (chrome.name, chrome.command, chrome.env) == ("chrome", "npx", [])
         assert chrome.args == ["-y", browse.CHROME_DEVTOOLS_MCP, "--no-usage-statistics", "--no-performance-crux",
-                               "--userDataDir=/p"]
+                               "--no-file-navigations", "--no-javascript-evaluation", "--userDataDir=/p"]
         assert stat.S_IMODE((tmp_path / "acp-work").stat().st_mode) == 0o700
     finally:
         agent.close()
@@ -224,7 +225,8 @@ def test_write_pi_home_writes_private_files_without_the_key(tmp_path, monkeypatc
     assert settings["defaultProvider"] == "vaice" and settings["defaultModel"] == "lfm2.5-24b-a2b"
     chrome = json.loads((home / "mcp.json").read_text())["mcpServers"]["chrome"]
     assert chrome["command"] == "npx" and chrome["exposure"] == "direct"
-    assert chrome["args"][:2] == ["-y", "chrome-devtools-mcp@1.13.0"]
+    assert chrome["args"][:4] == ["-y", "chrome-devtools-mcp@1.13.0", "--no-usage-statistics", "--no-performance-crux"]
+    assert "--no-file-navigations" in chrome["args"] and "--no-javascript-evaluation" in chrome["args"]
     assert chrome["args"][-3:] == ["--headless", "--isolated", "--chromeArg=--mute-audio"]
     for name in ("models.json", "settings.json", "mcp.json"):
         assert stat.S_IMODE((home / name).stat().st_mode) == 0o600
@@ -253,13 +255,18 @@ def test_write_pi_home_refuses_a_bad_key_variable_name(tmp_path, name):
         write_pi_home(tmp_path / "pi", base_url="http://x/v1", model="m", api_key_env=name, browser_args=[])
 
 
-def test_the_gate_policy_asks_for_everything_that_changes_a_page():
+def test_the_gate_policy_is_an_explicit_read_allowlist_and_asks_for_everything_else():
     policy = browse.GATE_POLICY
-    assert policy["mcp__chrome__*"] == "run" and policy["default"] == "ask"
-    mutating = ("click", "fill", "fill_form", "type_text", "press_key", "evaluate_script", "upload_file", "drag",
-                "handle_dialog")
-    assert {name: policy[f"mcp__chrome__{name}"] for name in mutating} == dict.fromkeys(mutating, "ask")
-    assert set(policy) == {"mcp__chrome__*", "default", *(f"mcp__chrome__{n}" for n in mutating)}
+    assert "mcp__chrome__*" not in policy and policy["default"] == "ask"
+    assert {name: policy[f"mcp__chrome__{name}"] for name in browse._READ_ONLY_TOOLS} == dict.fromkeys(
+        browse._READ_ONLY_TOOLS, "run"
+    )
+    assert set(policy) == {"default", *(f"mcp__chrome__{name}" for name in browse._READ_ONLY_TOOLS)}
+    gated = ("click", "fill", "fill_form", "type_text", "press_key", "evaluate_script", "set_logpoints",
+             "upload_file", "drag", "handle_dialog", "emulate", "take_heapsnapshot", "performance_start_trace",
+             "screencast_start", "install_extension", "future_unknown_tool")
+    for name in gated:
+        assert policy.get(f"mcp__chrome__{name}", policy["default"]) == "ask"
     assert json.loads(json.dumps(policy)) == policy
 
 
@@ -267,6 +274,52 @@ def test_the_gate_extension_is_shipped_and_names_the_command_the_agent_checks():
     source = browse.GATE_FILE.read_text()
     assert f'registerCommand("{browse.GATE_COMMAND}"' in source
     assert "VAICE_GATE_POLICY" in source and "VAICE_GATE_TIMEOUT_MS" in source
+    assert "hasOwnProperty" in source and "initScript" in source
+
+
+def test_the_gate_extension_escalates_unsafe_navigation_and_avoids_prototype_keys():
+    if shutil.which("node") is None:
+        pytest.skip("node unavailable")
+    node = subprocess.run(["node", "--experimental-strip-types", "-e", ""], capture_output=True, text=True, check=False)
+    if node.returncode != 0:
+        pytest.skip("node --experimental-strip-types unavailable")
+    script = f"""
+import {{ pathToFileURL }} from "node:url";
+const mod = await import(pathToFileURL({json.dumps(str(browse.GATE_FILE))}).href);
+const handlers = {{}};
+mod.default({{ registerCommand() {{}}, on(name, fn) {{ handlers[name] = fn; }} }});
+const asked = [];
+const ctx = {{
+  hasUI: true,
+  ui: {{ async confirm(title, msg) {{ asked.push([title, JSON.parse(msg)]); return false; }} }},
+}};
+const cases = [
+  ["mcp__chrome__navigate_page", {{ url: "https://example.com" }}],
+  ["mcp__chrome__navigate_page", {{ url: "  https://example.com/a" }}],
+  ["mcp__chrome__navigate_page", {{ url: "https://example.com", initScript: "alert(1)" }}],
+  ["mcp__chrome__navigate_page", {{ type: "reload", initScript: "alert(1)" }}],
+  ["mcp__chrome__navigate_page", {{ url: "file:///etc/passwd" }}],
+  ["mcp__chrome__navigate_page", {{ url: "javascript:alert(1)" }}],
+  ["mcp__chrome__new_page", {{ url: "view-source:file:///etc/passwd" }}],
+  ["mcp__chrome__new_page", {{ url: "data:text/html,<script>alert(1)</script>" }}],
+  ["mcp__chrome__set_logpoints", {{ logpoints: ["x.js:1 1"] }}],
+  ["toString", {{}}],
+];
+const results = [];
+for (const [toolName, input] of cases) {{
+  results.push(await handlers.tool_call({{ toolName, input }}, ctx));
+}}
+console.log(JSON.stringify({{ results, askedCount: asked.length }}));
+"""
+    env = {**os.environ, "VAICE_GATE_POLICY": json.dumps(browse.GATE_POLICY)}
+    done = subprocess.run(["node", "--experimental-strip-types", "--input-type=module", "-e", script],
+                          capture_output=True, text=True, env=env, check=True)
+    data = json.loads(done.stdout.strip().splitlines()[-1])
+    results = data["results"]
+    assert results[0] is None and results[1] is None  # plain http(s) navigation runs unasked
+    for blocked in results[2:]:  # initScript, file:, javascript:, view-source:, data:, set_logpoints, toString all ask
+        assert isinstance(blocked, dict) and blocked.get("block") is True
+    assert data["askedCount"] == len(results) - 2
 
 
 # --- what a killed Pi leaves behind: the browser and its MCP server are in no group of Pi's
