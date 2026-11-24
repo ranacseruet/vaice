@@ -215,12 +215,12 @@ CONVERSATION_FILE = None if DATA_DIR is None else DATA_DIR / "conversation.json"
 MEMORY_FILE = None if DATA_DIR is None else DATA_DIR / "memory.json"  # the notes
 HISTORY_TURNS = _number("VAICE_HISTORY_TURNS", default="10", kind=int)
 
-# fastrtc's Silero VAD: what counts as speech, and when an utterance ends. A barge-in fires when
-# the interrupting sound ends, so the threshold decides what can interrupt a playing reply —
-# raise it if room noise or speaker feedback cuts replies short. The min-silence gap delays both
-# the reply start and interrupts; the speech pad pads detected speech on both sides.
+# Silero VAD: what counts as speech (`VAICE_VAD_THRESHOLD`), and how long trailing silence must last after
+# speech before an utterance ends (`VAICE_VAD_MIN_SILENCE_MS`; delays reply start and barge-ins alike). Raise the
+# threshold if room noise or speaker feedback cuts replies short; `VAICE_VAD_MIN_SILENCE_MS=750` (measured) avoids
+# splitting turns on 300-600 ms mid-sentence pauses. `VAICE_VAD_SPEECH_PAD_MS` applies to chunked fallback VAD.
 VAD_THRESHOLD = _number("VAICE_VAD_THRESHOLD", default="0.6", kind=float)
-VAD_MIN_SILENCE_MS = _number("VAICE_VAD_MIN_SILENCE_MS", default="150", kind=int)
+VAD_MIN_SILENCE_MS = _number("VAICE_VAD_MIN_SILENCE_MS", default="750", kind=int)
 VAD_SPEECH_PAD_MS = _number("VAICE_VAD_SPEECH_PAD_MS", default="30", kind=int)
 if not 0 < VAD_THRESHOLD < 1:
     raise SystemExit(f"vaice: VAICE_VAD_THRESHOLD must be between 0 and 1 (exclusive), got {VAD_THRESHOLD}")

@@ -206,7 +206,7 @@ footer { color: var(--muted); font-size: 13px; }
 
 <script type="application/json" id="architecture-data">
 {
-  "as_of": "2026-11-24, main after #160, #161, #162, #163, #164",
+  "as_of": "2026-11-24, streaming 32 ms Silero VAD with 750 ms pause default (#64)",
   "repo": "https://github.com/ranacseruet/vaice/blob/main/",
   "layers": [
     {"id": "front", "title": "Front end"},
@@ -236,17 +236,19 @@ footer { color: var(--muted); font-size: 13px; }
      "uses": ["assistant", "interruptible", "conversation", "server", "browse", "mcp_skills", "vision", "memory", "outbox", "realtime", "confirm", "shell", "skills", "config", "lifecycle"]},
 
     {"id": "interruptible", "file": "src/vaice/interruptible.py", "layer": "front",
-     "summary": "fastrtc's ReplyOnPause with the barge-in races fixed, tuned VAD and the outbox served when idle.",
-     "role": "A subclass of fastrtc 0.0.34's ReplyOnPause. emit() drops the chunk a next() was still making when a barge-in replaced the generator, restores a barge-in pause that the end-of-reply reset() wiped (issue 13), waits on the pause event instead of spinning, and, when nobody talks and no reply runs, serves the Outbox paced against the estimated end of playback. receive() keeps 0.3 s of pre-roll and clears proactive speech when the user starts talking.",
+     "summary": "fastrtc's ReplyOnPause with the barge-in races fixed, streaming 32 ms Silero VAD and the outbox served when idle.",
+     "role": "A subclass of fastrtc 0.0.34's ReplyOnPause. emit() drops the chunk a next() was still making when a barge-in replaced the generator, restores a barge-in pause that the end-of-reply reset() wiped (issue 13), waits on the pause event instead of spinning, and, when nobody talks and no reply runs, serves the Outbox paced against the estimated end of playback. determine_pause() streams 32 ms Silero windows (_StreamingVad) with VAICE_VAD_MIN_SILENCE_MS (default 750 ms) trailing silence so natural breaths do not split turns while keeping 0.3 s pre-roll; receive() clears proactive speech when speech starts.",
      "symbols": [
        {"ref": "interruptible.InterruptSafeReplyOnPause", "what": "The handler fastrtc copies per connection."},
+       {"ref": "interruptible.InterruptSafeReplyOnPause.determine_pause", "what": "Streams 32 ms Silero windows through _StreamingVad (falls back to super() for non-Silero models)."},
+       {"ref": "interruptible._StreamingVad", "what": "Stateful 16 kHz / 512-sample Silero VAD and pre-roll ring stored per turn on AppState."},
        {"ref": "interruptible.InterruptSafeReplyOnPause.emit", "what": "Reply chunk, stale-chunk drop, the issue 13 restore, or the next outbox item."},
        {"ref": "interruptible.InterruptSafeReplyOnPause.receive", "what": "VAD per frame, pre-roll, clears proactive speech at speech start."},
        {"ref": "interruptible.InterruptSafeReplyOnPause._serve_outbox", "what": "Polls the Outbox only while served audio ends under LEAD_SECONDS ahead; runs markers."},
        {"ref": "interruptible.InterruptSafeReplyOnPause.copy", "what": "Copies by keyword, so a fastrtc upgrade fails a test instead of misplacing a value."},
        {"ref": "interruptible.stop_playing_reply", "what": "New conversation: reset, drop proactive speech, clear fastrtc's queue."},
        {"ref": "interruptible._clear_playback", "what": "Every clear of fastrtc's playback queue (barge-in, speech over proactive audio, New conversation): scheduled on the connection's event loop, which fills and plays that queue."},
-       {"ref": "interruptible.DEFAULT_VAD_OPTIONS", "what": "Silero options that stop room noise inflating into 600 ms of speech."},
+       {"ref": "interruptible.DEFAULT_VAD_OPTIONS", "what": "Default Silero options (threshold=0.6, 750 ms trailing silence for streaming VAD) that reject brief noise without splitting mid-sentence pauses."},
        {"ref": "interruptible.use_cached_vad_model", "what": "Wraps fastrtc's Silero loader: the cached model with no request to huggingface.co, fastrtc's download only when it is not cached; a user-set HF_HUB_OFFLINE leaves it alone."},
        {"ref": "interruptible.LEAD_SECONDS", "what": "0.4 s: how far ahead of playback the outbox may be served."},
        {"ref": "interruptible.IDLE_WAIT_SECONDS", "what": "The idle wait: about 37 emit() calls a second instead of 32k."}
@@ -256,7 +258,7 @@ footer { color: var(--muted); font-size: 13px; }
        "The issue 13 restore runs only for emit's own end-of-reply reset, never for an explicit reset and never over newer audio.",
        "tests/test_interruptible.py drives the real ReplyOnPause; tests/threads.py resumes on a fresh thread per chunk."
      ],
-     "uses": ["outbox", "config"]},
+     "uses": ["audio", "outbox", "config"]},
 
     {"id": "outbox", "file": "src/vaice/outbox.py", "layer": "front",
      "summary": "Speech that no reply carries: a FIFO of audio frames and markers for the idle emit().",

@@ -709,7 +709,7 @@ def test_the_handler_defaults_to_tuned_vad_options_and_keeps_explicit_ones():
     rig = Rig(InterruptSafeReplyOnPause, lambda _audio: iter([]))
     assert rig.handler.model_options == interruptible.DEFAULT_VAD_OPTIONS
     assert rig.handler.model_options.threshold == 0.6
-    assert rig.handler.model_options.min_silence_duration_ms == 150
+    assert rig.handler.model_options.min_silence_duration_ms == 750
     assert rig.handler.model_options.speech_pad_ms == 30
     assert rig.handler.copy().model_options == interruptible.DEFAULT_VAD_OPTIONS
 
@@ -719,32 +719,198 @@ def test_the_handler_defaults_to_tuned_vad_options_and_keeps_explicit_ones():
     assert handler.copy().model_options is custom
 
 
-def test_a_brief_noise_burst_inside_a_chunk_is_rejected_by_the_tuned_vad_options():
-    """fastrtc's default min_silence_duration_ms=2000 inside a 600 ms chunk never closes a triggered
-    segment before the end of the chunk, counting trailing silence as speech; DEFAULT_VAD_OPTIONS
-    closes after 150 ms of silence so a 192 ms noise burst (3 x 64 ms windows < 250 ms min speech)
-    is rejected while a 320 ms speech segment (5 x 64 ms windows) still passes."""
-    from fastrtc.pause_detection.silero import SileroVADModel, SileroVadOptions
+class _StubSilero(silero.SileroVADModel):
+    """In-memory SileroVADModel returning scripted 32 ms window probabilities without loading ONNX."""
 
-    class StubSilero(SileroVADModel):
-        def __init__(self, active_windows: int):
-            self._active = active_windows
-            self._idx = 0
+    def __init__(self, probs):
+        self._probs = list(probs)
+        self._idx = 0
 
-        def __call__(self, x, state, sr: int):
-            prob = 0.85 if self._idx < self._active else 0.05
-            self._idx += 1
-            return np.array([[prob]], dtype=np.float32), state
+    def __call__(self, x, state, sr: int):
+        prob = self._probs[self._idx] if self._idx < len(self._probs) else 0.05
+        self._idx += 1
+        return np.array([[prob]], dtype=np.float32), state
 
-    chunk_600ms = np.zeros(int(16000 * 0.6), dtype=np.float32)
 
-    # 3 windows = 192 ms of sound followed by 408 ms of silence
-    assert StubSilero(3).get_speech_timestamps(chunk_600ms, SileroVadOptions()) == [{"start": 0, "end": 9600}]
-    assert StubSilero(3).get_speech_timestamps(chunk_600ms, interruptible.DEFAULT_VAD_OPTIONS) == []
+def _make_streaming_handler(fn, probs, *, min_silence_ms=750, max_continuous_speech_s=float("inf"), rate=48000):
+    opts = silero.SileroVadOptions(threshold=0.6, min_silence_duration_ms=min_silence_ms, speech_pad_ms=30)
+    algo = interruptible.ReplyOnPause(fn).algo_options
+    algo.max_continuous_speech_s = max_continuous_speech_s
+    handler = InterruptSafeReplyOnPause(
+        fn, model=_StubSilero(probs), model_options=opts, algo_options=algo, input_sample_rate=rate,
+    )
+    handler.send_message_sync = lambda _msg: None
+    handler._clear_queue = lambda: None
+    return handler
 
-    # 5 windows = 320 ms of sound (> 250 ms min_speech_duration_ms) still triggers speech
-    speeches = StubSilero(5).get_speech_timestamps(chunk_600ms, interruptible.DEFAULT_VAD_OPTIONS)
-    assert len(speeches) == 1 and speeches[0]["end"] - speeches[0]["start"] > int(16000 * 0.2)
+
+def test_a_brief_noise_burst_inside_a_chunk_is_rejected_by_streaming_vad():
+    # 6 x 32 ms windows (192 ms <= 200 ms started_talking_threshold) stays idle; 7 windows (224 ms) starts talking
+    frame_32ms = (16000, np.zeros((1, 512), dtype=np.int16))
+    idle = _make_streaming_handler(lambda _audio: iter([]), [0.9] * 6 + [0.05] * 10, rate=16000)
+    for _ in range(16):
+        idle.receive(frame_32ms)
+    assert not idle.state.started_talking and not idle.event.is_set()
+
+    speech = _make_streaming_handler(lambda _audio: iter([]), [0.9] * 7, rate=16000)
+    for _ in range(7):
+        speech.receive(frame_32ms)
+    assert speech.state.started_talking and not speech.event.is_set()
+
+
+def test_streaming_vad_tolerates_mid_sentence_pauses_shorter_than_min_silence():
+    # 8 speech windows (256 ms), 19 silent windows (608 ms < 750 ms), 4 speech windows,
+    # 1 hysteresis window (0.50 in [0.45, 0.60) resets silence while in_speech), then 25 silent windows -> 1 turn.
+    probs = [0.9] * 8 + [0.05] * 19 + [0.9] * 4 + [0.50] + [0.05] * 25
+    heard = []
+    handler = _make_streaming_handler(lambda audio: (heard.append(audio), iter(()))[1], probs, rate=16000)
+    for idx in range(len(probs)):
+        handler.receive((16000, np.full((1, 512), idx + 1, dtype=np.int16)))
+        if idx < len(probs) - 2:
+            assert not handler.event.is_set()
+    # Window idx == 56 is the 24th silence after 0.50 (24 * 32 ms = 768 ms >= 750 ms)
+    assert handler.event.is_set()
+    handler.emit()
+    assert len(heard) == 1
+    samples = heard[0][1].squeeze()
+    # Every sample index 1..57 was captured contiguously without losing the middle segment
+    assert samples[0] == 1 and samples[-1] == 57
+
+
+def test_streaming_vad_hysteresis_and_zero_min_silence():
+    # After leaving speech (< 0.45), a mid-band 0.50 window still counts toward silence; min_silence_ms=0 is instant
+    frame = (16000, np.ones((1, 512), dtype=np.int16))
+    h_hyst = _make_streaming_handler(
+        lambda _a: iter([]), [0.9] * 7 + [0.05] + [0.50] * 2, min_silence_ms=90, rate=16000,
+    )
+    for _ in range(10):
+        h_hyst.receive(frame)
+    assert h_hyst.event.is_set()
+
+    h_zero = _make_streaming_handler(lambda _a: iter([]), [0.9] * 7 + [0.05], min_silence_ms=0, rate=16000)
+    for _ in range(8):
+        h_zero.receive(frame)
+    assert h_zero.event.is_set()
+
+
+def test_streaming_vad_preroll_cap_onset_reset_and_new_conversation_reset():
+    # 1) Long silence capped by pre-roll, interrupted incomplete onset (3x speech + 3x silence), then New conversation
+    heard = []
+    probs = [0.05] * 30 + [0.9] * 3 + [0.05] * 4 + [0.05] * 15 + [0.9] * 8 + [0.05] * 25
+    handler = _make_streaming_handler(lambda audio: (heard.append(audio), iter(()))[1], probs, rate=16000)
+    # 30 windows (~960 ms) old silence marked 100 -> trimmed to cap -> incomplete onset -> stop_playing_reply clears it
+    for _ in range(37):
+        handler.receive((16000, np.full((1, 512), 100, dtype=np.int16)))
+    assert not handler.state.started_talking
+    assert handler.state._stream_vad.onset_speech == 0.0  # 3 silent windows reset onset_speech
+
+    stop_playing_reply(handler)
+    assert getattr(handler.state, "_stream_vad", None) is None
+
+    # New conversation: 15 pre-roll windows marked 200, then 8 speech + 25 silence marked 300
+    for _ in range(15):
+        handler.receive((16000, np.full((1, 512), 200, dtype=np.int16)))
+    for _ in range(33):
+        handler.receive((16000, np.full((1, 512), 300, dtype=np.int16)))
+    assert handler.event.is_set()
+    handler.emit()
+    samples = heard[0][1].squeeze()
+    assert not np.any(samples == 100)
+    assert np.any(samples == 200) and samples[-1] == 300
+
+
+@pytest.mark.parametrize("sample_rate", [24000, 44100])
+def test_streaming_vad_supports_stereo_empty_max_speech_and_other_rates(sample_rate):
+    probs = [0.9] * 15
+    handler = _make_streaming_handler(
+        lambda _a: iter([]), probs, max_continuous_speech_s=0.35, rate=sample_rate,
+    )
+    assert not handler.determine_pause(np.array([], dtype=np.int16), sample_rate, handler.state)
+    assert not handler.determine_pause(np.zeros((1, 100), dtype=np.int16), 0, handler.state)
+
+    step = sample_rate * 20 // 1000
+    for _ in range(25):  # 500 ms stereo input > max_continuous_speech_s=0.35
+        handler.receive((sample_rate, np.ones((2, step), dtype=np.int16)))
+        if handler.event.is_set():
+            break
+    assert handler.event.is_set()
+
+    # Sample rate switch mid-stream resets pending resampler buffer cleanly without crashing
+    handler.reset()
+    assert not handler.determine_pause(np.zeros((1, step), dtype=np.int16), sample_rate, handler.state)
+    assert not handler.determine_pause(np.zeros((1, 320), dtype=np.int16), 16000, handler.state)
+
+
+def test_streaming_vad_issue_13_restore_yields_to_newer_streaming_frame():
+    entered, release = threading.Event(), threading.Event()
+
+    def reply(_audio):
+        yield chunk(1.0)
+        entered.set()
+        assert release.wait(10)
+
+    handler = _make_streaming_handler(reply, [0.9] * 8 + [0.05] * 25, rate=16000)
+
+    def feed_utterance():
+        for _ in range(33):
+            handler.receive((16000, np.zeros((1, 512), dtype=np.int16)))
+
+    run_on_thread(feed_utterance, "fastrtc-receive")
+    assert handler.event.is_set()
+    assert start_thread(handler.emit, "fastrtc-emit").join()[1][0] == 1.0
+
+    handler.model = _StubSilero([0.9] * 8 + [0.05] * 25 + [0.05] * 5)
+    in_flight = start_thread(handler.emit, "fastrtc-emit")
+    assert entered.wait(10)
+    run_on_thread(feed_utterance, "fastrtc-receive")  # #13 pause lands on old state
+
+    newer = []
+    orig_reset = handler.reset
+
+    def reset_then_short_frame():
+        orig_reset()
+        newer.append(handler.state)
+        handler.receive((16000, np.zeros((1, 512), dtype=np.int16)))  # 32 ms frame on fresh state
+
+    handler.reset = reset_then_short_frame
+    release.set()
+
+    assert in_flight.join() is None
+    assert handler.state is newer[0] and getattr(newer[0], "_stream_vad", None) is not None
+    assert not handler.event.is_set()
+
+
+def test_streaming_vad_issue_13_restores_barge_in_when_fresh_state_is_clean():
+    entered, release = threading.Event(), threading.Event()
+    heard = []
+
+    def reply(audio):
+        heard.append(audio)
+        yield chunk(1.0)
+        if len(heard) == 1:
+            entered.set()
+            assert release.wait(10)
+
+    handler = _make_streaming_handler(reply, [0.9] * 8 + [0.05] * 25, rate=16000)
+
+    def feed_utterance(value: int):
+        for _ in range(33):
+            handler.receive((16000, np.full((1, 512), value, dtype=np.int16)))
+
+    run_on_thread(lambda: feed_utterance(1), "fastrtc-receive")
+    assert start_thread(handler.emit, "fastrtc-emit").join()[1][0] == 1.0
+
+    handler.model = _StubSilero([0.9] * 8 + [0.05] * 25)
+    in_flight = start_thread(handler.emit, "fastrtc-emit")
+    assert entered.wait(10)
+    run_on_thread(lambda: feed_utterance(2), "fastrtc-receive")  # #13 pause lands while next() is in flight
+    barge_in_state = handler.state
+    release.set()
+
+    assert in_flight.join() is None  # chunk 2 skipped and generator ended
+    assert handler.state is barge_in_state and handler.event.is_set()
+    assert start_thread(handler.emit, "fastrtc-emit").join()[1][0] == 1.0
+    assert heard[1][1].squeeze()[0] == 2
 
 
 def test_the_preroll_from_the_preceding_chunk_is_prepended_when_speech_starts():

@@ -152,6 +152,15 @@ def test_a_negative_vad_value_is_a_clean_error(monkeypatch, name):
         importlib.reload(config)
 
 
+def test_default_vad_silence_window_is_750_ms(monkeypatch):
+    monkeypatch.delenv("VAICE_VAD_MIN_SILENCE_MS", raising=False)
+    try:
+        assert importlib.reload(config).VAD_MIN_SILENCE_MS == 750
+    finally:
+        monkeypatch.undo()
+        importlib.reload(config)
+
+
 def test_an_empty_vaice_data_dir_disables_persistence(monkeypatch):
     monkeypatch.setenv("VAICE_DATA_DIR", "")
     try:

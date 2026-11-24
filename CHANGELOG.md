@@ -67,6 +67,7 @@ the pull requests (#53 to #126).
   everything in memory (#84).
 
 ### Changed
+- **Streaming Silero VAD with `VAICE_VAD_MIN_SILENCE_MS=750` (was `150`).** `InterruptSafeReplyOnPause` now streams 32 ms (`512`-sample @ 16 kHz) Silero windows across chunks (`_StreamingVad`) instead of running stateless 600 ms chunks where `VAICE_VAD_MIN_SILENCE_MS` at 75–150 ms behaved identically (`5/48` missed short utterances, `22/36` false splits at 300 ms, `34/36` at 500 ms on `evals/vad.py`). At the measured `750 ms` default, mid-sentence pauses up to 600 ms produce `0/36` false splits with `0/48` missed utterances and `814 / 862 ms` med/p90 end-of-turn latency (#64).
 - **The last browser result is in the prompt.** While the last browser task finished with an answer, every reply's
   system block carries one line with its goal, how long ago it ended and its spoken summary (the agent's `Summary:` line, or the start of its report; cleaned of chat
   markers, capped at 400 characters, nothing else of the answer), so "What did you find?" is answered from it instead
