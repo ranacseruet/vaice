@@ -21,12 +21,31 @@ export default function (pi: ExtensionAPI) {
 	const timeout = Number(process.env.VAICE_GATE_TIMEOUT_MS ?? "60000");
 
 	function tierOf(name: string): string {
-		if (policy[name]) return policy[name];
+		if (Object.prototype.hasOwnProperty.call(policy, name)) return policy[name];
 		let best = "";
 		for (const key of Object.keys(policy)) {
 			if (key.endsWith("*") && name.startsWith(key.slice(0, -1)) && key.length > best.length) best = key;
 		}
-		return best ? policy[best] : (policy["default"] ?? "ask");
+		return best ? policy[best] : (Object.prototype.hasOwnProperty.call(policy, "default") ? policy["default"] : "ask");
+	}
+
+	function navigationNeedsAsk(toolName: string, input: unknown): boolean {
+		if (
+			toolName !== "navigate_page" &&
+			toolName !== "new_page" &&
+			!toolName.endsWith("__navigate_page") &&
+			!toolName.endsWith("__new_page")
+		) {
+			return false;
+		}
+		if (!input || typeof input !== "object") return false;
+		const args = input as Record<string, unknown>;
+		if ("initScript" in args && Boolean(args.initScript)) return true;
+		if (typeof args.url === "string") {
+			const trimmed = args.url.trim();
+			if (trimmed !== "" && !/^https?:\/\//i.test(trimmed)) return true;
+		}
+		return false;
 	}
 
 	pi.registerCommand("vaice-gate", {
@@ -39,7 +58,8 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("tool_call", async (event, ctx) => {
-		const tier = tierOf(event.toolName);
+		let tier = tierOf(event.toolName);
+		if (tier === "run" && navigationNeedsAsk(event.toolName, event.input)) tier = "ask";
 		if (tier === "run") return undefined;
 		if (tier === "deny") return { block: true, reason: `${event.toolName} is not allowed` };
 		if (!ctx.hasUI) return { block: true, reason: "no one to approve this" };
