@@ -36,13 +36,6 @@ _IMAGE = re.compile(
 # Raw HTML tags and comments: Gradio's Chatbot (`allow_tags=False`) and Markdown (`sanitize_html=True`) still allow
 # standard HTML elements such as <img>, <video>, <audio>, <style>, and <link>, which can load remote URLs.
 _HTML_TAG = re.compile(r"<(?=(?:/|!|\?|[A-Za-z][A-Za-z0-9-]*(?:[\s/>]|$)))")
-_FENCE_OPEN = re.compile(r"^[ ]{0,3}(`{3,}|~{3,})(.*)$")
-_BACKTICK_RUN = re.compile(r"`+")
-# Any blank line or CommonMark block starter interrupts a paragraph, so an inline code span never crosses it.
-_PARAGRAPH_BREAK = re.compile(
-    r"\r?\n(?:[ \t]*\r?\n|[ ]{0,3}(?:>|#{1,6}[ \t]|#{1,6}\r?\n|(?:[*+-]|1[.)])[ \t]"
-    r"|(?:(?:\*[ \t]*){3,}|(?:_[ \t]*){3,}|(?:-[ \t]*){3,}|[-=]+)[ \t]*\r?\n|`{3,}|~{3,}))"
-)
 # The output recorded for a call that asked the user first; its result is recorded as a second event (the Run click)
 WAITING_FOR_CONFIRMATION = "waiting for confirmation"
 
@@ -73,73 +66,13 @@ def _without_images(text: str) -> str:
     return text
 
 
-def _is_escaped(text: str, index: int) -> bool:
-    """Whether `text[index]` is preceded by an odd number of ASCII backslashes."""
-    backslashes = 0
-    while index > backslashes and text[index - 1 - backslashes] == "\\":
-        backslashes += 1
-    return backslashes % 2 == 1
-
-
-def _escape_inline_html(text: str) -> str:
-    """Escape raw HTML tag openers in non-fenced text while preserving properly closed CommonMark code spans."""
-    out: list[str] = []
-    pos = 0
-    while span := _BACKTICK_RUN.search(text, pos):
-        start = span.start()
-        if _is_escaped(text, start):
-            # A backslash escapes only the first backtick; any remaining backticks in the run still start a span.
-            out.append(_HTML_TAG.sub("&lt;", text[pos : start + 1]))
-            pos = start + 1
-            continue
-        out.append(_HTML_TAG.sub("&lt;", text[pos:start]))
-        opener = span.group(0)
-        pos = span.end()
-        brk = _PARAGRAPH_BREAK.search(text, pos)
-        limit = brk.start() if brk else len(text)
-        # In CommonMark, a backtick run of length k closes only on an exact length-k run within the same paragraph.
-        for candidate in _BACKTICK_RUN.finditer(text, pos, limit):
-            if candidate.group(0) == opener:
-                close_end = candidate.end()
-                out.append(text[start:close_end])
-                pos = close_end
-                break
-        else:
-            out.append(opener)
-    out.append(_HTML_TAG.sub("&lt;", text[pos:]))
-    return "".join(out)
-
-
-def _escape_html(text: str) -> str:
-    """Escape raw HTML tag openers outside CommonMark fenced code blocks and inline code spans."""
-    out: list[str] = []
-    plain: list[str] = []
-    fence: tuple[str, int] | None = None
-    for line in text.splitlines(keepends=True):
-        if fence is not None:
-            out.append(line)
-            char, length = fence
-            stripped = line.rstrip("\r\n")
-            if re.match(rf"^[ ]{{0,3}}{re.escape(char)}{{{length},}}[ \t]*$", stripped):
-                fence = None
-            continue
-        match = _FENCE_OPEN.match(line.rstrip("\r\n"))
-        if match and (match.group(1)[0] == "~" or "`" not in match.group(2)):
-            if plain:
-                out.append(_escape_inline_html("".join(plain)))
-                plain.clear()
-            out.append(line)
-            fence = (match.group(1)[0], len(match.group(1)))
-            continue
-        plain.append(line)
-    if plain:
-        out.append(_escape_inline_html("".join(plain)))
-    return "".join(out)
-
-
 def _safe_ui_markdown(text: str) -> str:
-    """`text` safe to render in Gradio Markdown/Chatbot: Markdown images stripped and raw HTML tags escaped."""
-    return _escape_html(_without_images(text))
+    """`text` safe to render in Gradio Markdown/Chatbot: Markdown images stripped and raw HTML tags escaped.
+
+    Escapes unconditionally (like `_without_images`) rather than exempting fenced or inline code, so
+    Markdown container boundaries, escaped delimiters, or parser differences cannot leave a raw tag unescaped.
+    """
+    return _HTML_TAG.sub("&lt;", _without_images(text))
 
 
 def write_json_atomically(path: Path, data) -> None:
