@@ -95,6 +95,8 @@ the pull requests (#53 to #126).
   with the screen skill on). Each task's prompt also carries today's date, so "this week" means now.
 
 ### Fixed
+- `AcpAgent._Client.request_permission` now serializes concurrent permission requests with an `asyncio.Lock` and tracks in-flight questions with a counter so parallel requests do not clobber each other or break response-before-cancel ordering (#163).
+- `AcpAgent._connect` now ends the agent process on any failure during `initialize()` instead of leaving an uninitialized connection cached for the next browser task (#164).
 - A start no longer sends any request to `huggingface.co` once the Silero voice-activity model is downloaded: vaice
   loads it from the Hugging Face cache instead of letting fastrtc check for a newer revision every time. The first
   start still downloads it; with `HF_HUB_OFFLINE` set (either way) fastrtc's own loader runs as before (#143).

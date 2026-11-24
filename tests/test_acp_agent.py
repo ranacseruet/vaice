@@ -319,6 +319,61 @@ def test_a_yes_to_a_request_with_no_allow_option_is_answered_cancelled(harness):
     assert h.fact("permission")[0]["outcome"] == "cancelled"
 
 
+def test_concurrent_permission_requests_are_serialized_and_both_succeed_when_approved(harness):
+    h = harness({"steps": [
+        {"parallel_permissions": [
+            {"title": "click", "message": '{"uid": "1"}'},
+            {"title": "fill", "message": '{"uid": "2"}'},
+        ]},
+        {"text": "Both done."},
+    ]}, pi_dialogs=True)
+    active = 0
+    overlapped = False
+    count_lock = threading.Lock()
+
+    def ask(title, message, stop):
+        nonlocal active, overlapped
+        with count_lock:
+            active += 1
+            if active > 1:
+                overlapped = True
+        try:
+            time.sleep(0.05)
+            h.asked.append((title, message))
+            return True
+        finally:
+            with count_lock:
+                active -= 1
+
+    assert h.run(on_ask=ask) == "Both done."
+    assert not overlapped
+    assert h.asked == [("click", '{"uid": "1"}'), ("fill", '{"uid": "2"}')]
+    assert [p["option"] for p in h.fact("permission")] == ["allow", "allow"]
+
+
+def test_declining_the_first_of_concurrent_permission_requests_cancels_the_second_before_session_cancel(harness):
+    h = harness({"steps": [
+        {"parallel_permissions": [
+            {"title": "click", "message": '{"uid": "1"}'},
+            {"title": "fill", "message": '{"uid": "2"}'},
+        ]},
+        {"text": "Should not finish."},
+    ]}, pi_dialogs=True)
+
+    def ask(title, message, stop):
+        h.asked.append((title, message))
+        return False
+
+    with pytest.raises(BrowseDeclined):
+        h.run(on_ask=ask)
+    assert h.asked == [("click", '{"uid": "1"}')]  # second queued request sees declined state and never asks
+    assert h.fact("permission") == [
+        {"outcome": "selected", "option": "reject", "message": '{"uid": "1"}'},
+        {"outcome": "cancelled", "option": None, "message": '{"uid": "2"}'},
+    ]
+    assert h.wire() == ["permission_response", "permission_response", "cancel"]
+
+
 # --- stop, the deadline, a hung or dead agent
 
 
@@ -426,6 +481,20 @@ def test_an_agent_that_does_not_answer_initialize_is_ended_and_is_an_error(tmp_p
             h.run()
         assert caught.value.spoken == browse.CANT_START
         assert wait_dead(h.pids()[0])
+    finally:
+        h.agent.close()
+
+
+def test_a_json_rpc_error_from_initialize_ends_the_agent_and_the_next_task_starts_a_new_one(tmp_path):
+    marker = tmp_path / "init-failed"
+    h = Harness(tmp_path, env={"FAKE_ACP_INIT_FAIL_ONCE": str(marker)})
+    try:
+        with pytest.raises(BrowseError, match="initialize failed") as caught:
+            h.run()
+        assert caught.value.spoken == browse.CANT_START
+        assert wait_dead(h.pids()[0])
+        assert h.run() == "The title is Python."
+        assert len(h.pids()) == 2 and len(h.fact("initialize")) == 2
     finally:
         h.agent.close()
 

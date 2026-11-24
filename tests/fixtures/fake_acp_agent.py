@@ -11,6 +11,7 @@ Environment:
   FAKE_ACP_CLOSE_SESSION  1: advertise `sessionCapabilities.close`
   FAKE_ACP_IGNORE_CANCEL  1: a cancel is recorded and then ignored: the prompt never ends (an agent that hangs)
   FAKE_ACP_INIT_DELAY     seconds before `initialize` is answered (default 0)
+  FAKE_ACP_INIT_FAIL_ONCE path to a marker file: the first `initialize` creates it and raises RequestError
   FAKE_ACP_IGNORE_TERM    1: SIGTERM is ignored (only SIGKILL ends it)
 
 Steps (each is an object):
@@ -19,6 +20,7 @@ Steps (each is an object):
   {"permission": {"title": "...", "raw": {...}}}   a session/request_permission with pi-acp's two options; the answer
                                         is recorded. Options: "kinds" overrides them (a list of kinds); "raw" may be
                                         any JSON value; "content" (texts) and "locations" (paths) are sent with it
+  {"parallel_permissions": [ask1, ask2]} send multiple session/request_permission calls concurrently (asyncio.gather)
   {"sleep": 0.2}                        wait (a cancel received meanwhile ends the prompt as "cancelled")
   {"exit": 3}                           the process exits at once (mid-task)
   {"fail": "text"}                      the prompt fails with a JSON-RPC error carrying `text`
@@ -88,6 +90,11 @@ class FakeAgent:
             "caps": client_capabilities.model_dump(by_alias=True, exclude_none=True) if client_capabilities else None,
             "client": client_info.name if client_info else None})
         await asyncio.sleep(float(os.environ.get("FAKE_ACP_INIT_DELAY", "0")))
+        fail_once = os.environ.get("FAKE_ACP_INIT_FAIL_ONCE")
+        if fail_once and not os.path.exists(fail_once):
+            with open(fail_once, "w") as f:
+                f.write("failed\n")
+            raise RequestError(-32603, "init failed")
         sessions = SessionCapabilities(close=SessionCloseCapabilities()) if os.environ.get(
             "FAKE_ACP_CLOSE_SESSION") == "1" else SessionCapabilities()
         return InitializeResponse(protocol_version=PROTOCOL_VERSION,
@@ -132,23 +139,9 @@ class FakeAgent:
                 tool_call_id=step.get("id", "t1"), title=step["tool"], raw_input=step.get("args"),
                 status="in_progress"))
         elif "permission" in step:
-            ask = step["permission"]
-            kinds = ask.get("kinds", ["allow_once", "reject_once"])
-            options = [PermissionOption(option_id=kind.split("_")[0], name=kind, kind=kind) for kind in kinds]
-            raw = ask.get("raw", {"method": "confirm", "title": ask.get("title"), "message": ask.get("message")})
-            response = await self.conn.request_permission(
-                session_id=session_id, options=options,
-                tool_call=ToolCallUpdate(
-                    tool_call_id="pi-ui-1", title=ask.get("title", "tool"), kind="other", status="pending",
-                    raw_input=raw,
-                    content=[ContentToolCallContent(type="content", content=TextContentBlock(type="text", text=text))
-                             for text in ask.get("content", [])] or None,
-                    locations=[ToolCallLocation(path=path) for path in ask.get("locations", [])] or None))
-            outcome = response.outcome
-            note(permission={"outcome": outcome.outcome, "option": getattr(outcome, "option_id", None),
-                             "message": raw.get("message") if isinstance(raw, dict) else None})
-            if outcome.outcome == "cancelled":  # a cancelled question ends the turn (an agent may do that)
-                self.cancelled.set()
+            await self._ask_permission(session_id, step["permission"])
+        elif "parallel_permissions" in step:
+            await asyncio.gather(*(self._ask_permission(session_id, ask) for ask in step["parallel_permissions"]))
         elif "sleep" in step:
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(self.cancelled.wait(), step["sleep"])
@@ -156,6 +149,24 @@ class FakeAgent:
             os._exit(step["exit"])
         elif "fail" in step:
             raise RequestError(-32603, step["fail"])
+
+    async def _ask_permission(self, session_id, ask) -> None:
+        kinds = ask.get("kinds", ["allow_once", "reject_once"])
+        options = [PermissionOption(option_id=kind.split("_")[0], name=kind, kind=kind) for kind in kinds]
+        raw = ask.get("raw", {"method": "confirm", "title": ask.get("title"), "message": ask.get("message")})
+        response = await self.conn.request_permission(
+            session_id=session_id, options=options,
+            tool_call=ToolCallUpdate(
+                tool_call_id="pi-ui-1", title=ask.get("title", "tool"), kind="other", status="pending",
+                raw_input=raw,
+                content=[ContentToolCallContent(type="content", content=TextContentBlock(type="text", text=text))
+                         for text in ask.get("content", [])] or None,
+                locations=[ToolCallLocation(path=path) for path in ask.get("locations", [])] or None))
+        outcome = response.outcome
+        note(permission={"outcome": outcome.outcome, "option": getattr(outcome, "option_id", None),
+                         "message": raw.get("message") if isinstance(raw, dict) else None})
+        if outcome.outcome == "cancelled":  # a cancelled question ends the turn (an agent may do that)
+            self.cancelled.set()
 
 
 async def main() -> None:
