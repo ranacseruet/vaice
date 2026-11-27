@@ -206,7 +206,7 @@ footer { color: var(--muted); font-size: 13px; }
 
 <script type="application/json" id="architecture-data">
 {
-  "as_of": "2026-11-24, streaming 32 ms Silero VAD with 750 ms pause default (#64)",
+  "as_of": "2026-11-27, the repetition cut also splits sentences within a line (#156)",
   "repo": "https://github.com/ranacseruet/vaice/blob/main/",
   "layers": [
     {"id": "front", "title": "Front end"},
@@ -338,7 +338,7 @@ footer { color: var(--muted); font-size: 13px; }
        {"ref": "realtime._create_response", "what": "response.create, with tool_choice auto or none after a tool round."},
        {"ref": "realtime._speech_friendly", "what": "Compacts a tool result, because the model reads it aloud."},
        {"ref": "realtime._MarkupStripper", "what": "Drops tool_call, think, answer and control-token markup across deltas."},
-       {"ref": "realtime._loop_trimmed", "what": "A 1 to 4 line block repeated 3 times: cut, record the answer, close."},
+       {"ref": "realtime._loop_trimmed", "what": "A block of 1 to 4 lines, or of 1 to 4 sentences within lines, repeated 3 times: cut, record the answer, close."},
        {"ref": "realtime.EndReply", "what": "A tool output that ends the reply after its round."},
        {"ref": "realtime.speak", "what": "Text in, speech out through the Outbox, the text recorded by a marker."},
        {"ref": "realtime.spoken_part", "what": "The words that the audio handed out so far covers."},

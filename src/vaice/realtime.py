@@ -14,6 +14,7 @@ from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from datetime import datetime
 from functools import partial
+from itertools import pairwise
 
 import requests
 from websockets.exceptions import ConnectionClosed, InvalidStatus, WebSocketException
@@ -40,13 +41,15 @@ CHECK_TIMEOUT = 2  # seconds for the startup HTTP checks
 # keeps a tool-calling loop from running away with the session (and the mic).
 MAX_TOOL_ROUNDS = 2
 
-# A reply that repeats the same 1-4-line block this many times back-to-back is degenerating: under
-# greedy decoding LFM3-Audio sometimes cannot stop after answering and loops to the token cap
-# (seconds of junk audio — a normalized timestamp ~60x, a 3-line block ~20x, live). The reply is
-# cut there: the repeated tail is dropped from the record and the session closed, which also frees
-# the server slot. 3 repeats keeps a legitimate refrain safe; the cut keeps the answer.
+# A reply that repeats the same block of 1-4 lines, or of 1-4 sentences within its lines, this many
+# times back-to-back is degenerating: under greedy decoding LFM3-Audio sometimes cannot stop after
+# answering and loops to the token cap (seconds of junk audio — a normalized timestamp ~60x, a
+# 3-line block ~20x, one sentence 3x on one line with no newline (#156), live). The reply is cut
+# there: the repeated tail is dropped from the record and the session closed, which also frees the
+# server slot. 3 repeats keeps a legitimate refrain safe; the cut keeps the answer.
 LOOP_REPEATS = 3
 LOOP_MAX_BLOCK_LINES = 4
+_SENTENCE_END = re.compile(r"[.!?]+")
 
 ABANDONED = "the app is stopping; the reply is abandoned"
 _DONE = object()
@@ -326,45 +329,76 @@ def _normalized(line: str) -> str:
     return " ".join("".join(ch.lower() if ch.isalnum() else " " for ch in line).split())
 
 
-def _loop_block(text: str, repeats: int = LOOP_REPEATS, max_block: int = LOOP_MAX_BLOCK_LINES) -> int | None:
-    """The size, in non-empty lines, of the block repeated `repeats` times back-to-back at the end
-    of `text`; None when there is no such block. Line-based: the observed loops repeat
-    newline-separated lines ("2026-11-14 21:34:00 EST" ~60x, a 3-line block ~20x); repetition
-    inside a single line is not detected."""
-    lines = [line for line in text.split("\n") if line.strip()]
-    norm = [_normalized(line) for line in lines]
+def _loop_block(units: Sequence[str], repeats: int = LOOP_REPEATS,
+                max_block: int = LOOP_MAX_BLOCK_LINES) -> int | None:
+    """The size, in units, of the block repeated `repeats` times back-to-back at the end of
+    `units` (non-empty lines or sentences, compared normalized); None when there is no such block."""
+    norm = [_normalized(unit) for unit in units]
     for size in range(1, max_block + 1):
         need = size * repeats
-        if len(lines) >= need and norm[-need:] == norm[-size:] * repeats:
+        if len(norm) >= need and norm[-need:] == norm[-size:] * repeats:
             return size
     return None
 
 
+def _sentence_cuts(line: str) -> list[int]:
+    """Where `line` splits into sentences: after a run of `.`, `!` or `?` that a space, a capital
+    letter or a list marker follows ("…MacBook Pro.The Mac…", "…Pro.- Name"). A terminator with
+    nothing after it yet is no cut, so while streaming the sentence still being written is not
+    compared; a period inside "3.5 GB" or "e.g. this" is no cut either."""
+    cuts = []
+    for match in _SENTENCE_END.finditer(line):
+        end = match.end()
+        if end < len(line) and (line[end].isspace() or line[end].isupper() or line[end] in "-*#•"):
+            cuts.append(end)
+    return cuts
+
+
+def _units(text: str, *, final: bool, sentences: bool) -> list[tuple[int, int]]:
+    """The completed non-empty units of `text` as (start, end) offsets, whitespace trimmed: its
+    lines, or with `sentences` its lines split at `_sentence_cuts`. A line is complete once its
+    newline arrived, a sentence once its cut is seen; at the end of the response (`final`) the
+    trailing unit counts too."""
+    spans = []
+    offset = 0
+    for line in text.split("\n"):
+        line_end = offset + len(line)
+        complete = final or line_end < len(text)  # a newline follows it
+        bounds = [0, *(_sentence_cuts(line) if sentences else []), len(line)]
+        for i, (a, b) in enumerate(pairwise(bounds)):
+            last = i == len(bounds) - 2
+            if last and not complete:
+                break  # the part still being written
+            piece = line[a:b]
+            if piece.strip():
+                lead = len(piece) - len(piece.lstrip())
+                spans.append((offset + a + lead, offset + a + len(piece.rstrip())))
+        offset = line_end + 1
+    return spans
+
+
 def _loop_trimmed(joined: str, *, final: bool = False) -> str | None:
-    """`joined` without the repeated tail when it ends with a loop, or None. While streaming the
-    trailing partial line is not a repeat yet — only completed lines (everything up to the last
-    newline) are compared, so a third "Status: ready" that is the start of "Status: ready for
-    input" is not cut as a loop. At the end of the response every line is final and the last one
-    counts too."""
-    if final:
-        probe = joined if joined.endswith("\n") else joined + "\n"
-    else:
-        cut = joined.rfind("\n")
-        if cut < 0:
-            return None  # no completed line yet
-        probe = joined[: cut + 1]
-    block = _loop_block(probe)
-    if block is None:
-        return None
-    lines = [line for line in probe.split("\n") if line.strip()]
-    return "\n".join(_trim_repeats(lines, block))
+    """`joined` cut after the answer when it ends with a loop, or None. Repeated lines are looked
+    for first, then repeated sentences, which also catches a sentence the model repeats on one
+    line with no newline (#156). While streaming only completed units are compared, so a third
+    "Status: ready" that is the start of "Status: ready for input" is not cut as a loop; at the
+    end of the response the last unit counts too. The text before the cut is kept as written."""
+    for sentences in (False, True):
+        spans = _units(joined, final=final, sentences=sentences)
+        units = [joined[a:b] for a, b in spans]
+        block = _loop_block(units)
+        if block is not None:
+            kept = _trim_repeats(units, block)
+            return joined[: spans[len(kept) - 1][1]]
+    return None
 
 
 def _trim_repeats(lines: list[str], block: int) -> list[str]:
-    """`lines` without the repeated tail: every copy of the looping block (compared normalized) is
-    dropped, so the record keeps the answer, not the loop. Only called after `_loop_block` has
-    found at least `LOOP_REPEATS` copies at the end. One copy is kept when the whole text is the
-    loop (a terse correct answer the model then loops on), so the turn still knows the answer."""
+    """`lines` (lines or sentences) without the repeated tail: every copy of the looping block
+    (compared normalized) is dropped, so the record keeps the answer, not the loop. Only called
+    after `_loop_block` has found at least `LOOP_REPEATS` copies at the end. One copy is kept when
+    the whole text is the loop (a terse correct answer the model then loops on), so the turn still
+    knows the answer."""
     norm = [_normalized(line) for line in lines]
     end = len(lines)
     copies = 1
