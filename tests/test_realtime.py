@@ -446,10 +446,14 @@ def test_a_sentence_repeated_within_one_line_is_a_loop():
     sentence = "The Mac in this session is named MacBook Pro."
     # streaming: the third copy is complete once the next unit starts, and the reply is cut there
     assert rt._loop_trimmed(ONE_LINE_LOOP) == sentence
-    assert rt._loop_trimmed("It is noon. " + "Tick tock. " * rt.LOOP_REPEATS + "Tick") == "It is noon."
+    assert rt._loop_trimmed("It is noon. " + "The clock ticks. " * rt.LOOP_REPEATS + "The") == "It is noon."
+    # copies joined with no space at all (the timestamp loop on one line)
+    assert rt._loop_trimmed("It is noon." + "2026-11-14 21:34:00 EST." * rt.LOOP_REPEATS + "2026") == "It is noon."
+    assert rt._loop_trimmed("the time is noon." * rt.LOOP_REPEATS + "the time") == "the time is noon."
     # at the end of the response the last sentence counts too
     assert rt._loop_trimmed("A sentence here." * rt.LOOP_REPEATS, final=True) == "A sentence here."
-    assert rt._loop_trimmed("It is noon.\nTick. Tick! tick?", final=True) == "It is noon."
+    ticks = "It is noon.\nThe clock ticks. The clock ticks! the clock ticks?"
+    assert rt._loop_trimmed(ticks, final=True) == "It is noon."
 
 
 def test_a_sentence_still_being_written_is_not_compared():
@@ -459,14 +463,27 @@ def test_a_sentence_still_being_written_is_not_compared():
 
 
 def test_repeated_short_sentences_below_the_limit_and_non_sentence_periods_are_kept():
-    assert rt._loop_trimmed("Yes. Yes. That is right.", final=True) is None  # two copies: no loop
+    assert rt._loop_trimmed("Yes, that is right. Yes, that is right. Done.", final=True) is None  # two copies
     assert rt._loop_trimmed("It has 3.5 GB free. 3.5 GB of 8 GB.", final=True) is None
-    # a period inside a number or before a lowercase word is no sentence end
+    # periods inside numbers and abbreviations split, but nothing there repeats as a whole block
     assert rt._loop_trimmed("v1.2.3 v1.2.3 v1.2.3 is out, e.g. today.", final=True) is None
 
 
+def test_short_emphatic_repeats_are_not_a_loop_but_a_runaway_short_sentence_is():
+    # under LOOP_MIN_SENTENCE_WORDS a block is emphasis: the reply goes on
+    assert rt._loop_trimmed("Hello! Hello! Hello! How are you today?") is None
+    assert rt._loop_trimmed("Your volume is up. Up. Up. Up.", final=True) is None
+    # the same short sentence looping on is caught as a longer block (3 x 3 copies)
+    assert rt._loop_trimmed("It is noon. " + "Hi. " * 9 + "Hi") == "It is noon."
+
+
+def test_units_of_punctuation_alone_are_not_a_loop():
+    assert rt._loop_trimmed("Wait... ... ... ... okay") is None
+    assert rt._loop_trimmed("Answer.\n---\n---\n---\nmore") is None
+
+
 def test_the_text_before_a_sentence_loop_is_kept_as_written():
-    text = "First line.\n\nIt is noon.  Done. Done. Done. Done"
+    text = "First line.\n\nIt is noon.  That is all. That is all. That is all. That"
     assert rt._loop_trimmed(text) == "First line.\n\nIt is noon."
 
 

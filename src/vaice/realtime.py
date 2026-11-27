@@ -49,6 +49,9 @@ MAX_TOOL_ROUNDS = 2
 # server slot. 3 repeats keeps a legitimate refrain safe; the cut keeps the answer.
 LOOP_REPEATS = 3
 LOOP_MAX_BLOCK_LINES = 4
+# A block of sentences counts only with this many words: "Hello! Hello! Hello!" or "Up. Up. Up." is
+# emphasis, not a loop. A short sentence that really loops is still cut, as a longer block.
+LOOP_MIN_SENTENCE_WORDS = 3
 _SENTENCE_END = re.compile(r"[.!?]+")
 
 ABANDONED = "the app is stopping; the reply is abandoned"
@@ -330,28 +333,26 @@ def _normalized(line: str) -> str:
 
 
 def _loop_block(units: Sequence[str], repeats: int = LOOP_REPEATS,
-                max_block: int = LOOP_MAX_BLOCK_LINES) -> int | None:
+                max_block: int = LOOP_MAX_BLOCK_LINES, min_words: int = 0) -> int | None:
     """The size, in units, of the block repeated `repeats` times back-to-back at the end of
-    `units` (non-empty lines or sentences, compared normalized); None when there is no such block."""
+    `units` (lines or sentences, compared normalized) and holding at least `min_words` words;
+    None when there is no such block."""
     norm = [_normalized(unit) for unit in units]
     for size in range(1, max_block + 1):
         need = size * repeats
-        if len(norm) >= need and norm[-need:] == norm[-size:] * repeats:
+        if (len(norm) >= need and norm[-need:] == norm[-size:] * repeats
+                and sum(len(unit.split()) for unit in norm[-size:]) >= min_words):
             return size
     return None
 
 
 def _sentence_cuts(line: str) -> list[int]:
-    """Where `line` splits into sentences: after a run of `.`, `!` or `?` that a space, a capital
-    letter or a list marker follows ("…MacBook Pro.The Mac…", "…Pro.- Name"). A terminator with
-    nothing after it yet is no cut, so while streaming the sentence still being written is not
-    compared; a period inside "3.5 GB" or "e.g. this" is no cut either."""
-    cuts = []
-    for match in _SENTENCE_END.finditer(line):
-        end = match.end()
-        if end < len(line) and (line[end].isspace() or line[end].isupper() or line[end] in "-*#•"):
-            cuts.append(end)
-    return cuts
+    """Where `line` splits into sentences: after every run of `.`, `!` or `?` that something
+    follows, a space or not ("…MacBook Pro.The Mac…", "…EST.2026-11-14…"). This also splits
+    "3.5" or "e.g."; a cut only matters when whole blocks then repeat, and `_loop_trimmed` asks
+    such a block for `LOOP_MIN_SENTENCE_WORDS` words. A terminator with nothing after it yet is no
+    cut, so while streaming the sentence still being written is not compared."""
+    return [match.end() for match in _SENTENCE_END.finditer(line) if match.end() < len(line)]
 
 
 def _units(text: str, *, final: bool, sentences: bool) -> list[tuple[int, int]]:
@@ -370,7 +371,7 @@ def _units(text: str, *, final: bool, sentences: bool) -> list[tuple[int, int]]:
             if last and not complete:
                 break  # the part still being written
             piece = line[a:b]
-            if piece.strip():
+            if _normalized(piece):  # "...", "---" or "**" alone is no unit: they all compare equal
                 lead = len(piece) - len(piece.lstrip())
                 spans.append((offset + a + lead, offset + a + len(piece.rstrip())))
         offset = line_end + 1
@@ -383,10 +384,10 @@ def _loop_trimmed(joined: str, *, final: bool = False) -> str | None:
     line with no newline (#156). While streaming only completed units are compared, so a third
     "Status: ready" that is the start of "Status: ready for input" is not cut as a loop; at the
     end of the response the last unit counts too. The text before the cut is kept as written."""
-    for sentences in (False, True):
+    for sentences in (False, True):  # lines first, as before; then sentences
         spans = _units(joined, final=final, sentences=sentences)
         units = [joined[a:b] for a, b in spans]
-        block = _loop_block(units)
+        block = _loop_block(units, min_words=LOOP_MIN_SENTENCE_WORDS if sentences else 0)
         if block is not None:
             kept = _trim_repeats(units, block)
             return joined[: spans[len(kept) - 1][1]]
