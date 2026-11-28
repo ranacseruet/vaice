@@ -425,14 +425,66 @@ def test_a_second_tool_round_drops_the_text_that_preceded_it_too(realtime):
 
 
 def test_a_repeated_tail_is_detected_as_a_loop():
-    assert rt._loop_block("It is noon.\n" + "2026-11-14 21:34:00 EST\n" * rt.LOOP_REPEATS) == 1
-    assert rt._loop_block("It is noon.\n" + "a\nb\nc\n" * rt.LOOP_REPEATS) == 3
+    def block(text):
+        return rt._loop_block(text.splitlines())
+
+    assert block("It is noon.\n" + "2026-11-14 21:34:00 EST\n" * rt.LOOP_REPEATS) == 1
+    assert block("It is noon.\n" + "a\nb\nc\n" * rt.LOOP_REPEATS) == 3
     # near-identical lines count as repeats: the observed loops vary punctuation and case
-    assert rt._loop_block("It is noon.\n" + "2026-11-14 21:34:00 EST\n2026-11-14 21:34:00 EST.\n" * 2) == 1
-    assert rt._loop_block("It is noon.\nOnce more.\n") is None
-    assert rt._loop_block("same\nsame\n") is None  # two repeats: not yet a loop
-    assert rt._loop_block("") is None
-    assert rt._loop_block("a\nb\nc\nd\ne\n" * rt.LOOP_REPEATS) is None  # past the block cap
+    assert block("It is noon.\n" + "2026-11-14 21:34:00 EST\n2026-11-14 21:34:00 EST.\n" * 2) == 1
+    assert block("It is noon.\nOnce more.\n") is None
+    assert block("same\nsame\n") is None  # two repeats: not yet a loop
+    assert block("") is None
+    assert block("a\nb\nc\nd\ne\n" * rt.LOOP_REPEATS) is None  # past the block cap
+
+
+# The reply from a live session (#156): one sentence three times on one line, no newline between.
+ONE_LINE_LOOP = ("The Mac in this session is named MacBook Pro." * 3) + "- Name: MacBook Pro - Date and Time: "
+
+
+def test_a_sentence_repeated_within_one_line_is_a_loop():
+    sentence = "The Mac in this session is named MacBook Pro."
+    # streaming: the third copy is complete once the next unit starts, and the reply is cut there
+    assert rt._loop_trimmed(ONE_LINE_LOOP) == sentence
+    assert rt._loop_trimmed("It is noon. " + "The clock ticks. " * rt.LOOP_REPEATS + "The") == "It is noon."
+    # copies joined with no space at all (the timestamp loop on one line)
+    assert rt._loop_trimmed("It is noon." + "2026-11-14 21:34:00 EST." * rt.LOOP_REPEATS + "2026") == "It is noon."
+    assert rt._loop_trimmed("the time is noon." * rt.LOOP_REPEATS + "the time") == "the time is noon."
+    # at the end of the response the last sentence counts too
+    assert rt._loop_trimmed("A sentence here." * rt.LOOP_REPEATS, final=True) == "A sentence here."
+    ticks = "It is noon.\nThe clock ticks. The clock ticks! the clock ticks?"
+    assert rt._loop_trimmed(ticks, final=True) == "It is noon."
+
+
+def test_a_sentence_still_being_written_is_not_compared():
+    # the third "Status: ready." may go on ("… for input."): nothing follows its period yet
+    assert rt._loop_trimmed("Status: ready. Status: ready. Status: ready.") is None
+    assert rt._loop_trimmed("Status: ready. Status: ready. Status: ready") is None
+
+
+def test_repeated_short_sentences_below_the_limit_and_non_sentence_periods_are_kept():
+    assert rt._loop_trimmed("Yes, that is right. Yes, that is right. Done.", final=True) is None  # two copies
+    assert rt._loop_trimmed("It has 3.5 GB free. 3.5 GB of 8 GB.", final=True) is None
+    # periods inside numbers and abbreviations split, but nothing there repeats as a whole block
+    assert rt._loop_trimmed("v1.2.3 v1.2.3 v1.2.3 is out, e.g. today.", final=True) is None
+
+
+def test_short_emphatic_repeats_are_not_a_loop_but_a_runaway_short_sentence_is():
+    # under LOOP_MIN_SENTENCE_WORDS a block is emphasis: the reply goes on
+    assert rt._loop_trimmed("Hello! Hello! Hello! How are you today?") is None
+    assert rt._loop_trimmed("Your volume is up. Up. Up. Up.", final=True) is None
+    # the same short sentence looping on is caught as a longer block (3 x 3 copies)
+    assert rt._loop_trimmed("It is noon. " + "Hi. " * 9 + "Hi") == "It is noon."
+
+
+def test_units_of_punctuation_alone_are_not_a_loop():
+    assert rt._loop_trimmed("Wait... ... ... ... okay") is None
+    assert rt._loop_trimmed("Answer.\n---\n---\n---\nmore") is None
+
+
+def test_the_text_before_a_sentence_loop_is_kept_as_written():
+    text = "First line.\n\nIt is noon.  That is all. That is all. That is all. That"
+    assert rt._loop_trimmed(text) == "First line.\n\nIt is noon."
 
 
 def test_the_repeated_tail_is_dropped_entirely():
@@ -476,6 +528,25 @@ def test_a_loop_with_variants_is_cut_and_the_record_keeps_the_answer(realtime, c
 
     assert turn.assistant_text == "It is noon."
     assert "repetition loop" in caplog.text
+    wait_for_threads_to_end()
+
+
+def test_a_sentence_loop_on_one_line_is_cut_off_after_the_answer(realtime, caplog):
+    """#156: the same sentence three times on one line with no newline is a loop too: the reply
+    is cut there and the record keeps one copy (the whole text was the loop)."""
+    server = realtime(reply=[
+        ("text", "The Mac in this session is named MacBook Pro."), ("audio", pcm(1)),
+        ("text", "The Mac in this session is named MacBook Pro."),
+        ("text", "The Mac in this session is named MacBook Pro."),
+        ("text", "- Name: MacBook Pro"), ("audio", pcm(1)), ("done",),
+    ])
+    turn = Turn()
+    with caplog.at_level(logging.WARNING, logger="vaice.realtime"):
+        frames = drive(RealtimeResponder(server.url, ""), turn=turn)
+
+    assert turn.assistant_text == "The Mac in this session is named MacBook Pro."
+    assert "repetition loop" in caplog.text
+    assert [len(samples) for _, samples in frames] == [1]  # the audio past the cut was never handed out
     wait_for_threads_to_end()
 
 

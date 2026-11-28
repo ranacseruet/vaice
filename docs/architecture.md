@@ -187,8 +187,10 @@ sequenceDiagram
 ```
 
 The generator never blocks: it polls the queue every `realtime.POLL_SECONDS` and returns as soon as the turn is closed
-(barge-in, *New conversation*) or the app is stopping. When the model asks for tools, the session thread runs a tool
-round:
+(barge-in, *New conversation*) or the app is stopping. On every text delta the session thread checks for a loop
+(`realtime._loop_trimmed`): the same block of 1 to 4 lines, or of 1 to 4 sentences of at least 3 words within a line,
+three times back to back. If it finds one, it records the text without the repeated tail and closes the socket, which
+ends the reply. When the model asks for tools, the session thread runs a tool round:
 
 ```mermaid
 flowchart TD
@@ -553,7 +555,7 @@ src/vaice/
   browse_task.py    Opt-in: the `browse`, `browser_status` and `stop_browsing` skill definitions and the pure pieces (fixed lines, step questions, result text, the status record, the last ended task's report and the line that carries a finished task's summary into the prompt)
   browse_gate.ts    The Pi extension the Pi preset loads: the approval policy for the browser's tools (explicit read/navigation allowlist runs, everything else asks; navigation with initScript or non-http(s) URLs asks) and the marker notification the tripwire waits for; shipped in the package
   audio.py          Mic frame → mono PCM16 at the model's rate (resampled via scipy) and back to float32; the `AudioFrame` type
-  realtime.py       llama-server /v1/realtime: `RealtimeResponder` (the reply session: tool rounds, repetition breaker), the parallel transcription session, text-input speech (`speak`), `spoken_part`, startup check
+  realtime.py       llama-server /v1/realtime: `RealtimeResponder` (the reply session: tool rounds, the line and sentence repetition cut), the parallel transcription session, text-input speech (`speak`), `spoken_part`, startup check
   assistant.py      `Assistant`: a `RealtimeResponder` with the skills as tools, the per-reply executor, Run/Cancel, and the browser task thread
 tests/
   fake_realtime.py  Fake /v1/realtime WebSocket + HTTP server for testing the assistant end to end

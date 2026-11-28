@@ -96,6 +96,7 @@ the pull requests (#53 to #126).
   with the screen skill on). Each task's prompt also carries today's date, so "this week" means now.
 
 ### Fixed
+- The repetition cut (`realtime._loop_trimmed`) now also catches a sentence repeated 3 times back to back within one line, with no newline between the copies ("…MacBook Pro.The Mac … MacBook Pro.The Mac …"), as well as repeated lines. A one-line loop no longer runs to `max_output_tokens` (#156).
 - `AcpAgent._Client.request_permission` now serializes concurrent permission requests with an `asyncio.Lock` and tracks in-flight questions with a counter so parallel requests do not clobber each other or break response-before-cancel ordering (#163).
 - `AcpAgent._connect` now ends the agent process on any failure during `initialize()` instead of leaving an uninitialized connection cached for the next browser task (#164).
 - *Tool activity* now uses dynamic backtick fencing for arguments and output so untrusted tool results cannot break out of code blocks, and UI chat/report rendering escapes raw HTML tags so `<img>` and similar elements cannot trigger remote fetches (#161).
